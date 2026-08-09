@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agt"
+version = "0.1.0"
+description = "Local AI agent CLI bridge — discover, register, and invoke local AI coding agents (Claude Code, Codex, etc.) from the terminal."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "click>=8.0",
+]
+
+[project.scripts]
+agt = "agt.cli.main:cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["agt"]

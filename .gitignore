@@ -1,0 +1,31 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# uv
+uv.lock
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Tooling caches / test artifacts
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Runtime artifacts (Phase 1 sessions + workspaces)
+.agt/
+
+openspec/

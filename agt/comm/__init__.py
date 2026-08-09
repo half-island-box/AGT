@@ -1,0 +1,1 @@
+"""Communication subsystem (Phase 2 placeholder)."""
