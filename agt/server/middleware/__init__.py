@@ -1,0 +1,1 @@
+"""Server-side middleware (auth, logging, etc.)."""

@@ -2,7 +2,7 @@
 
 Local AI agent CLI bridge — discover, register, and invoke local AI coding agents (Claude Code, Codex, Cursor Agent, etc.) from the terminal.
 
-`agt` is a Python re-implementation of the local-daemon layer described in [docs/spec/local-agent-runtime-flow.md](docs/spec/local-agent-runtime-flow.md). Phase 1 implements local invocation only; Phase 2 will add persistent server connection for task dispatch.
+`agt` is a Python re-implementation of the local-daemon layer described in [docs/spec/local-agent-runtime-flow.md](docs/spec/local-agent-runtime-flow.md). Phase 2 adds a local Server + background Daemon for task queuing and concurrent multi-agent execution.
 
 ## Install
 
@@ -55,6 +55,84 @@ agt> exit
 👋 Bye!
 ```
 
+## Phase 2: Server + background Daemon
+
+Phase 1 commands (`probe` / `run` / `chat`) still work **without** any server. Phase 2 adds an opt-in server + daemon pair for task queuing, concurrent execution, and richer reporting:
+
+```bash
+# Terminal 1: start the Server (FastAPI on 127.0.0.1:8420, SQLite-backed)
+$ agt server start
+[uvicorn] agt-server ready on 127.0.0.1:8420
+
+# Terminal 2: start the background Daemon (polls Server for tasks)
+$ AGT_SERVER_URL=http://127.0.0.1:8420 agt daemon start
+2026-08-09 ... Registered runtimes with Server
+
+# Terminal 3: submit a task to the Server
+$ agt task submit -p "say hi in 3 words"
+task_id=79dd86c7
+  query status with: agt task status 79dd86c7
+
+$ agt task status 79dd86c7
+task_id   : 79dd86c7
+provider  : claude
+status    : completed
+session_id: 695852fa-b891-4847-9fbe-f79d53fd675f
+exit_code : 0
+duration  : 5.08s
+
+# Multiple concurrent tasks are dequeued in parallel (up to AGT_MAX_CONCURRENT)
+$ for i in 1 2 3; do agt task submit -p "task $i" &; done
+
+# Stop the daemon when done
+$ agt daemon stop
+```
+
+The Server exposes its full API surface at <http://127.0.0.1:8420/docs> (FastAPI auto-generated OpenAPI).
+
+### New env vars (Phase 2)
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `AGT_SERVER_PORT` | `8420` | Server TCP port |
+| `AGT_SERVER_HOST` | `127.0.0.1` | Server bind address (localhost-only) |
+| `AGT_DB_PATH` | `~/.agt/agt.db` | SQLite database file |
+| `AGT_DAEMON_PORT` | `8421` | Local resource server (only for agent subprocesses) |
+| `AGT_SERVER_SECRET` | — | **Phase 3, required.** Shared HMAC secret between Server and Daemon for task-scoped tokens. Generate with `openssl rand -hex 32`. |
+| `AGT_DAEMON_LOCAL_TOKEN` | random per launch | Phase 3. Token for `X-Daemon-Local-Token` on the local resource server. Auto-rotated each daemon restart. |
+
+`AGT_SERVER_URL` is read by both the CLI's `task` commands and the Daemon.
+
+## Phase 3: Task-scoped tokens (callback auth)
+
+Phase 3 introduces HMAC-signed tokens so that agent subprocesses can call back
+to the Server (e.g. reporting progress) without a long-lived WebSocket. The
+Daemon automatically signs a fresh token per spawned task and injects it via
+the `AGT_TASK_TOKEN` environment variable.
+
+```bash
+# Quick start — Phase 3 requires a shared HMAC secret between Server and Daemon:
+$ export AGT_SERVER_SECRET=$(openssl rand -hex 32)
+
+# Server reads it on startup (will refuse to start without it):
+$ agt server start
+
+# Daemon reads it on startup (silently skips token injection if unset):
+$ agt daemon start
+```
+
+For manually testing the Server's `/api/agent/*` endpoints (curl, notebooks),
+issue a token from the CLI:
+
+```bash
+$ TOKEN=$(AGT_SERVER_SECRET=$AGT_SERVER_SECRET agt token issue --task-id mytask)
+$ curl -X POST http://127.0.0.1:8420/api/agent/callback \
+    -H "X-Task-Token: $TOKEN" -H "X-Task-Id: mytask" \
+    -H "Content-Type: application/json" -d '{...}'
+```
+
+See [`docs/cli/commands.md`](docs/cli/commands.md) for full reference.
+
 ## Configuration
 
 All configuration is via `AGT_*` environment variables (read by `DaemonConfig.from_env()`):
@@ -71,12 +149,11 @@ All configuration is via `AGT_*` environment variables (read by `DaemonConfig.fr
 | `AGT_CLAUDE_PATH` | — | Override path to `claude` binary |
 | `AGT_EXTRA_AGENTS` | — | Extra agent definitions: `cmd:provider:Display,cmd:provider:Display` |
 
-## Phase 1 limitations
+## Phase 2 limitations
 
-- **No server connection.** The persistent daemon↔server link lives in Phase 2.
-- **No `--resume` session-id extraction from agent output.** Phase 1 relies on the agent to echo a session id in stdout; if the agent doesn't, the session is recorded as `None` and the next turn starts fresh. A robust fallback that scans `~/.claude/projects/<hash>/*.jsonl` for the newest file is a known follow-up.
-- **No workspace / repo / skill-bundle preparation** before spawning the agent.
-- **One task at a time.** `AGT_MAX_CONCURRENT` is wired through but Phase 1 has no scheduler.
+- **Localhost only.** Server binds to `127.0.0.1`; no auth. Multi-machine / remote daemon support is Phase 3.
+- **No WebSocket.** Phase 2 uses HTTP. WS-RPC for the rare Uncertain-frame scenarios is Phase 3.
+- **No multi-agent orchestration.** Tasks are 1:1 with one agent run. `Task.parent_task_id` is persisted (Phase 3 placeholder) but no orchestrator reads it yet.
 
 ## Architecture
 

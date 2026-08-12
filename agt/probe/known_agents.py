@@ -24,6 +24,7 @@ KNOWN_AGENTS: list[KnownAgent] = [
     KnownAgent("qwen", "qwen", "Qwen CLI"),
     KnownAgent("kimi", "kimi", "Kimi CLI"),
     KnownAgent("opencode", "opencode", "OpenCode CLI"),
+    KnownAgent("openclaw", "openclaw", "OpenClaw CLI"),
 ]
 
 

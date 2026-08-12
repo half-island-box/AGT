@@ -63,11 +63,16 @@ class Daemon:
         provider: str = "claude",
         prompt: str = "",
         task_id: str | None = None,
+        resume_session_id: str | None = None,
     ) -> TaskResult:
         """Execute one prompt against the named provider.
 
         ``task_id`` lets callers (e.g. ``agt chat``) keep the same logical task
         across multiple runs so the same Claude Code session is resumed.
+
+        ``resume_session_id`` overrides SessionStore lookup; used by the
+        background daemon when Server provides the session pointer in the
+        task payload.
         """
         if not self._started:
             await self.start()
@@ -79,22 +84,24 @@ class Daemon:
             )
 
         effective_task_id = task_id or uuid.uuid4().hex[:8]
+
+        # Resolve the resume session: explicit override wins, else SessionStore.
+        if resume_session_id is None and task_id is not None:
+            resume_session_id = self.session_store.get(effective_task_id, provider)
+
         task = Task(
             prompt=prompt,
             provider=provider,
             task_id=effective_task_id,
             work_dir=self.config.work_dir_root / provider / effective_task_id,
-            resume_session_id=(
-                self.session_store.get(effective_task_id, provider)
-                if task_id is not None
-                else None
-            ),
+            resume_session_id=resume_session_id,
         )
 
         executor = TaskExecutor(runtime=runtime, config=self.config)
         result = await executor.execute(task)
 
-        # Update SessionStore based on the outcome.
+        # Update SessionStore based on the outcome (only when caller opted
+        # into session continuity by passing a task_id).
         if task_id is not None:
             if result.resume_rejected:
                 self.session_store.delete(task_id)

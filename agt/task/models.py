@@ -25,6 +25,12 @@ class Task:
     # Set by Daemon (not by users) just before delegation to TaskExecutor.
     resume_session_id: str | None = None
 
+    # ── Phase 3 placeholder ────────────────────────────────────
+    # Multi-agent collaboration: a task can declare itself a child of another
+    # task. The orchestrator in Phase 3 reads this to assemble sub-task DAGs.
+    # Phase 2 simply persists it.
+    parent_task_id: str | None = None
+
 
 @dataclass
 class TaskResult:

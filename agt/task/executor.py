@@ -19,6 +19,7 @@ from pathlib import Path
 
 from ..daemon.config import DaemonConfig
 from ..runtime.models import Runtime
+from ..server.services.auth_service import TaskToken
 from .models import Task, TaskResult
 from .stream import StreamReader
 
@@ -123,7 +124,7 @@ class TaskExecutor:
 
         cmd = self._build_command(binary, task)
         work_dir = self._ensure_work_dir(task)
-        env = self._build_env()
+        env = self._build_env(task)
 
         start = time.monotonic()
         process = await asyncio.create_subprocess_exec(
@@ -201,10 +202,35 @@ class TaskExecutor:
         cmd += ["-p", task.prompt]
         return cmd
 
-    def _build_env(self) -> dict[str, str]:
+    def _build_env(self, task: Task) -> dict[str, str]:
         env = os.environ.copy()
         # Hint to Claude Code (and friends) that no TTY is attached.
         env.setdefault("CLAUDE_CODE_HEADLESS", "1")
+        # Pass the daemon's local resource port to spawned agents so they can
+        # call back via 127.0.0.1 for repo checkout etc.
+        daemon_port = getattr(self._config, "daemon_port", None)
+        if daemon_port:
+            env.setdefault("AGT_DAEMON_PORT", str(daemon_port))
+        # Token for X-Daemon-Local-Token on LocalResourceServer endpoints.
+        local_token = getattr(self._config, "local_token", "")
+        if local_token:
+            env.setdefault("AGT_DAEMON_TOKEN", local_token)
+        # Inject a task-scoped HMAC token so the agent subprocess can call
+        # back to the Server (e.g. POST /api/agent/callback). The Server
+        # validates X-Task-Token + X-Task-Id against the shared secret.
+        agent_id = getattr(self._config, "daemon_id", "anonymous")
+        workspace_id = str(task.work_dir) if task.work_dir else ""
+        secret = getattr(self._config, "server_secret", "")
+        if secret:
+            token = TaskToken.create(
+                agent_id=agent_id,
+                task_id=task.task_id,
+                workspace_id=workspace_id,
+                secret=secret,
+            )
+            env["AGT_TASK_TOKEN"] = token
+            env["AGT_SERVER_URL"] = self._config.server_url
+            env["AGT_TASK_ID"] = task.task_id
         return env
 
     def _ensure_work_dir(self, task: Task) -> Path:
