@@ -111,6 +111,7 @@ class AgentProbe:
             version=version,
             provider=known.provider,
             display_name=known.display_name,
+            cli_style=known.cli_style,
         )
 
 

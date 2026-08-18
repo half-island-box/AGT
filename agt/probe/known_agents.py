@@ -8,17 +8,28 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class KnownAgent:
-    """A known agent CLI command registered in the default list."""
+    """A known agent CLI command registered in the default list.
+
+    ``cli_style`` selects how ``TaskExecutor`` builds the non-interactive
+    command line for this agent:
+
+    - ``"claude"`` (default): ``<bin> [--resume <id>] -p <prompt>``
+      — Claude Code and most ``-p``-style CLIs.
+    - ``"codex"``: ``<bin> exec [resume <id>] <prompt>``
+      — Codex CLI, whose non-interactive mode is the ``exec``
+      subcommand with a positional prompt.
+    """
 
     command: str
     provider: str
     display_name: str
+    cli_style: str = "claude"
 
 
 # Built-in agents maintained by the project.
 KNOWN_AGENTS: list[KnownAgent] = [
     KnownAgent("claude", "claude", "Claude Code"),
-    KnownAgent("codex", "codex", "Codex CLI"),
+    KnownAgent("codex", "codex", "Codex CLI", cli_style="codex"),
     KnownAgent("cursor-agent", "cursor", "Cursor Agent"),
     KnownAgent("copilot", "copilot", "GitHub Copilot"),
     KnownAgent("qwen", "qwen", "Qwen CLI"),

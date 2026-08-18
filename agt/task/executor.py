@@ -94,9 +94,13 @@ def _extract_session_id_from_claude_projects(work_dir: Path | None) -> str | Non
     return _newest_jsonl_session(projects_root)
 
 
-def _extract_session_id(stdout: str, work_dir: Path | None) -> str | None:
-    """Extract a fresh session id, first from stdout, then from disk."""
-    from_output = _extract_session_id_from_output(stdout)
+def _extract_session_id(stdout: str, stderr: str, work_dir: Path | None) -> str | None:
+    """Extract a fresh session id from output (stdout+stderr), then disk.
+
+    Some CLIs print their session banner on stderr (codex exec does),
+    so both streams are searched.
+    """
+    from_output = _extract_session_id_from_output(stdout + "\n" + stderr)
     if from_output:
         return from_output
     return _extract_session_id_from_claude_projects(work_dir)
@@ -190,7 +194,7 @@ class TaskExecutor:
                 session_id = task.resume_session_id
                 resume_rejected = False
         else:
-            session_id = _extract_session_id(stdout, work_dir)
+            session_id = _extract_session_id(stdout, stderr, work_dir)
             resume_rejected = False
 
         if exit_code == 0:
@@ -268,7 +272,24 @@ class TaskExecutor:
     # ── Command construction ────────────────────────────────────
 
     def _build_command(self, binary: Path, task: Task) -> list[str]:
-        cmd: list[str] = [str(binary)]
+        """Build the non-interactive command line for the agent CLI.
+
+        Style is taken from the probed ``AgentEntry.cli_style``:
+
+        - ``"codex"``: ``<bin> exec [resume <id>] <prompt>`` — Codex's
+          non-interactive mode is the ``exec`` subcommand with a
+          positional prompt; resume is a nested subcommand.
+        - ``"claude"`` (default): ``<bin> [--resume <id>] -p <prompt>``
+          — Claude Code and most ``-p``-style CLIs.
+        """
+        style = getattr(self._runtime.agent_entry, "cli_style", "claude") or "claude"
+        if style == "codex":
+            cmd: list[str] = [str(binary), "exec"]
+            if task.resume_session_id:
+                cmd += ["resume", task.resume_session_id]
+            cmd += [task.prompt]
+            return cmd
+        cmd = [str(binary)]
         if task.resume_session_id:
             cmd += ["--resume", task.resume_session_id]
         cmd += ["-p", task.prompt]

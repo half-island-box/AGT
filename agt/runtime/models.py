@@ -17,6 +17,10 @@ class AgentEntry:
     provider: str
     display_name: str
     default_model: str | None = None
+    # How TaskExecutor builds the non-interactive command for this CLI
+    # ("claude" → `-p <prompt>`; "codex" → `exec <prompt>`). Mirrors
+    # KnownAgent.cli_style; see agt/probe/known_agents.py.
+    cli_style: str = "claude"
 
     def is_available(self) -> bool:
         """Check whether the executable still exists and is runnable."""
