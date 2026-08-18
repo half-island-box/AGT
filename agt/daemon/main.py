@@ -26,7 +26,7 @@ from ..server.services.auth_service import TaskToken
 from .config import DaemonConfig
 from .daemon import Daemon
 from .local_server import LocalResourceServer
-from .ws_claim import ClaimStateMachine, claim_tasks_ws_first
+from .ws_claim import ClaimStateMachine, claim_tasks_ws_first, report_task_ws_first
 from .ws_server import DaemonWsServer
 
 log = logging.getLogger("agt.daemon")
@@ -152,7 +152,11 @@ async def _claim_loop(
 
         for task_payload in tasks:
             task = asyncio.create_task(
-                _execute_one(client, daemon, semaphore, shutdown, task_payload)
+                _execute_one(
+                    client, daemon, semaphore, shutdown, task_payload,
+                    ws_server=ws_server,
+                    claim_state=claim_state,
+                )
             )
             spawned.add(task)
             task.add_done_callback(spawned.discard)
@@ -227,11 +231,20 @@ async def _execute_one(
     semaphore: asyncio.Semaphore,
     shutdown: asyncio.Event,
     task_payload: dict,
+    *,
+    ws_server: DaemonWsServer | None = None,
+    claim_state: ClaimStateMachine | None = None,
 ) -> None:
     async with semaphore:
         if shutdown.is_set():
             return
         task_id = task_payload["task_id"]
+        # Resolve the report link: use the same WS source the claim
+        # used (re-resolved at execute time in case the link rotated
+        # between claim and report).
+        ws_source = (
+            _resolve_ws_source(ws_server) if ws_server is not None else None
+        )
         try:
             result = await daemon.run(
                 provider=task_payload["provider"],
@@ -251,6 +264,8 @@ async def _execute_one(
                 status="failed",
                 session_id=None,
                 resume_rejected=False,
+                ws_source=ws_source,
+                claim_state=claim_state,
             )
             return
 
@@ -264,6 +279,8 @@ async def _execute_one(
             status=result.status,
             session_id=result.session_id,
             resume_rejected=result.resume_rejected,
+            ws_source=ws_source,
+            claim_state=claim_state,
         )
 
 
@@ -278,18 +295,42 @@ async def _safe_report(
     status: str,
     session_id: str | None,
     resume_rejected: bool,
+    ws_source: WsRpcLink | None = None,
+    claim_state: ClaimStateMachine | None = None,
 ) -> None:
+    """Best-effort result write. WS-first in reverse-dial mode; HTTP otherwise.
+
+    ``ws_source``/``claim_state`` are both ``None`` for local-daemon
+    mode (HTTP only). The WS-first path is gated on ``claim_state``
+    being non-``None`` so the orchestrator knows to honor the Uncertain
+    safety window.
+    """
     try:
-        await client.report_task(
-            task_id=task_id,
-            exit_code=exit_code,
-            stdout=stdout,
-            stderr=stderr,
-            duration=duration,
-            status=status,
-            session_id=session_id,
-            resume_rejected=resume_rejected,
-        )
+        if claim_state is not None:
+            await report_task_ws_first(
+                wsrpc=ws_source,
+                http_client=client,
+                state=claim_state,
+                task_id=task_id,
+                exit_code=exit_code,
+                stdout=stdout,
+                stderr=stderr,
+                duration=duration,
+                status=status,
+                session_id=session_id,
+                resume_rejected=resume_rejected,
+            )
+        else:
+            await client.report_task(
+                task_id=task_id,
+                exit_code=exit_code,
+                stdout=stdout,
+                stderr=stderr,
+                duration=duration,
+                status=status,
+                session_id=session_id,
+                resume_rejected=resume_rejected,
+            )
     except Exception as exc:
         log.warning("report failed for task %s: %s", task_id, exc)
 

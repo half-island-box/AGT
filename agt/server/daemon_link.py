@@ -25,11 +25,12 @@ from typing import Any
 
 import websockets
 
-from ..comm.errors import WSRPCUnavailable
+from ..comm.errors import RPCRejected, WSRPCUnavailable
 from ..comm.wsrpc_link import WsRpcLink
 from .database import session_scope
 from .services.auth_service import TaskToken
 from .services.claim_service import claim_tasks_for_daemon
+from .services.report_service import record_task_result_for_daemon
 from .services.runtime_service import upsert_daemon_runtimes
 
 log = logging.getLogger("agt.server.daemon_link")
@@ -151,6 +152,8 @@ class DaemonLink:
             return await self._handle_claim(body)
         if method == "runtimes.register":
             return await self._handle_runtimes_register(body)
+        if method == "tasks.report":
+            return await self._handle_tasks_report(body)
         raise ValueError({"type": "unknown_method", "message": method})
 
     async def _handle_claim(self, body: dict) -> dict:
@@ -193,6 +196,56 @@ class DaemonLink:
                 runtimes=runtimes,
             )
         return {"registered": count}
+
+    async def _handle_tasks_report(self, body: dict) -> dict:
+        """Record a daemon's task execution result over the reverse-dial link.
+
+        ``daemon_id`` comes from the configured target, never the body —
+        a misbehaving daemon can't report on behalf of another. This is
+        the reverse-dial counterpart to ``POST /api/tasks/{id}/report``;
+        both paths funnel through :func:`record_task_result_for_daemon`.
+
+        Business rejections (task missing / not owned) surface as
+        ``RPCRejected(404|403)`` so the daemon can tell the difference
+        between a permanent failure (don't retry) and a transport issue
+        (do retry via HTTP fallback). Other ``ValueError`` payloads fall
+        through to the link's generic ``validation_error`` shape.
+        """
+        required = (
+            "task_id", "exit_code", "stdout", "stderr", "duration", "status",
+        )
+        for field_name in required:
+            if field_name not in body:
+                raise ValueError({
+                    "type": "validation_error",
+                    "message": f"missing field: {field_name}",
+                })
+        try:
+            async with session_scope(self._session_factory) as db:
+                return await record_task_result_for_daemon(
+                    db,
+                    daemon_id=self.daemon_id,
+                    task_id=body["task_id"],
+                    exit_code=int(body["exit_code"]),
+                    stdout=str(body["stdout"]),
+                    stderr=str(body["stderr"]),
+                    duration=float(body["duration"]),
+                    status=str(body["status"]),
+                    session_id=body.get("session_id"),
+                    resume_rejected=bool(body.get("resume_rejected", False)),
+                )
+        except ValueError as exc:
+            payload = (
+                exc.args[0] if exc.args and isinstance(exc.args[0], dict) else {}
+            )
+            err_type = payload.get("type")
+            if err_type == "task_not_found":
+                raise RPCRejected(404, payload) from None
+            if err_type == "task_not_owned":
+                raise RPCRejected(403, payload) from None
+            # Unknown ValueError shape — let wsrpc_link turn it into
+            # a generic validation_error response.
+            raise
 
 
 __all__ = ["DaemonLink"]

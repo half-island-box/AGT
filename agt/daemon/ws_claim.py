@@ -35,6 +35,7 @@ timeout_ms)`` and ``supports_rpc_v1``.
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import TYPE_CHECKING
 
@@ -43,6 +44,8 @@ from ..comm.errors import RPCRejected, WSRPCUnavailable, WSRPCUncertain
 if TYPE_CHECKING:
     from ..comm.client import ServerClient
     from ..comm.wsrpc_link import WsRpcLink
+
+log = logging.getLogger("agt.daemon.ws_claim")
 
 
 # `time.monotonic` is injected via a module attribute so unit tests can
@@ -116,4 +119,99 @@ async def claim_tasks_ws_first(
     # RPCRejected propagates unchanged — server's verdict is final.
 
 
-__all__ = ["ClaimStateMachine", "claim_tasks_ws_first"]
+async def report_task_ws_first(
+    *,
+    wsrpc: "WsRpcLink | None",
+    http_client: "ServerClient",
+    state: ClaimStateMachine,
+    task_id: str,
+    exit_code: int,
+    stdout: str,
+    stderr: str,
+    duration: float,
+    status: str,
+    session_id: str | None,
+    resume_rejected: bool,
+) -> bool:
+    """Write a task result via WS first; HTTP fallback when not safe.
+
+    Mirror of :func:`claim_tasks_ws_first` for the result-write path,
+    but with two semantic differences that matter for retry safety:
+
+    1. **Result writes are idempotent on the server side** — the task
+       row's terminal fields get overwritten by whichever report lands
+       last. So an Uncertain WS write followed by an HTTP retry can
+       record the same result twice without ill effect (the latest one
+       wins). We still honor the safety window to avoid hammering the
+       server mid-frame, but the retry that follows isn't dangerous.
+
+    2. **RPCRejected is NOT fatal here** — unlike claim, where an
+       explicit rejection means "this task isn't for you" and HTTP
+       fallback would be wrong. For reports, a rejection (e.g. 404 task
+       not found) usually means the WS server's view of state is
+       stale; falling back to HTTP may still succeed.
+
+    Returns True if any path recorded the result (best-effort); the
+    caller doesn't act on ``False`` beyond logging.
+    """
+    body = {
+        "task_id": task_id,
+        "exit_code": exit_code,
+        "stdout": stdout,
+        "stderr": stderr,
+        "duration": duration,
+        "status": status,
+        "session_id": session_id,
+        "resume_rejected": resume_rejected,
+    }
+
+    if wsrpc is not None and wsrpc.supports_rpc_v1 and not state.blocked:
+        try:
+            await wsrpc.call("tasks.report", body, timeout_ms=5000)
+            return True
+        except WSRPCUnavailable:
+            # Frame never left the client — HTTP fallback is safe.
+            pass
+        except WSRPCUncertain as exc:
+            # Mark the window so subsequent ticks of the claim/report
+            # loop don't double-fire. We don't block-wait here — the
+            # caller's outer scheduler will retry on the next tick,
+            # which will fall through to HTTP once the window expires.
+            state.mark_uncertain(exc.frame_sent_at)
+            log.debug(
+                "report over WS Uncertain; will retry via HTTP after "
+                "safety window (task=%s)", task_id,
+            )
+            return False
+        except RPCRejected as exc:
+            # Server explicitly rejected (typically 404 task not found).
+            # Still try HTTP — the server's view may have lagged and
+            # HTTP can succeed. log at debug since both paths log on
+            # their own failure modes.
+            log.debug(
+                "report over WS rejected (status=%s); falling back to HTTP",
+                exc.status,
+            )
+            # fall through to HTTP
+
+    # HTTP path / fallback. The result is already in our hands; failure
+    # here means we couldn't deliver it. The daemon's caller logs a
+    # single warning at the outer try/except.
+    try:
+        await http_client.report_task(
+            task_id=task_id,
+            exit_code=exit_code,
+            stdout=stdout,
+            stderr=stderr,
+            duration=duration,
+            status=status,
+            session_id=session_id,
+            resume_rejected=resume_rejected,
+        )
+        return True
+    except Exception as exc:
+        log.warning("HTTP report failed for task %s: %s", task_id, exc)
+        return False
+
+
+__all__ = ["ClaimStateMachine", "claim_tasks_ws_first", "report_task_ws_first"]

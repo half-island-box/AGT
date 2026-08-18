@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db
-from ..models import RuntimeModel, SessionModel, TaskModel
+from ..models import RuntimeModel, TaskModel
 from ..schemas import (
     ClaimRequest,
     ClaimResponse,
@@ -21,6 +21,7 @@ from ..schemas import (
     TaskStatusResponse,
 )
 from ..services.claim_service import claim_tasks_for_daemon
+from ..services.report_service import record_task_result_for_daemon
 from ..services.runtime_service import is_stale
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
@@ -137,52 +138,42 @@ async def report_task(
     payload: ReportRequest,
     db: AsyncSession = Depends(get_db),
 ) -> ReportResponse:
-    """Daemon reports the result of an executed task."""
-    task = await db.get(TaskModel, task_id)
-    if task is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="task not found")
-    if task.daemon_id != payload.daemon_id:
+    """Daemon reports the result of an executed task.
+
+    Business logic lives in :func:`record_task_result_for_daemon` so
+    the HTTP path and the reverse-dial WS path stay in lock-step.
+    """
+    try:
+        result = await record_task_result_for_daemon(
+            db,
+            daemon_id=payload.daemon_id,
+            task_id=task_id,
+            exit_code=payload.exit_code,
+            stdout=payload.stdout,
+            stderr=payload.stderr,
+            duration=payload.duration,
+            status=payload.status,
+            session_id=payload.session_id,
+            resume_rejected=payload.resume_rejected,
+        )
+        return ReportResponse(**result)
+    except ValueError as exc:
+        body = (
+            exc.args[0] if exc.args and isinstance(exc.args[0], dict) else {}
+        )
+        err_type = body.get("type")
+        if err_type == "task_not_found":
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="task not found"
+            )
+        if err_type == "task_not_owned":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="task not owned by this daemon",
+            )
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail="task not owned by this daemon"
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(body)
         )
-
-    task.exit_code = payload.exit_code
-    task.stdout = payload.stdout
-    task.stderr = payload.stderr
-    task.duration = payload.duration
-    task.status = payload.status
-    task.updated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-
-    if payload.resume_rejected:
-        await db.execute(
-            SessionModel.__table__.delete().where(
-                (SessionModel.task_id == task_id) & (SessionModel.provider == task.provider)
-            )
-        )
-        task.session_id = None
-    elif payload.session_id:
-        existing = (
-            await db.execute(
-                select(SessionModel).where(
-                    SessionModel.task_id == task_id, SessionModel.provider == task.provider
-                )
-            )
-        ).scalars().first()
-        if existing is None:
-            db.add(
-                SessionModel(
-                    task_id=task_id,
-                    provider=task.provider,
-                    session_id=payload.session_id,
-                    created_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-                )
-            )
-        else:
-            existing.session_id = payload.session_id
-        task.session_id = payload.session_id
-
-    await db.commit()
-    return ReportResponse(recorded=True)
 
 
 @router.get("/{task_id}/status")
