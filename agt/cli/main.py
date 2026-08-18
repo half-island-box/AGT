@@ -22,6 +22,7 @@ import click
 
 from ..comm import ServerClient
 from ..daemon.daemon import Daemon as DaemonController
+from ..runtime.models import AgentEntry
 from ..server.services.auth_service import TaskToken
 
 
@@ -121,6 +122,113 @@ def _run_local(prompt: str, provider: str) -> None:
     sys.exit(0 if result.status == "completed" else 2)
 
 
+def _local_candidate_providers(
+    controller: DaemonController | None = None,
+) -> list[str]:
+    """Run the local probe and return provider names whose binary is available.
+
+    When ``controller`` is given, reuse it so the probe cache (held on
+    ``AgentProbe``) is shared across calls — important for ``chat``, where
+    we resolve the provider once but reuse the same ``DaemonController``
+    for every turn. A fresh ``DaemonController`` would re-shell out to
+    each agent's ``--version`` on every turn.
+    """
+    async def _run(c: DaemonController) -> list[AgentEntry]:
+        return await c.probe_agents()
+
+    c = controller or DaemonController()
+    entries = asyncio.run(_run(c))
+    return [e.provider for e in entries if e.is_available()]
+
+
+def _remote_candidate_providers(
+    target_daemon_id: str, server_url: str,
+) -> list[str]:
+    """Query the Server and return provider names for online runtimes
+    on ``target_daemon_id``.
+
+    The Server's ``list_runtimes`` already filters out stale rows (rows
+    whose ``last_seen`` is past the liveness TTL), so we only need to
+    filter by ``daemon_id`` and ``status == "online"`` here.
+    """
+    async def _run() -> list[dict]:
+        async with ServerClient(base_url=server_url, daemon_id="cli-direct") as client:
+            return await client.list_runtimes()
+
+    runtimes = asyncio.run(_run())
+    return [
+        r["type"]
+        for r in runtimes
+        if r.get("daemon_id") == target_daemon_id and r.get("status") == "online"
+    ]
+
+
+def _pick_provider(
+    provider: str | None,
+    target_daemon_id: str | None,
+    server_url: str,
+    *,
+    local_controller: DaemonController | None = None,
+) -> str:
+    """Resolve the provider to use for ``run`` / ``chat``.
+
+    Decide-by-context:
+
+    - No ``--daemon`` (local): run the local probe via ``DaemonController``
+      (use ``local_controller`` if given, to share the probe cache across
+      chat turns). Filter to entries whose binary is available.
+    - With ``--daemon``: query the Server's runtime registry for that
+      daemon and filter to ``status == "online"`` rows.
+
+    Selection: ``provider`` is None → return the first entry in the
+    filtered list (preserving upstream order — probe order locally,
+    server-side ``(daemon_id, provider)`` order remotely). If ``provider``
+    is given, validate and return it; exit 2 if unavailable.
+
+    Errors out (sys.exit(2)) with a clear list of available providers
+    when the explicit one isn't found, or when no candidates exist at all.
+    """
+    if target_daemon_id is None:
+        candidates = _local_candidate_providers(local_controller)
+    else:
+        candidates = _remote_candidate_providers(target_daemon_id, server_url)
+
+    if provider is not None:
+        if provider not in candidates:
+            available = ", ".join(sorted(candidates)) or "(none)"
+            if target_daemon_id is None:
+                ctx = "locally"
+                hint = " Run `agt probe` to refresh."
+            else:
+                ctx = f"on daemon '{target_daemon_id}'"
+                hint = ""
+            click.echo(
+                f"Error: provider '{provider}' is not available {ctx}. "
+                f"Available: {available}.{hint}",
+                err=True,
+            )
+            sys.exit(2)
+        return provider
+
+    if not candidates:
+        if target_daemon_id is None:
+            click.echo(
+                "Error: no local agents available. "
+                "Install one (e.g. `claude`, `codex`) or run `agt probe` to scan.",
+                err=True,
+            )
+        else:
+            click.echo(
+                f"Error: daemon '{target_daemon_id}' has no online runtimes. "
+                f"Is the daemon running? Try "
+                f"`agt runtime list --server-url={server_url}`.",
+                err=True,
+            )
+        sys.exit(2)
+
+    return candidates[0]
+
+
 # ── run ────────────────────────────────────────────────────────────
 
 
@@ -128,9 +236,10 @@ def _run_local(prompt: str, provider: str) -> None:
 @click.option("-p", "--prompt", required=True, help="Prompt to send to the agent.")
 @click.option(
     "--provider",
-    default="claude",
-    show_default=True,
-    help="Provider key (e.g. claude, codex, cursor).",
+    default=None,
+    help="Provider key (e.g. claude, codex, cursor). "
+         "Auto-pick first available if omitted "
+         "(local probe without --daemon, daemon's runtimes with --daemon).",
 )
 @click.option(
     "--daemon",
@@ -146,7 +255,7 @@ def _run_local(prompt: str, provider: str) -> None:
 )
 def run(
     prompt: str,
-    provider: str,
+    provider: str | None,
     target_daemon_id: str | None,
     server_url: str,
 ) -> None:
@@ -155,7 +264,12 @@ def run(
     With ``--daemon`` the task is submitted to the Server, pinned to that
     daemon, and polled to completion. Without it, the local agent runs
     directly (no Server round-trip).
+
+    If ``--provider`` is omitted, the first available agent is auto-picked
+    (local probe without ``--daemon``; the target daemon's registered
+    runtimes otherwise).
     """
+    provider = _pick_provider(provider, target_daemon_id, server_url)
     if target_daemon_id is None:
         _run_local(prompt, provider)
         return
@@ -205,7 +319,6 @@ def _chat_turn_local(controller: DaemonController, provider: str, prompt: str, t
         click.echo(f"\n[stderr] {result.stderr}", nl=False)
         if not result.stderr.endswith("\n"):
             click.echo()
-    click.echo(f"\n[exit_code={result.exit_code}, duration={result.duration:.1f}s]\n")
 
 
 def _chat_turn_remote(
@@ -244,7 +357,6 @@ def _chat_turn_remote(
     stdout = data.get("stdout") or ""
     if stdout:
         click.echo(stdout, nl=not stdout.endswith("\n"))
-    click.echo(f"\n[status={data.get('status')}, exit_code={data.get('exit_code')}]\n")
 
 
 # ── chat ───────────────────────────────────────────────────────────
@@ -253,9 +365,10 @@ def _chat_turn_remote(
 @cli.command()
 @click.option(
     "--provider",
-    default="claude",
-    show_default=True,
-    help="Provider key (e.g. claude, codex, cursor).",
+    default=None,
+    help="Provider key (e.g. claude, codex, cursor). "
+         "Auto-pick first available if omitted "
+         "(local probe without --daemon, daemon's runtimes with --daemon).",
 )
 @click.option(
     "--daemon",
@@ -270,7 +383,7 @@ def _chat_turn_remote(
     envvar="AGT_SERVER_URL",
 )
 def chat(
-    provider: str,
+    provider: str | None,
     target_daemon_id: str | None,
     server_url: str,
 ) -> None:
@@ -280,8 +393,13 @@ def chat(
     daemon, and polled to completion; the shared ``task_id`` keeps the
     remote agent's session alive across turns. Without it, the local agent
     runs directly.
+
+    If ``--provider`` is omitted, the first available agent is auto-picked.
     """
     controller = DaemonController() if target_daemon_id is None else None
+    provider = _pick_provider(
+        provider, target_daemon_id, server_url, local_controller=controller,
+    )
     task_id = f"chat-{uuid.uuid4().hex[:8]}"
     mode = f"provider={provider}"
     if target_daemon_id is not None:
