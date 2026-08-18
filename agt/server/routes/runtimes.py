@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
 from fastapi import APIRouter, Depends, status
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +14,7 @@ from ..schemas import (
     RegisterResponse,
     RuntimeOut,
 )
+from ..services.runtime_service import upsert_daemon_runtimes
 
 router = APIRouter(prefix="/api/runtimes", tags=["runtimes"])
 
@@ -26,25 +25,11 @@ async def register_runtimes(
     db: AsyncSession = Depends(get_db),
 ) -> RegisterResponse:
     """Replace this daemon's runtime entries. Upserts by (daemon_id, provider)."""
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    # Wipe out the daemon's old entries first — fresh start on each registration.
-    await db.execute(delete(RuntimeModel).where(RuntimeModel.daemon_id == payload.daemon_id))
-
-    count = 0
-    for runtime in payload.runtimes:
-        db.add(
-            RuntimeModel(
-                daemon_id=payload.daemon_id,
-                provider=runtime.type,
-                name=runtime.name,
-                version=runtime.version,
-                status=runtime.status,
-                device_name=runtime.device_name,
-                last_seen=now,
-            )
-        )
-        count += 1
-    await db.commit()
+    count = await upsert_daemon_runtimes(
+        db,
+        daemon_id=payload.daemon_id,
+        runtimes=[rt.model_dump() for rt in payload.runtimes],
+    )
     return RegisterResponse(registered=count)
 
 

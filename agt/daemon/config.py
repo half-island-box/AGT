@@ -38,6 +38,13 @@ class DaemonConfig:
     # Random per-launch by default; can be pinned via AGT_DAEMON_LOCAL_TOKEN.
     local_token: str = ""
 
+    # Reverse-dial mode (Step 3.5). When True, the daemon listens on
+    # ``ws_listen_port`` for the Server to dial in, instead of dialing
+    # the Server itself. When False (default), the daemon claims via
+    # plain HTTP — the local-daemon path.
+    listen_mode: bool = False
+    ws_listen_port: int = 8422  # AGT_DAEMON_WS_PORT
+
     @property
     def server_url(self) -> str:
         """Convenience accessor for the Server base URL.
@@ -66,6 +73,8 @@ class DaemonConfig:
             ),
             daemon_port=int(os.environ.get("AGT_DAEMON_PORT", str(default.daemon_port))),
             local_token=os.environ.get("AGT_DAEMON_LOCAL_TOKEN") or secrets.token_urlsafe(32),
+            listen_mode=os.environ.get("AGT_LISTEN_MODE", "0").strip() in ("1", "true", "yes"),
+            ws_listen_port=int(os.environ.get("AGT_DAEMON_WS_PORT", str(default.ws_listen_port))),
         )
 
 

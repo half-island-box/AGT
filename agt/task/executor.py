@@ -115,7 +115,21 @@ class TaskExecutor:
 
     # ── Public entry point ──────────────────────────────────────
 
-    async def execute(self, task: Task) -> TaskResult:
+    async def execute(self, task: Task, *, interactive: bool = False) -> TaskResult:
+        """Run one agent subprocess for ``task``.
+
+        Two modes:
+
+        - **Pipe mode** (``interactive=False``, default): stdout/stderr
+          are captured so we can extract the agent's session id and
+          enforce a timeout. Used by the daemon (no parent TTY).
+
+        - **Interactive mode** (``interactive=True``): the agent inherits
+          the parent's stdio so it sees a real TTY. Some agent CLIs
+          (e.g. ``codex``) refuse to run otherwise. We give up output
+          capture and session-id extraction — the caller can't use
+          ``result.session_id`` for resume.
+        """
         binary = self._runtime.agent_entry.path
         if not binary.exists():
             raise AgentNotFoundError(
@@ -127,6 +141,9 @@ class TaskExecutor:
         env = self._build_env(task)
 
         start = time.monotonic()
+        if interactive:
+            return await self._execute_interactive(cmd, work_dir, env, start)
+
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,

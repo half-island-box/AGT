@@ -284,6 +284,56 @@ def task_status(task_id: str, server_url: str) -> None:
         click.echo("--- end stderr ---")
 
 
+# ── runtime (Phase 3.4: registry queries) ──────────────────────────
+
+
+@cli.group()
+def runtime() -> None:
+    """Runtime registry queries (talk to the Server)."""
+
+
+@runtime.command("list")
+@click.option(
+    "--server-url",
+    default="http://127.0.0.1:8420",
+    show_default=True,
+    envvar="AGT_SERVER_URL",
+)
+def runtime_list(server_url: str) -> None:
+    """List all runtimes registered by every daemon on the Server."""
+
+    async def _run() -> list[dict]:
+        async with ServerClient(
+            base_url=server_url,
+            daemon_id="cli-direct",
+        ) as client:
+            return await client.list_runtimes()
+
+    try:
+        runtimes = asyncio.run(_run())
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    if not runtimes:
+        click.echo("No runtimes registered. Start a daemon with `agt daemon start`.")
+        return
+
+    click.echo(
+        f"📡 {len(runtimes)} runtime(s) registered on the Server\n"
+    )
+    click.echo(
+        f"  {'daemon_id':<12} {'provider':<12} {'version':<12} "
+        f"{'device':<24} {'status':<8}"
+    )
+    click.echo("  " + "─" * 72)
+    for r in runtimes:
+        click.echo(
+            f"  {r['daemon_id']:<12} {r['type']:<12} {r['version']:<12} "
+            f"{r['device_name']:<24} {r['status']:<8}"
+        )
+
+
 # ── daemon (Phase 2 real implementation) ────────────────────────────
 
 

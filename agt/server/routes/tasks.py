@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-import time
 import uuid
 from datetime import datetime, timezone
 
@@ -12,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db
-from ..models import RuntimeModel, SessionModel, TaskModel
+from ..models import SessionModel, TaskModel
 from ..schemas import (
     ClaimRequest,
     ClaimResponse,
@@ -20,9 +18,9 @@ from ..schemas import (
     ReportResponse,
     SubmitTaskRequest,
     SubmitTaskResponse,
-    TaskPayload,
     TaskStatusResponse,
 )
+from ..services.claim_service import claim_tasks_for_daemon
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
@@ -40,7 +38,6 @@ async def submit_task(
     task_id = payload.task_id or _new_task_id()
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-    # If a caller-provided task_id already exists, refuse — they should use status instead.
     existing = await db.get(TaskModel, task_id)
     if existing is not None:
         raise HTTPException(
@@ -67,61 +64,24 @@ async def claim_task(
     payload: ClaimRequest,
     db: AsyncSession = Depends(get_db),
 ) -> ClaimResponse:
-    """Long-poll for one pending task. Returns immediately if one is available,
-    otherwise waits up to ``timeout_seconds`` before returning an empty list.
+    """HTTP entry point for ``claim_tasks_for_daemon``.
+
+    The wire format (``{daemon_id, max_concurrent, timeout_seconds,
+    runtime_ids}`` → ``{tasks: [...]}``) is preserved for backward
+    compatibility. The reverse-dial ``DaemonLink`` (server side) uses
+    the same service function over WebSocket.
     """
-    deadline = time.monotonic() + payload.timeout_seconds
-    poll_interval = 0.5
-
-    while True:
-        # Atomic claim: pick the oldest pending task, set status to running.
-        # Use SELECT ... LIMIT 1 FOR UPDATE if available — for SQLite we serialize
-        # via the single-connection write lock.
-        candidate = (
-            await db.execute(
-                select(TaskModel)
-                .where(TaskModel.status == "pending")
-                .order_by(TaskModel.created_at)
-                .limit(1)
-            )
-        ).scalars().first()
-
-        if candidate is not None:
-            candidate.status = "running"
-            candidate.daemon_id = payload.daemon_id
-            candidate.updated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-
-            # Look up the session if this task_id has one.
-            session_rec = (
-                await db.execute(
-                    select(SessionModel).where(
-                        SessionModel.task_id == candidate.task_id,
-                        SessionModel.provider == candidate.provider,
-                    )
-                )
-            ).scalars().first()
-            resume_session_id = session_rec.session_id if session_rec else None
-
-            payload_out = TaskPayload(
-                task_id=candidate.task_id,
-                provider=candidate.provider,
-                prompt=candidate.prompt,
-                resume_session_id=resume_session_id,
-                work_dir=None,
-            )
-            await db.commit()
-            return ClaimResponse(tasks=[payload_out])
-
-        # Nothing to do — wait briefly, unless we've run out of time.
-        if time.monotonic() >= deadline:
-            return ClaimResponse(tasks=[])
-
-        await asyncio.sleep(poll_interval)
-        # Refresh the session so we don't hold a transaction across the sleep.
-        await db.rollback()
+    tasks = await claim_tasks_for_daemon(
+        db,
+        daemon_id=payload.daemon_id,
+        max_tasks=payload.max_concurrent,
+        timeout_seconds=payload.timeout_seconds,
+        runtime_ids=payload.runtime_ids,
+    )
+    return ClaimResponse(tasks=tasks)
 
 
-@router.post("/{task_id}/report", response_model=ReportResponse)
+@router.post("/{task_id}/report")
 async def report_task(
     task_id: str,
     payload: ReportRequest,
@@ -144,7 +104,6 @@ async def report_task(
     task.updated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
     if payload.resume_rejected:
-        # Clear the session mapping — next claim creates a fresh session.
         await db.execute(
             SessionModel.__table__.delete().where(
                 (SessionModel.task_id == task_id) & (SessionModel.provider == task.provider)
@@ -152,7 +111,6 @@ async def report_task(
         )
         task.session_id = None
     elif payload.session_id:
-        # Upsert session record.
         existing = (
             await db.execute(
                 select(SessionModel).where(
@@ -177,7 +135,7 @@ async def report_task(
     return ReportResponse(recorded=True)
 
 
-@router.get("/{task_id}/status", response_model=TaskStatusResponse)
+@router.get("/{task_id}/status")
 async def task_status(
     task_id: str,
     db: AsyncSession = Depends(get_db),

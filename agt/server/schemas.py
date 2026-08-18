@@ -53,6 +53,10 @@ class ClaimRequest(BaseModel):
     daemon_id: str
     max_concurrent: int = 1
     timeout_seconds: int = 30
+    # Step 3.4: list of providers this daemon can run. Server filters
+    # pending tasks to those whose provider is in this list. Empty list
+    # → match nothing (daemon must declare its capabilities first).
+    runtime_ids: list[str] = []
 
 
 class ClaimResponse(BaseModel):
@@ -113,6 +117,11 @@ class SessionOut(BaseModel):
 class HeartbeatRequest(BaseModel):
     daemon_id: str
     active_task_count: int = 0
+    # Optional runtime snapshot. When present, the server upserts this
+    # daemon's runtimes so the registry stays in sync with whatever the
+    # daemon's probe currently sees (default = server leaves runtimes
+    # alone, preserving backward compatibility with old clients).
+    runtimes: list[RuntimeInfo] = []
 
 
 class HeartbeatResponse(BaseModel):

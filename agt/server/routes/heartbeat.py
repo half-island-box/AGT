@@ -5,12 +5,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db
-from ..models import RuntimeModel
 from ..schemas import HeartbeatRequest, HeartbeatResponse, HealthResponse
+from ..services.runtime_service import upsert_daemon_runtimes
 
 router = APIRouter(prefix="/api", tags=["meta"])
 
@@ -25,14 +24,20 @@ async def heartbeat(
     payload: HeartbeatRequest,
     db: AsyncSession = Depends(get_db),
 ) -> HeartbeatResponse:
-    """Daemon heartbeat — refreshes last_seen on all runtimes for this daemon."""
+    """Daemon heartbeat — syncs runtimes and stamps ``last_seen``.
+
+    The daemon re-pushes its current probe snapshot on every heartbeat;
+    the server replaces this daemon's rows (an empty snapshot removes
+    them) and stamps ``last_seen`` on the survivors. This is the
+    steady-state sync for local HTTP daemons; reverse-dial daemons send
+    the same snapshot over WebSocket via the ``runtimes.register`` RPC.
+    """
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    await db.execute(
-        update(RuntimeModel)
-        .where(RuntimeModel.daemon_id == payload.daemon_id)
-        .values(last_seen=now)
+    await upsert_daemon_runtimes(
+        db,
+        daemon_id=payload.daemon_id,
+        runtimes=[rt.model_dump() for rt in payload.runtimes],
     )
-    await db.commit()
     return HeartbeatResponse(ok=True, server_time=now)
 
 

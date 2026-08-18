@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from fastapi import Request
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -66,10 +67,22 @@ def bind_get_db(app, factory) -> None:
     app.dependency_overrides[get_db] = _override
 
 
+def get_config(request: Request) -> ServerConfig:
+    """FastAPI dependency that returns the ``ServerConfig`` stored on app.state.
+
+    ``ServerConfig`` is set in ``create_app`` via ``app.state.config = cfg``.
+    """
+    cfg = getattr(request.app.state, "config", None)
+    if cfg is None:
+        raise RuntimeError("ServerConfig not bound to app.state")
+    return cfg
+
+
 __all__ = [
     "make_engine",
     "make_session_factory",
     "session_scope",
     "get_db",
     "bind_get_db",
+    "get_config",
 ]

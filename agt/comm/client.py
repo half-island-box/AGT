@@ -113,12 +113,20 @@ class ServerClient:
         resp = await self._post("/api/tasks/submit", payload)
         return resp["task_id"]
 
-    async def claim_tasks(self, timeout_seconds: int = 30) -> list[dict]:
-        payload = {
+    async def claim_tasks(
+        self,
+        timeout_seconds: int = 30,
+        runtime_ids: list[str] | None = None,
+    ) -> list[dict]:
+        """Claim tasks for this daemon. ``runtime_ids`` filters by provider
+        (Step 3.4); ``None`` preserves the old "no filter" behavior."""
+        payload: dict[str, Any] = {
             "daemon_id": self._daemon_id,
             "max_concurrent": 1,
             "timeout_seconds": timeout_seconds,
         }
+        if runtime_ids is not None:
+            payload["runtime_ids"] = list(runtime_ids)
         resp = await self._post("/api/tasks/claim", payload)
         return resp.get("tasks", [])
 
@@ -167,11 +175,23 @@ class ServerClient:
 
     # ── Heartbeat ─────────────────────────────────────────────────
 
-    async def heartbeat(self, active_task_count: int = 0) -> dict:
-        payload = {
+    async def heartbeat(
+        self,
+        active_task_count: int = 0,
+        runtimes: list[dict] | None = None,
+    ) -> dict:
+        """Send a heartbeat. ``runtimes`` is an optional snapshot that, if
+        provided, lets the server refresh its runtime registry for this
+        daemon in the same call (avoids a separate ``register_runtimes``
+        POST). ``None`` preserves backward compatibility with old
+        server builds that don't know about the field.
+        """
+        payload: dict[str, Any] = {
             "daemon_id": self._daemon_id,
             "active_task_count": active_task_count,
         }
+        if runtimes is not None:
+            payload["runtimes"] = list(runtimes)
         return await self._post("/api/heartbeat", payload)
 
     # ── Health ────────────────────────────────────────────────────

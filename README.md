@@ -100,6 +100,7 @@ The Server exposes its full API surface at <http://127.0.0.1:8420/docs> (FastAPI
 | `AGT_DAEMON_PORT` | `8421` | Local resource server (only for agent subprocesses) |
 | `AGT_SERVER_SECRET` | — | **Phase 3, required.** Shared HMAC secret between Server and Daemon for task-scoped tokens. Generate with `openssl rand -hex 32`. |
 | `AGT_DAEMON_LOCAL_TOKEN` | random per launch | Phase 3. Token for `X-Daemon-Local-Token` on the local resource server. Auto-rotated each daemon restart. |
+| `AGT_USE_WS_CLAIM` | `0` | **Phase 3.3, opt-in.** Remote daemon only. Set to `1` to claim via WS-first (`ws://<server>/ws/daemon`) with HTTP fallback; HTTP-only otherwise. |
 
 `AGT_SERVER_URL` is read by both the CLI's `task` commands and the Daemon.
 
@@ -131,7 +132,24 @@ $ curl -X POST http://127.0.0.1:8420/api/agent/callback \
     -H "Content-Type: application/json" -d '{...}'
 ```
 
-See [`docs/cli/commands.md`](docs/cli/commands.md) for full reference.
+See [`docs/cli/quick_start.md`](docs/cli/quick_start.md) for an end-to-end guide (local + remote daemon setup),
+and [`docs/cli/commands.md`](docs/cli/commands.md) for full command reference.
+
+### Phase 3.2: Remote daemons over WebSocket
+
+Remote daemons (running on machines other than the Server's host) connect to
+the Server over WebSocket instead of HTTP:
+
+```
+ws://<server-host>:8420/ws/daemon    Header: X-Daemon-Token: <session token>
+```
+
+The server pushes a `heartbeat_ack{rpc_v1:true}` frame immediately on accept
+as capability negotiation; subsequent frames are JSON-RPC requests
+demultiplexed by `request_id` over a single connection. Local daemons
+continue to use plain HTTP — the WS path is reserved for remote machines
+where the extra safety window (server timeout + grace) is needed to prevent
+double-claim on transient disconnects.
 
 ## Configuration
 

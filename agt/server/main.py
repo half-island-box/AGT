@@ -10,7 +10,8 @@ from typing import AsyncIterator
 import uvicorn
 from fastapi import FastAPI
 
-from .config import ServerConfig
+from .config import DaemonTarget, ServerConfig
+from .daemon_link import DaemonLink
 from .database import bind_get_db, make_engine, make_session_factory, session_scope
 from .middleware.auth import bind_verify_task_token
 from .migrate_sessions import migrate_sessions_json
@@ -40,9 +41,46 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         log.info("agt-server ready on %s:%d (db=%s)", cfg.host, cfg.port, cfg.db_path)
+
+        # Reverse-dial daemon-link pool (Step 3.5): one task per
+        # configured daemon target. Each task dials the daemon's WS
+        # endpoint, holds the link, reconnects with backoff on drop,
+        # and answers inbound ``tasks.claim`` frames. We start them as
+        # background tasks; failure of one daemon link doesn't affect
+        # others or the HTTP API.
+        shutdown_event = asyncio.Event()
+        daemon_link_tasks: list[asyncio.Task] = []
+        for target in cfg.daemons:
+            link = DaemonLink(
+                daemon_id=target.daemon_id,
+                url=target.url,
+                secret=cfg.secret,
+                session_factory=session_factory,
+            )
+            daemon_link_tasks.append(
+                asyncio.create_task(link.run(shutdown_event), name=f"daemon-link:{target.daemon_id}")
+            )
+        if cfg.daemons:
+            log.info(
+                "Reverse-dial pool: %d daemon link(s) → %s",
+                len(cfg.daemons),
+                ", ".join(t.daemon_id for t in cfg.daemons),
+            )
+
         try:
             yield
         finally:
+            log.info("Shutting down daemon-link pool…")
+            shutdown_event.set()
+            for t in daemon_link_tasks:
+                t.cancel()
+            # Give the tasks a moment to acknowledge shutdown, but don't
+            # block forever — the server should exit promptly.
+            for t in daemon_link_tasks:
+                try:
+                    await asyncio.wait_for(t, timeout=2.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                    pass
             await engine.dispose()
 
     app = FastAPI(
@@ -55,6 +93,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     # Inject the session factory into FastAPI state so the get_db dependency
     # can reach it without global state.
     app.state.session_factory = session_factory
+    app.state.config = cfg
     bind_get_db(app, session_factory)
     bind_verify_task_token(app, cfg.secret)
 
@@ -100,7 +139,14 @@ def cli_main(args) -> int:
         cfg.sessions_json = args.sessions_json
 
     server_app = create_app(cfg)
-    uvicorn.run(server_app, host=cfg.host, port=cfg.port, log_level="info")
+    uvicorn.run(
+        server_app,
+        host=cfg.host,
+        port=cfg.port,
+        log_level="info",
+        ws_ping_interval=20,
+        ws_ping_timeout=20,
+    )
     return 0
 
 

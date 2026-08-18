@@ -1,33 +1,73 @@
-"""Phase 3 placeholder error types.
+"""WS-RPC error types — semantic exception hierarchy.
 
-These exception classes exist so Phase 2 code can already reference them via
-``from agt.comm.errors import WSRPCUncertain``. The full WS-RPC implementation
-(where these become load-bearing) lands in Phase 3.
+The hierarchy encodes **decisions**, not events. Callers branch on the
+exception type to decide whether HTTP fallback is safe.
+
+Raise rules
+-----------
+- ``WSRPCUnavailable``  - frame NEVER left the client.
+                          RAISE when: socket not connected, send raised,
+                          buffer full. CALLER MAY retry (HTTP fallback safe).
+
+- ``WSRPCUncertain``    - frame MAY have committed before the response was
+                          lost. RAISE when: response timeout, socket dropped
+                          AFTER send returned. CALLER MUST wait the safety
+                          window (``server_timeout + grace``) before retry.
+                          NEVER raise this for read-only operations whose
+                          repeat has no observable side-effect — only for
+                          state-changing RPC (claim, register, report).
+
+- ``RPCRejected``       - server EXPLICITLY rejected with an error payload.
+                          RAISE when: rpc_response frame contained an
+                          ``error`` field. ``status`` / ``body`` carry the
+                          server's verdict. Retry is the caller's choice.
+
+These are mutually exclusive for any single ``call()``: at most one is
+raised, never two.
 """
+
+from __future__ import annotations
+
+import time
 
 
 class WSRPCError(Exception):
-    """Base class for all WS-RPC related errors (Phase 3)."""
+    """Base class for all WS-RPC related errors."""
 
 
 class WSRPCUnavailable(WSRPCError):
     """The WS connection is unavailable, write buffer is full, or a frame
-    definitely did NOT reach the server. → HTTP fallback is safe.
+    definitely did NOT reach the server.
+
+    HTTP fallback is safe.
     """
 
 
 class WSRPCUncertain(WSRPCError):
     """A frame MAY have reached the server before the connection dropped.
-    The server may have committed. → Do NOT immediately retry via HTTP;
-    wait out the safety window (server-budget + grace) first.
+    The server may have committed.
+
+    Do NOT immediately retry via HTTP; wait out the safety window
+    (``server_timeout + grace``) first. Use ``frame_sent_at`` to compute the
+    window deadline.
     """
+
+    def __init__(self, message: str, frame_sent_at: float | None = None) -> None:
+        super().__init__(message)
+        # Wall-clock monotonic seconds when the frame was handed to the
+        # websocket library's send buffer. ``None`` if the timeout happened
+        # before send completed (degenerate; treated as 'now' by consumers).
+        self.frame_sent_at: float = (
+            frame_sent_at if frame_sent_at is not None else time.monotonic()
+        )
 
 
 class RPCRejected(WSRPCError):
-    """The server explicitly rejected the request (HTTP-style status >= 300).
+    """The server explicitly rejected the request.
 
     ``status`` and ``body`` carry the server's response for diagnostics.
-    Retry via HTTP fallback is permitted.
+    Retry is permitted but the caller usually should not — the rejection
+    is typically about input validation or authorization.
     """
 
     def __init__(self, status: int, body: dict) -> None:

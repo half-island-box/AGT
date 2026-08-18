@@ -58,6 +58,14 @@ class Daemon:
     def get_runtime(self, provider: str) -> Runtime | None:
         return self._runtimes.get(provider)
 
+    def runtime_providers(self) -> list[str]:
+        """Return the list of providers this daemon can run.
+
+        Derived from the probe scan; used to filter claimable tasks to
+        those whose provider we can actually execute (Step 3.4).
+        """
+        return list(self._runtimes.keys())
+
     async def run(
         self,
         provider: str = "claude",

@@ -59,6 +59,30 @@ class TaskToken:
         return f"{payload_b64}.{sig}"
 
     @staticmethod
+    def create_server(server_id: str, secret: str, ttl_hours: int = 24 * 365) -> str:
+        """Mint a long-lived server credential for the reverse dial (Step 3.5).
+
+        Used by the Server when it dials a remote daemon over WS. The
+        daemon verifies this token (via ``TaskToken.verify``) before
+        accepting the connection, so any third party cannot impersonate
+        the Server. Same HMAC machinery as ``create``; the
+        ``sub=server:<id>`` prefix distinguishes this from an agent
+        token in audit logs.
+
+        ``ttl_hours`` defaults to a year; rotation happens by Server
+        restart (a new token is minted on demand).
+        """
+        now = datetime.now(timezone.utc)
+        payload: dict[str, Any] = {
+            "sub": f"server:{server_id}",
+            "iat": int(now.timestamp()),
+            "exp": int((now + timedelta(hours=ttl_hours)).timestamp()),
+        }
+        payload_b64 = _b64_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+        sig = hmac.new(secret.encode("utf-8"), payload_b64.encode("ascii"), hashlib.sha256).hexdigest()
+        return f"{payload_b64}.{sig}"
+
+    @staticmethod
     def verify(token: str, secret: str) -> dict[str, Any]:
         """Verify a token and return its payload claims.
 
