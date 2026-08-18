@@ -14,7 +14,7 @@ from ..schemas import (
     RegisterResponse,
     RuntimeOut,
 )
-from ..services.runtime_service import upsert_daemon_runtimes
+from ..services.runtime_service import is_stale, upsert_daemon_runtimes
 
 router = APIRouter(prefix="/api/runtimes", tags=["runtimes"])
 
@@ -37,7 +37,13 @@ async def register_runtimes(
 async def list_runtimes(
     db: AsyncSession = Depends(get_db),
 ) -> ListRuntimesResponse:
-    """Return all runtimes registered by all daemons."""
+    """Return all **live** runtimes registered by all daemons.
+
+    Rows whose ``last_seen`` is older than the liveness TTL are filtered
+    out at read time, so a daemon that crashed without deregistering
+    disappears from this view immediately after the TTL window (and is
+    physically removed by the startup sweep on the next server boot).
+    """
     rows = (
         await db.execute(
             select(RuntimeModel).order_by(
@@ -45,6 +51,7 @@ async def list_runtimes(
             )
         )
     ).scalars().all()
+    live = [r for r in rows if not is_stale(r.last_seen)]
     return ListRuntimesResponse(
         runtimes=[
             RuntimeOut(
@@ -55,7 +62,7 @@ async def list_runtimes(
                 device_name=row.device_name,
                 daemon_id=row.daemon_id,
             )
-            for row in rows
+            for row in live
         ]
     )
 

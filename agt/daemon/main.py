@@ -40,6 +40,28 @@ RECONNECT_BASE_SECONDS = 1
 RECONNECT_CAP_SECONDS = 60
 
 
+def _runtime_snapshot(daemon: Daemon) -> list[dict]:
+    """Project the in-process ``Daemon._runtimes`` into the snapshot dict
+    shape that the Server expects over both HTTP (``heartbeat``) and
+    WebSocket (``runtimes.register``).
+
+    Kept as a free function so the periodic heartbeat loop and the
+    on-connect hook both consume the exact same serialization — drift
+    here would cause one path to send a shape the Server's schema
+    rejects.
+    """
+    return [
+        {
+            "name": rt.name,
+            "type": rt.type,
+            "version": rt.version,
+            "status": rt.status,
+            "device_name": rt.device_name,
+        }
+        for rt in daemon._runtimes.values()  # noqa: SLF001
+    ]
+
+
 def _pidfile_alive(pid: int) -> bool:
     """Return True if a process with this pid is alive AND belongs to a daemon."""
     if pid <= 0:
@@ -304,16 +326,7 @@ async def _heartbeat_loop(
         if shutdown.is_set():
             return
         # Snapshot of currently-probed runtimes (same shape in both paths).
-        runtimes = [
-            {
-                "name": rt.name,
-                "type": rt.type,
-                "version": rt.version,
-                "status": rt.status,
-                "device_name": rt.device_name,
-            }
-            for rt in daemon._runtimes.values()  # noqa: SLF001
-        ]
+        runtimes = _runtime_snapshot(daemon)
 
         # Reverse-dial: sync over the WS link.
         if ws_server is not None:
@@ -405,9 +418,27 @@ async def run_background(config: DaemonConfig) -> None:
         # Reverse-dial mode. We always need a state machine for the
         # Uncertain safety window on the claim path.
         claim_state = ClaimStateMachine()
+
+        async def _push_snapshot_on_connect(link: WsRpcLink) -> None:
+            """Push the current runtime snapshot to the Server immediately
+            after the link is established, so its registry reflects what
+            we can do right now — not 30s later when the first periodic
+            heartbeat lands. Idempotent on the Server side (upsert by
+            daemon_id), so the subsequent heartbeat just refreshes
+            ``last_seen``."""
+            try:
+                await link.call(
+                    "runtimes.register",
+                    {"runtimes": _runtime_snapshot(daemon)},
+                    timeout_ms=5000,
+                )
+            except Exception as exc:
+                log.debug("on-connect runtimes.register failed: %s", exc)
+
         ws_server = DaemonWsServer(
             port=config.ws_listen_port,
             secret=config.server_secret,
+            on_connect=_push_snapshot_on_connect,
         )
         await ws_server.start()
         log.info(

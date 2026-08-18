@@ -21,6 +21,7 @@ from ..schemas import (
     TaskStatusResponse,
 )
 from ..services.claim_service import claim_tasks_for_daemon
+from ..services.runtime_service import is_stale
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
@@ -45,20 +46,24 @@ async def submit_task(
     # registered the requested provider — otherwise the task would sit
     # pending forever (the target can never claim it). Free tasks skip this.
     # Validated up front so it applies to both new and reopened tasks.
+    # We also exclude rows whose ``last_seen`` is past the liveness TTL:
+    # such rows belong to a daemon that's no longer reachable, so the
+    # task would never be claimed.
     if payload.target_daemon_id:
-        provider_registered = (
+        provider_rows = (
             await db.execute(
                 select(RuntimeModel).where(
                     RuntimeModel.daemon_id == payload.target_daemon_id,
                     RuntimeModel.provider == payload.provider,
                 )
             )
-        ).scalars().first()
-        if provider_registered is None:
+        ).scalars().all()
+        has_live = any(not is_stale(r.last_seen) for r in provider_rows)
+        if not has_live:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=(
-                    f"daemon '{payload.target_daemon_id}' has no runtime "
+                    f"daemon '{payload.target_daemon_id}' has no live runtime "
                     f"for provider '{payload.provider}'"
                 ),
             )

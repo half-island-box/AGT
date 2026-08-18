@@ -27,7 +27,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from websockets.asyncio.server import ServerConnection, serve
 
@@ -37,16 +37,30 @@ from ..server.services.auth_service import TaskToken
 
 log = logging.getLogger("agt.daemon.ws")
 
+# Hook called once per inbound server connection, after the link is
+# exposed as ``current_link`` and ready to issue RPC. Used by the daemon
+# to push its runtime snapshot immediately so the Server's registry is
+# refreshed without waiting for the first 30s heartbeat. Failures are
+# logged and swallowed — they must not abort the link.
+OnConnectHook = Callable[[WsRpcLink], Awaitable[None]]
+
 
 class DaemonWsServer:
     """Daemon-side WS server. Exposes ``current_link`` for the claim loop."""
 
-    def __init__(self, port: int, secret: str) -> None:
+    def __init__(
+        self,
+        port: int,
+        secret: str,
+        *,
+        on_connect: OnConnectHook | None = None,
+    ) -> None:
         self._port = port
         self._secret = secret
         self._server: serve | None = None
         self.current_link: WsRpcLink | None = None
         self._link_lock = asyncio.Lock()
+        self._on_connect = on_connect
 
     async def start(self) -> None:
         """Bind the WS server on ``0.0.0.0:<port>`` and start serving."""
@@ -103,6 +117,17 @@ class DaemonWsServer:
         await link.start()
         async with self._link_lock:
             self.current_link = link
+
+        # 4. Fire the on_connect hook (if any). This is where the daemon
+        # pushes its runtime snapshot so the Server's registry reflects
+        # the current probe immediately, instead of waiting up to 30s
+        # for the next heartbeat. The hook is best-effort: any error is
+        # logged and swallowed so a buggy hook can't poison the link.
+        if self._on_connect is not None:
+            try:
+                await self._on_connect(link)
+            except Exception as exc:  # pragma: no cover — defensive
+                log.warning("DaemonWsServer on_connect hook failed: %s", exc)
 
         peer = getattr(ws, "remote_address", None)
         log.info("DaemonWsServer: server dial accepted from %s", peer)

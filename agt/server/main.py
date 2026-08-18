@@ -21,6 +21,7 @@ from .routes.heartbeat import router as heartbeat_router
 from .routes.runtimes import router as runtimes_router
 from .routes.sessions import router as sessions_router
 from .routes.tasks import router as tasks_router
+from .services.runtime_service import prune_stale_runtimes
 
 log = logging.getLogger(__name__)
 
@@ -43,6 +44,18 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
             await conn.run_sync(ensure_schema)
+        # Startup sweep: drop runtime rows whose ``last_seen`` is older than
+        # the liveness TTL. These are remnants from daemons that crashed
+        # without deregistering, or whose machine / id changed — without
+        # this they'd linger forever (until the next daemon touched its own
+        # rows). A live daemon heartbeats every 30s, so its rows are fresh
+        # and we never disturb a healthy daemon here.
+        async with session_scope(session_factory) as db:
+            removed = await prune_stale_runtimes(db)
+            if removed:
+                log.info(
+                    "Startup sweep: removed %d stale runtime row(s)", removed,
+                )
         log.info("agt-server ready on %s:%d (db=%s)", cfg.host, cfg.port, cfg.db_path)
 
         # Reverse-dial daemon-link pool (Step 3.5): one task per
