@@ -89,7 +89,9 @@ def test_unknown_style_falls_back_to_claude() -> None:
 def test_codex_style_fresh_command() -> None:
     executor = TaskExecutor(runtime=_runtime("codex"), config=_config())
     cmd = executor._build_command(Path("/usr/bin/codex"), _task())
-    assert cmd == ["/usr/bin/codex", "exec", "hello world"]
+    assert cmd == [
+        "/usr/bin/codex", "exec", "--skip-git-repo-check", "hello world",
+    ]
 
 
 def test_codex_style_resume_command() -> None:
@@ -98,7 +100,8 @@ def test_codex_style_resume_command() -> None:
         Path("/usr/bin/codex"), _task(resume_session_id="s-abc-456")
     )
     assert cmd == [
-        "/usr/bin/codex", "exec", "resume", "s-abc-456", "hello world",
+        "/usr/bin/codex", "exec", "--skip-git-repo-check",
+        "resume", "s-abc-456", "hello world",
     ]
 
 

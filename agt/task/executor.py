@@ -276,15 +276,18 @@ class TaskExecutor:
 
         Style is taken from the probed ``AgentEntry.cli_style``:
 
-        - ``"codex"``: ``<bin> exec [resume <id>] <prompt>`` — Codex's
-          non-interactive mode is the ``exec`` subcommand with a
-          positional prompt; resume is a nested subcommand.
+        - ``"codex"``: ``<bin> exec --skip-git-repo-check [resume <id>]
+          <prompt>`` — Codex's non-interactive mode is the ``exec``
+          subcommand with a positional prompt; resume is a nested
+          subcommand. ``--skip-git-repo-check`` is required because our
+          per-task work dirs aren't git repos and codex refuses to run
+          outside one without it.
         - ``"claude"`` (default): ``<bin> [--resume <id>] -p <prompt>``
           — Claude Code and most ``-p``-style CLIs.
         """
         style = getattr(self._runtime.agent_entry, "cli_style", "claude") or "claude"
         if style == "codex":
-            cmd: list[str] = [str(binary), "exec"]
+            cmd: list[str] = [str(binary), "exec", "--skip-git-repo-check"]
             if task.resume_session_id:
                 cmd += ["resume", task.resume_session_id]
             cmd += [task.prompt]
