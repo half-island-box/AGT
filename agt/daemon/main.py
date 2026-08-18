@@ -155,7 +155,7 @@ async def _claim_loop(
                 _execute_one(
                     client, daemon, semaphore, shutdown, task_payload,
                     ws_server=ws_server,
-                    claim_state=claim_state,
+                    claim_state=state,
                 )
             )
             spawned.add(task)
