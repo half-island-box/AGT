@@ -42,6 +42,8 @@ class SubmitTaskRequest(BaseModel):
     prompt: str
     provider: str = "claude"
     task_id: str | None = None  # if provided, server resumes that task's session
+    # Step 3.6: pin this task to a specific daemon. None = free task.
+    target_daemon_id: str | None = None
 
 
 class SubmitTaskResponse(BaseModel):
@@ -100,6 +102,8 @@ class TaskStatusResponse(BaseModel):
     duration: float | None
     created_at: str
     updated_at: str
+    daemon_id: str | None = None
+    target_daemon_id: str | None = None
 
 
 # ── Session ─────────────────────────────────────────────────────────

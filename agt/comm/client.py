@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 import httpx
@@ -106,10 +107,13 @@ class ServerClient:
         prompt: str,
         provider: str = "claude",
         task_id: str | None = None,
+        target_daemon_id: str | None = None,
     ) -> str:
         payload: dict[str, Any] = {"prompt": prompt, "provider": provider}
         if task_id is not None:
             payload["task_id"] = task_id
+        if target_daemon_id is not None:
+            payload["target_daemon_id"] = target_daemon_id
         resp = await self._post("/api/tasks/submit", payload)
         return resp["task_id"]
 
@@ -157,6 +161,30 @@ class ServerClient:
 
     async def task_status(self, task_id: str) -> dict:
         return await self._get(f"/api/tasks/{task_id}/status")
+
+    async def wait_task(
+        self,
+        task_id: str,
+        timeout: float = 300.0,
+        poll_interval: float = 1.0,
+    ) -> dict:
+        """Poll ``task_id`` until it leaves pending/running, or ``timeout``.
+
+        Returns the final status dict. Raises ``TimeoutError`` if the task
+        never settles — the caller decides how to present that (e.g. "target
+        daemon offline"). Terminal statuses are completed/failed/timeout.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            status = await self.task_status(task_id)
+            if status.get("status") not in ("pending", "running"):
+                return status
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"task {task_id} did not settle within {timeout:.0f}s "
+                    f"(status={status.get('status')})"
+                )
+            await asyncio.sleep(poll_interval)
 
     # ── Sessions ──────────────────────────────────────────────────
 

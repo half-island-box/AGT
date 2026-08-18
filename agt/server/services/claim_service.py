@@ -12,7 +12,7 @@ import asyncio
 import time
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import SessionModel, TaskModel
@@ -42,7 +42,16 @@ async def claim_tasks_for_daemon(
     poll_interval = 0.5
 
     while True:
-        stmt = select(TaskModel).where(TaskModel.status == "pending")
+        stmt = select(TaskModel).where(
+            TaskModel.status == "pending",
+            # Step 3.6: daemon targeting. Free tasks (target is NULL) are
+            # claimable by anyone; targeted tasks are visible only to the
+            # daemon they name. Both classes coexist in the same queue.
+            or_(
+                TaskModel.target_daemon_id.is_(None),
+                TaskModel.target_daemon_id == daemon_id,
+            ),
+        )
         # Step 3.4: provider-aware filter. Empty runtime_ids means the
         # daemon declared no capabilities → match nothing (not "match
         # all"). This forces daemons to register before claiming.

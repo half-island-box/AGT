@@ -45,6 +45,9 @@ class TaskModel(Base):
         String(16), nullable=False, default="pending", index=True
     )
     daemon_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Step 3.6: daemon-targeted routing. NULL = free task (any matching
+    # daemon may claim); non-NULL = pinned to that daemon only.
+    target_daemon_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     session_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
     stdout: Mapped[str | None] = mapped_column(Text, nullable=True)

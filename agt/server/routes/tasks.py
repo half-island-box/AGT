@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db
-from ..models import SessionModel, TaskModel
+from ..models import RuntimeModel, SessionModel, TaskModel
 from ..schemas import (
     ClaimRequest,
     ClaimResponse,
@@ -34,16 +34,60 @@ async def submit_task(
     payload: SubmitTaskRequest,
     db: AsyncSession = Depends(get_db),
 ) -> SubmitTaskResponse:
-    """Insert a task in pending state. Reuses payload.task_id if provided (for session resume)."""
+    """Insert a task in pending state.
+
+    If ``payload.task_id`` matches a terminal task (completed/failed/
+    timeout), it is reopened as a fresh pending turn so the same task_id
+    can drive session continuity across turns. An *active* (pending/
+    running) task_id is rejected with 409.
+    """
+    # Step 3.6: when a target daemon is named, require that daemon to have
+    # registered the requested provider — otherwise the task would sit
+    # pending forever (the target can never claim it). Free tasks skip this.
+    # Validated up front so it applies to both new and reopened tasks.
+    if payload.target_daemon_id:
+        provider_registered = (
+            await db.execute(
+                select(RuntimeModel).where(
+                    RuntimeModel.daemon_id == payload.target_daemon_id,
+                    RuntimeModel.provider == payload.provider,
+                )
+            )
+        ).scalars().first()
+        if provider_registered is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"daemon '{payload.target_daemon_id}' has no runtime "
+                    f"for provider '{payload.provider}'"
+                ),
+            )
+
     task_id = payload.task_id or _new_task_id()
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
     existing = await db.get(TaskModel, task_id)
     if existing is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"task_id '{task_id}' already exists",
-        )
+        if existing.status in ("pending", "running"):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"task_id '{task_id}' is already active",
+            )
+        # Terminal task → reopen for a resume turn. Reset execution fields
+        # but keep the session pointer (SessionModel) so the next claim
+        # resumes the same agent session.
+        existing.provider = payload.provider
+        existing.prompt = payload.prompt
+        existing.status = "pending"
+        existing.target_daemon_id = payload.target_daemon_id
+        existing.daemon_id = None
+        existing.exit_code = None
+        existing.stdout = None
+        existing.stderr = None
+        existing.duration = None
+        existing.updated_at = now
+        await db.commit()
+        return SubmitTaskResponse(task_id=task_id, status="pending")
 
     db.add(
         TaskModel(
@@ -51,6 +95,7 @@ async def submit_task(
             provider=payload.provider,
             prompt=payload.prompt,
             status="pending",
+            target_daemon_id=payload.target_daemon_id,
             created_at=now,
             updated_at=now,
         )
@@ -154,6 +199,8 @@ async def task_status(
         duration=task.duration,
         created_at=task.created_at,
         updated_at=task.updated_at,
+        daemon_id=task.daemon_id,
+        target_daemon_id=task.target_daemon_id,
     )
 
 

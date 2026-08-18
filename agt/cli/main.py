@@ -65,19 +65,35 @@ def probe(refresh: bool) -> None:
     click.echo(f"\n✅ Found {len(entries)} agent(s) on this machine.")
 
 
-# ── run ────────────────────────────────────────────────────────────
+def _echo_task_result(data: dict) -> None:
+    """Print a task's final status + output (shared by ``run --daemon`` and
+    ``task status``)."""
+    stdout = data.get("stdout") or ""
+    stderr = data.get("stderr") or ""
+    duration = data.get("duration")
+    duration_str = f"{duration:.2f}s" if duration is not None else "—"
+    click.echo(
+        f"task_id   : {data.get('task_id')}\n"
+        f"provider  : {data.get('provider')}\n"
+        f"status    : {data.get('status')}\n"
+        f"session_id: {data.get('session_id') or '—'}\n"
+        f"exit_code : {data.get('exit_code')}\n"
+        f"duration  : {duration_str}"
+    )
+    if stdout:
+        click.echo(f"\n--- stdout ---\n{stdout}", nl=False)
+        if not stdout.endswith("\n"):
+            click.echo()
+        click.echo("--- end stdout ---")
+    if stderr:
+        click.echo(f"\n--- stderr ---\n{stderr}", nl=False)
+        if not stderr.endswith("\n"):
+            click.echo()
+        click.echo("--- end stderr ---")
 
 
-@cli.command()
-@click.option("-p", "--prompt", required=True, help="Prompt to send to the agent.")
-@click.option(
-    "--provider",
-    default="claude",
-    show_default=True,
-    help="Provider key (e.g. claude, codex, cursor).",
-)
-def run(prompt: str, provider: str) -> None:
-    """Spawn the agent once with the given prompt and stream its output."""
+def _run_local(prompt: str, provider: str) -> None:
+    """Run the agent on this machine (no Server round-trip). Exits 0/2."""
     controller = DaemonController()
     click.echo(f"🚀 Executing with {provider}...\n")
 
@@ -105,6 +121,132 @@ def run(prompt: str, provider: str) -> None:
     sys.exit(0 if result.status == "completed" else 2)
 
 
+# ── run ────────────────────────────────────────────────────────────
+
+
+@cli.command()
+@click.option("-p", "--prompt", required=True, help="Prompt to send to the agent.")
+@click.option(
+    "--provider",
+    default="claude",
+    show_default=True,
+    help="Provider key (e.g. claude, codex, cursor).",
+)
+@click.option(
+    "--daemon",
+    "target_daemon_id",
+    default=None,
+    help="Target this daemon via the Server (remote run). Omit to run locally.",
+)
+@click.option(
+    "--server-url",
+    default="http://127.0.0.1:8420",
+    show_default=True,
+    envvar="AGT_SERVER_URL",
+)
+def run(
+    prompt: str,
+    provider: str,
+    target_daemon_id: str | None,
+    server_url: str,
+) -> None:
+    """Spawn the agent once with the given prompt and stream its output.
+
+    With ``--daemon`` the task is submitted to the Server, pinned to that
+    daemon, and polled to completion. Without it, the local agent runs
+    directly (no Server round-trip).
+    """
+    if target_daemon_id is None:
+        _run_local(prompt, provider)
+        return
+
+    click.echo(f"🚀 Submitting to daemon '{target_daemon_id}' ({provider})...\n")
+
+    async def _remote() -> dict | None:
+        async with ServerClient(base_url=server_url, daemon_id="cli-direct") as client:
+            task_id = await client.submit_task(
+                prompt=prompt,
+                provider=provider,
+                target_daemon_id=target_daemon_id,
+            )
+            try:
+                return await client.wait_task(task_id)
+            except TimeoutError:
+                click.echo(
+                    f"⚠️  Task {task_id} still pending — is daemon "
+                    f"'{target_daemon_id}' online?",
+                    err=True,
+                )
+                return None
+
+    try:
+        data = asyncio.run(_remote())
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    if data is None:
+        sys.exit(3)
+    _echo_task_result(data)
+    sys.exit(0 if data.get("status") == "completed" else 2)
+
+
+def _chat_turn_local(controller: DaemonController, provider: str, prompt: str, task_id: str) -> None:
+    """Run one chat turn against the local daemon."""
+    async def _run():
+        return await controller.run(provider=provider, prompt=prompt, task_id=task_id)
+
+    result = asyncio.run(_run())
+    if result.resume_rejected:
+        click.echo("⚠️  Resume was rejected; this turn ran on a fresh session.")
+    if result.status != "completed" and result.stderr:
+        # Only surface stderr when the agent failed; it's silenced on
+        # the live stream otherwise (agent banners live on stderr).
+        click.echo(f"\n[stderr] {result.stderr}", nl=False)
+        if not result.stderr.endswith("\n"):
+            click.echo()
+    click.echo(f"\n[exit_code={result.exit_code}, duration={result.duration:.1f}s]\n")
+
+
+def _chat_turn_remote(
+    provider: str,
+    prompt: str,
+    task_id: str,
+    target_daemon_id: str,
+    server_url: str,
+) -> None:
+    """Run one chat turn pinned to a remote daemon via the Server."""
+    async def _remote() -> dict | None:
+        async with ServerClient(base_url=server_url, daemon_id="cli-direct") as client:
+            await client.submit_task(
+                prompt=prompt,
+                provider=provider,
+                task_id=task_id,
+                target_daemon_id=target_daemon_id,
+            )
+            try:
+                return await client.wait_task(task_id)
+            except TimeoutError:
+                click.echo(
+                    f"⚠️  No response — is daemon '{target_daemon_id}' online?",
+                    err=True,
+                )
+                return None
+
+    try:
+        data = asyncio.run(_remote())
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        return
+
+    if data is None:
+        return
+    stdout = data.get("stdout") or ""
+    if stdout:
+        click.echo(stdout, nl=not stdout.endswith("\n"))
+    click.echo(f"\n[status={data.get('status')}, exit_code={data.get('exit_code')}]\n")
+
+
 # ── chat ───────────────────────────────────────────────────────────
 
 
@@ -115,13 +257,38 @@ def run(prompt: str, provider: str) -> None:
     show_default=True,
     help="Provider key (e.g. claude, codex, cursor).",
 )
-def chat(provider: str) -> None:
-    """Interactive chat mode with session continuity."""
-    controller = DaemonController()
+@click.option(
+    "--daemon",
+    "target_daemon_id",
+    default=None,
+    help="Target this daemon via the Server (remote chat). Omit for local.",
+)
+@click.option(
+    "--server-url",
+    default="http://127.0.0.1:8420",
+    show_default=True,
+    envvar="AGT_SERVER_URL",
+)
+def chat(
+    provider: str,
+    target_daemon_id: str | None,
+    server_url: str,
+) -> None:
+    """Interactive chat mode with session continuity.
+
+    With ``--daemon`` each turn is submitted to the Server, pinned to that
+    daemon, and polled to completion; the shared ``task_id`` keeps the
+    remote agent's session alive across turns. Without it, the local agent
+    runs directly.
+    """
+    controller = DaemonController() if target_daemon_id is None else None
     task_id = f"chat-{uuid.uuid4().hex[:8]}"
+    mode = f"provider={provider}"
+    if target_daemon_id is not None:
+        mode += f", daemon={target_daemon_id}"
     click.echo(
-        f"🚀 agt chat mode (provider={provider}, "
-        f"task={task_id}). Type 'exit' or 'quit' to leave.\n"
+        f"🚀 agt chat mode ({mode}, task={task_id}). "
+        f"Type 'exit' or 'quit' to leave.\n"
     )
 
     while True:
@@ -138,27 +305,11 @@ def chat(provider: str) -> None:
             click.echo("👋 Bye!")
             return
 
-        async def _run():
-            return await controller.run(
-                provider=provider,
-                prompt=line,
-                task_id=task_id,
-            )
-
-        result = asyncio.run(_run())
-        if result.resume_rejected:
-            click.echo(
-                "⚠️  Resume was rejected; this turn ran on a fresh session."
-            )
-        if result.status != "completed" and result.stderr:
-            # Only surface stderr when the agent failed; it's silenced on
-            # the live stream otherwise (agent banners live on stderr).
-            click.echo(f"\n[stderr] {result.stderr}", nl=False)
-            if not result.stderr.endswith("\n"):
-                click.echo()
-        click.echo(
-            f"\n[exit_code={result.exit_code}, duration={result.duration:.1f}s]\n"
-        )
+        if controller is not None:
+            _chat_turn_local(controller, provider, line, task_id)
+        else:
+            assert target_daemon_id is not None  # else branch ⟹ --daemon given
+            _chat_turn_remote(provider, line, task_id, target_daemon_id, server_url)
 
 
 # ── server (Phase 2) ──────────────────────────────────────────────
@@ -221,6 +372,12 @@ def task() -> None:
     help="Reuse an existing task_id (for session continuity).",
 )
 @click.option(
+    "--daemon",
+    "target_daemon_id",
+    default=None,
+    help="Pin this task to a specific daemon (free task if omitted).",
+)
+@click.option(
     "--server-url",
     default="http://127.0.0.1:8420",
     show_default=True,
@@ -230,6 +387,7 @@ def task_submit(
     prompt: str,
     provider: str,
     user_task_id: str | None,
+    target_daemon_id: str | None,
     server_url: str,
 ) -> None:
     """Submit a task to the Server (returns the assigned task_id)."""
@@ -243,6 +401,7 @@ def task_submit(
                 prompt=prompt,
                 provider=provider,
                 task_id=user_task_id,
+                target_daemon_id=target_daemon_id,
             )
 
     task_id = asyncio.run(_run())
@@ -274,27 +433,7 @@ def task_status(task_id: str, server_url: str) -> None:
         click.echo(f"Error: {exc}", err=True)
         sys.exit(1)
 
-    stdout = data.get("stdout") or ""
-    stderr = data.get("stderr") or ""
-
-    click.echo(
-        f"task_id   : {data['task_id']}\n"
-        f"provider  : {data['provider']}\n"
-        f"status    : {data['status']}\n"
-        f"session_id: {data['session_id'] or '—'}\n"
-        f"exit_code : {data['exit_code']}\n"
-        f"duration  : {data['duration']:.2f}s"
-    )
-    if stdout:
-        click.echo(f"\n--- stdout ---\n{stdout}", nl=False)
-        if not stdout.endswith("\n"):
-            click.echo()
-        click.echo("--- end stdout ---")
-    if stderr:
-        click.echo(f"\n--- stderr ---\n{stderr}", nl=False)
-        if not stderr.endswith("\n"):
-            click.echo()
-        click.echo("--- end stderr ---")
+    _echo_task_result(data)
 
 
 # ── runtime (Phase 3.4: registry queries) ──────────────────────────

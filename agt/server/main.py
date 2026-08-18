@@ -14,6 +14,7 @@ from .config import DaemonTarget, ServerConfig
 from .daemon_link import DaemonLink
 from .database import bind_get_db, make_engine, make_session_factory, session_scope
 from .middleware.auth import bind_verify_task_token
+from .migrate_schema import ensure_schema
 from .migrate_sessions import migrate_sessions_json
 from .models import Base
 from .routes.heartbeat import router as heartbeat_router
@@ -37,9 +38,11 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         # filesystem level when SQLite first opens the database.
         async with session_scope(session_factory) as db:
             await migrate_sessions_json(db, cfg.sessions_json_path)
-        # Schema check: ensure tables exist (Alembic may not have been run).
+        # Schema check: ensure tables exist (Alembic may not have been run),
+        # then apply any column migrations for pre-existing DB files.
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(ensure_schema)
         log.info("agt-server ready on %s:%d (db=%s)", cfg.host, cfg.port, cfg.db_path)
 
         # Reverse-dial daemon-link pool (Step 3.5): one task per

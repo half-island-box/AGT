@@ -21,6 +21,7 @@ from starlette.testclient import TestClient
 from agt.server.config import ServerConfig
 from agt.server.database import make_engine, make_session_factory, session_scope
 from agt.server.main import create_app
+from agt.server.migrate_schema import ensure_schema
 from agt.server.models import Base, RuntimeModel
 from agt.server.services.runtime_service import upsert_daemon_runtimes
 
@@ -52,6 +53,7 @@ def _fresh_engine():
     async def _setup() -> None:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(ensure_schema)
         factory = make_session_factory(engine)
         async with session_scope(factory) as db:
             await db.execute(delete(RuntimeModel))

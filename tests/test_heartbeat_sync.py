@@ -24,6 +24,7 @@ from starlette.testclient import TestClient
 from agt.server.config import ServerConfig
 from agt.server.database import make_engine, make_session_factory, session_scope
 from agt.server.main import create_app
+from agt.server.migrate_schema import ensure_schema
 from agt.server.models import Base, RuntimeModel
 
 SECRET = "heartbeat-sync-test-secret"
@@ -42,6 +43,7 @@ def _build_app() -> tuple[TestClient, callable]:
         engine = make_engine(cfg)
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(ensure_schema)
         # Wipe between tests sharing this DB.
         factory = make_session_factory(engine)
         async with session_scope(factory) as db:
