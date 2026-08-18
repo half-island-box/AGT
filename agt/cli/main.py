@@ -82,7 +82,9 @@ def run(prompt: str, provider: str) -> None:
     click.echo(f"🚀 Executing with {provider}...\n")
 
     async def _run():
-        return await controller.run(provider=provider, prompt=prompt)
+        return await controller.run(
+            provider=provider, prompt=prompt, interactive=True,
+        )
 
     result = asyncio.run(_run())
 
@@ -136,6 +138,7 @@ def chat(provider: str) -> None:
                 provider=provider,
                 prompt=line,
                 task_id=task_id,
+                interactive=True,
             )
 
         result = asyncio.run(_run())

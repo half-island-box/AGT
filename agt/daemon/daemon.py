@@ -72,6 +72,8 @@ class Daemon:
         prompt: str = "",
         task_id: str | None = None,
         resume_session_id: str | None = None,
+        *,
+        interactive: bool = False,
     ) -> TaskResult:
         """Execute one prompt against the named provider.
 
@@ -81,6 +83,11 @@ class Daemon:
         ``resume_session_id`` overrides SessionStore lookup; used by the
         background daemon when Server provides the session pointer in the
         task payload.
+
+        ``interactive=True`` makes the agent inherit the parent's stdio so
+        it sees a TTY (some CLIs like ``codex`` refuse to run otherwise).
+        Session continuity is then disabled — no session_id is captured
+        and SessionStore isn't updated.
         """
         if not self._started:
             await self.start()
@@ -94,7 +101,8 @@ class Daemon:
         effective_task_id = task_id or uuid.uuid4().hex[:8]
 
         # Resolve the resume session: explicit override wins, else SessionStore.
-        if resume_session_id is None and task_id is not None:
+        # Skipped in interactive mode (no session_id captured, so resume is moot).
+        if not interactive and resume_session_id is None and task_id is not None:
             resume_session_id = self.session_store.get(effective_task_id, provider)
 
         task = Task(
@@ -106,11 +114,12 @@ class Daemon:
         )
 
         executor = TaskExecutor(runtime=runtime, config=self.config)
-        result = await executor.execute(task)
+        result = await executor.execute(task, interactive=interactive)
 
         # Update SessionStore based on the outcome (only when caller opted
-        # into session continuity by passing a task_id).
-        if task_id is not None:
+        # into session continuity by passing a task_id AND we captured a
+        # session_id, which requires pipe mode).
+        if task_id is not None and not interactive:
             if result.resume_rejected:
                 self.session_store.delete(task_id)
             elif result.session_id:

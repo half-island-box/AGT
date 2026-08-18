@@ -142,7 +142,7 @@ class TaskExecutor:
 
         start = time.monotonic()
         if interactive:
-            return await self._execute_interactive(cmd, work_dir, env, start)
+            return await self._execute_interactive(task, cmd, work_dir, env, start)
 
         process = await asyncio.create_subprocess_exec(
             *cmd,
@@ -208,6 +208,61 @@ class TaskExecutor:
             status=status,
             session_id=session_id,
             resume_rejected=resume_rejected,
+        )
+
+    async def _execute_interactive(
+        self,
+        task: Task,
+        cmd: list[str],
+        work_dir: Path,
+        env: dict[str, str],
+        start: float,
+    ) -> TaskResult:
+        """Spawn the agent inheriting the parent's stdio (TTY path).
+
+        No stdout/stderr capture → no session-id extraction. The agent
+        CLI sees a real terminal and can run interactive TUIs. Enforced
+        ``agent_timeout`` upper bounds wall-clock so a hung agent
+        doesn't pin the CLI forever; user Ctrl-C still works because
+        the inherited TTY delivers the signal to the subprocess too.
+        """
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=str(work_dir),
+            env=env,
+        )
+        timeout = self._config.agent_timeout
+        try:
+            exit_code = await asyncio.wait_for(process.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            process.kill()
+            try:
+                await process.wait()
+            except ProcessLookupError:
+                pass
+            duration = time.monotonic() - start
+            return TaskResult(
+                task_id=task.task_id,
+                provider=task.provider,
+                exit_code=-1,
+                stdout="",
+                stderr="",
+                duration=duration,
+                status="timeout",
+                session_id=None,
+                resume_rejected=False,
+            )
+        duration = time.monotonic() - start
+        return TaskResult(
+            task_id=task.task_id,
+            provider=task.provider,
+            exit_code=exit_code,
+            stdout="",
+            stderr="",
+            duration=duration,
+            status="completed" if exit_code == 0 else "failed",
+            session_id=None,
+            resume_rejected=False,
         )
 
     # ── Command construction ────────────────────────────────────
