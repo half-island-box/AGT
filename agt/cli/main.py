@@ -95,6 +95,13 @@ def run(prompt: str, provider: str) -> None:
         click.echo(
             "⚠️  Resume was rejected; session was cleared. Next run will be fresh."
         )
+    if result.status != "completed" and result.stderr:
+        # stderr is silenced on the live stream; surface it only when the
+        # agent actually failed, so the user sees *why*.
+        click.echo(f"\n--- stderr ---\n{result.stderr}", nl=False)
+        if not result.stderr.endswith("\n"):
+            click.echo()
+        click.echo("--- end stderr ---")
     sys.exit(0 if result.status == "completed" else 2)
 
 
@@ -143,6 +150,12 @@ def chat(provider: str) -> None:
             click.echo(
                 "⚠️  Resume was rejected; this turn ran on a fresh session."
             )
+        if result.status != "completed" and result.stderr:
+            # Only surface stderr when the agent failed; it's silenced on
+            # the live stream otherwise (agent banners live on stderr).
+            click.echo(f"\n[stderr] {result.stderr}", nl=False)
+            if not result.stderr.endswith("\n"):
+                click.echo()
         click.echo(
             f"\n[exit_code={result.exit_code}, duration={result.duration:.1f}s]\n"
         )

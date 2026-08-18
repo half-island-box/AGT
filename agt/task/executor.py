@@ -159,6 +159,11 @@ class TaskExecutor:
         reader = StreamReader(
             stdout=process.stdout,
             stderr=process.stderr,
+            # Silence stderr on the live terminal: agent CLIs (e.g. codex)
+            # print their banner + diagnostics to stderr, which would
+            # spam the user's chat. The full stderr is still captured in
+            # ``result.stderr`` for reporting / debugging.
+            on_stderr=lambda _line: None,
         )
 
         timeout = self._config.agent_timeout
