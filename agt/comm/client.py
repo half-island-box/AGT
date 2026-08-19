@@ -108,12 +108,23 @@ class ServerClient:
         provider: str = "claude",
         task_id: str | None = None,
         target_daemon_id: str | None = None,
+        work_dir: str | None = None,
     ) -> str:
+        """Submit a task and return the assigned task_id.
+
+        ``work_dir`` (Phase 4) is the AGT metadata directory derived from
+        the user's cwd. The server persists it ONLY for local/free tasks
+        (NULL for remote targets so it doesn't leak the submitter's
+        filesystem layout). The CLI submit paths set ``None`` when the
+        user passed ``--no-work-dir`` (legacy daemon-local layout).
+        """
         payload: dict[str, Any] = {"prompt": prompt, "provider": provider}
         if task_id is not None:
             payload["task_id"] = task_id
         if target_daemon_id is not None:
             payload["target_daemon_id"] = target_daemon_id
+        if work_dir is not None:
+            payload["work_dir"] = work_dir
         resp = await self._post("/api/tasks/submit", payload)
         return resp["task_id"]
 
@@ -161,6 +172,18 @@ class ServerClient:
 
     async def task_status(self, task_id: str) -> dict:
         return await self._get(f"/api/tasks/{task_id}/status")
+
+    async def list_tasks(
+        self,
+        statuses: list[str] | None = None,
+        limit: int = 200,
+    ) -> list[dict]:
+        """List tasks. ``statuses`` filters (e.g. ['completed','failed']); None = all."""
+        params: dict[str, Any] = {"limit": limit}
+        if statuses:
+            params["statuses"] = ",".join(statuses)
+        resp = await self._get("/api/tasks", params=params)
+        return resp if isinstance(resp, list) else resp.get("tasks", [])
 
     async def wait_task(
         self,

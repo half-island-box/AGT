@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from pathlib import Path
 
 from ..probe.scanner import AgentProbe
 from ..runtime.models import AgentEntry, Runtime
@@ -74,6 +75,8 @@ class Daemon:
         resume_session_id: str | None = None,
         *,
         interactive: bool = False,
+        agent_cwd: Path | None = None,
+        agt_meta_dir: Path | None = None,
     ) -> TaskResult:
         """Execute one prompt against the named provider.
 
@@ -88,6 +91,14 @@ class Daemon:
         it sees a TTY (some CLIs like ``codex`` refuse to run otherwise).
         Session continuity is then disabled — no session_id is captured
         and SessionStore isn't updated.
+
+        ``agent_cwd`` is the directory the agent subprocess runs in (its
+        ``cwd``). Defaults to the user's cwd at submit time; falls back to
+        ``agt_meta_dir`` when ``None`` (legacy single-path mode).
+
+        ``agt_meta_dir`` is where AGT writes session.json / meta.json /
+        claim state. Defaults to ``work_dir_root / provider / task_id``
+        when ``None`` (legacy daemon-local layout).
         """
         if not self._started:
             await self.start()
@@ -100,16 +111,31 @@ class Daemon:
 
         effective_task_id = task_id or uuid.uuid4().hex[:8]
 
+        meta_dir = agt_meta_dir or (
+            self.config.work_dir_root / provider / effective_task_id
+        )
+        # agent_cwd falls back to meta_dir (legacy single-path mode).
+        effective_agent_cwd = agent_cwd or meta_dir
+
+        # Phase 4: use a per-task SessionStore rooted at the meta dir when
+        # one is set, so the session pointer lives next to other AGT
+        # bookkeeping. Falls back to the daemon-global store for legacy
+        # tasks (no meta dir).
+        session_store = (
+            SessionStore.at(meta_dir) if meta_dir is not None else self.session_store
+        )
+
         # Resolve the resume session: explicit override wins, else SessionStore.
         # Skipped in interactive mode (no session_id captured, so resume is moot).
         if not interactive and resume_session_id is None and task_id is not None:
-            resume_session_id = self.session_store.get(effective_task_id, provider)
+            resume_session_id = session_store.get(effective_task_id, provider)
 
         task = Task(
             prompt=prompt,
             provider=provider,
             task_id=effective_task_id,
-            work_dir=self.config.work_dir_root / provider / effective_task_id,
+            work_dir=meta_dir,
+            agent_cwd=effective_agent_cwd,
             resume_session_id=resume_session_id,
         )
 
@@ -121,9 +147,9 @@ class Daemon:
         # session_id, which requires pipe mode).
         if task_id is not None and not interactive:
             if result.resume_rejected:
-                self.session_store.delete(task_id)
+                session_store.delete(task_id)
             elif result.session_id:
-                self.session_store.save(task_id, provider, result.session_id)
+                session_store.save(task_id, provider, result.session_id)
 
         return result
 

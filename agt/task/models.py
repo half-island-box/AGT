@@ -18,7 +18,14 @@ class Task:
 
     prompt: str
     provider: str
+    # AGT metadata directory: where AGT writes session.json / meta.json /
+    # claim state. Derived from the user's cwd at submit time and persisted
+    # to ``tasks.work_dir`` so chat resume stays consistent.
     work_dir: Path | None = None
+    # Directory the agent subprocess runs in (its ``cwd``). Defaults to the
+    # user's cwd at submit time. Not persisted — when missing, the executor
+    # falls back to ``work_dir`` for backward compatibility.
+    agent_cwd: Path | None = None
     task_id: str = field(default_factory=_new_task_id)
 
     # ── Session-related fields ─────────────────────────────────

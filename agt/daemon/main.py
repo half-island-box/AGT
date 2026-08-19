@@ -239,6 +239,51 @@ async def _execute_one(
         if shutdown.is_set():
             return
         task_id = task_payload["task_id"]
+        # Phase 4 workdir: server-supplied work_dir (cwd-derived from the
+        # submitter's machine). When set, validate its parent exists and
+        # refuse if not — the agent would otherwise silently land in
+        # the daemon's home dir. When None, daemon uses its legacy
+        # ``work_dir_root / provider / task_id`` fallback.
+        server_work_dir = task_payload.get("work_dir")
+        agent_cwd: Path | None = None
+        agt_meta_dir: Path | None = None
+        if server_work_dir:
+            try:
+                agt_meta_dir = Path(server_work_dir)
+                # The agent cwd is the parent of the per-task ``.agt`` dir
+                # when the server sent a fresh submit; the meta dir lives
+                # under ``<cwd>/.agt/tasks/<id>/`` and the agent lives in
+                # ``<cwd>/``. We recover it by stripping ``.agt/tasks/<id>``
+                # — that's the structure the CLI submit path always builds.
+                parts = agt_meta_dir.parts
+                if (
+                    len(parts) >= 4
+                    and parts[-3] == ".agt"
+                    and parts[-2] == "tasks"
+                ):
+                    agent_cwd = Path(*parts[:-3])
+                else:
+                    # Custom work_dir (e.g. ``--work-dir`` override): we
+                    # don't know the agent's intent; fall back to using
+                    # meta dir as cwd so we never silently misroute.
+                    agent_cwd = agt_meta_dir
+            except (OSError, ValueError) as exc:
+                log.warning(
+                    "task %s: invalid work_dir %r (%s); using legacy fallback",
+                    task_id, server_work_dir, exc,
+                )
+                agt_meta_dir = None
+                agent_cwd = None
+            else:
+                if agent_cwd is not None and not agent_cwd.exists():
+                    log.warning(
+                        "task %s: agent cwd %s does not exist; "
+                        "the submitter's path is unreachable from this daemon. "
+                        "Falling back to legacy daemon-local layout.",
+                        task_id, agent_cwd,
+                    )
+                    agent_cwd = None
+                    agt_meta_dir = None
         # Resolve the report link: use the same WS source the claim
         # used (re-resolved at execute time in case the link rotated
         # between claim and report).
@@ -251,6 +296,8 @@ async def _execute_one(
                 prompt=task_payload["prompt"],
                 task_id=task_id,
                 resume_session_id=task_payload.get("resume_session_id"),
+                agent_cwd=agent_cwd,
+                agt_meta_dir=agt_meta_dir,
             )
         except Exception as exc:
             log.exception("task %s execution failed", task_id)

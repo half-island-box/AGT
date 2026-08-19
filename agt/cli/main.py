@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import signal
 import sys
 import uuid
+from pathlib import Path
 
 import click
 
@@ -24,6 +26,102 @@ from ..comm import ServerClient
 from ..daemon.daemon import Daemon as DaemonController
 from ..runtime.models import AgentEntry
 from ..server.services.auth_service import TaskToken
+
+
+# ── workdir helpers (Phase 4) ──────────────────────────────────────
+
+
+class CLIError(RuntimeError):
+    """Raised by CLI helpers to surface user-visible errors with sys.exit."""
+
+
+# System-directory blacklist for ``_validate_cwd``. A cwd inside one of these
+# is a misuse — AGT metadata and agent cwd shouldn't pollute system paths.
+_SYSTEM_DIR_BLACKLIST: tuple[Path, ...] = (
+    Path("/"),
+    Path("/usr"),
+    Path("/etc"),
+    Path("/var"),
+    Path.home() / ".local" / "share" / "Trash",
+)
+
+
+def _resolve_agt_meta_dir(
+    cwd: Path,
+    task_id: str,
+    explicit: Path | None,
+    *,
+    legacy_root: Path | None = None,
+) -> Path:
+    """Compute the AGT metadata directory for a task.
+
+    Priority:
+      1. ``explicit`` (from ``--work-dir``) — used verbatim (resolved to
+         absolute). Agent cwd is NOT changed.
+      2. ``<cwd>/.agt/tasks/<task_id>/`` — the standard cwd-derived path.
+      3. ``legacy_root / provider / task_id`` — only when ``legacy_root``
+         is given (i.e. ``--no-work-dir`` was passed and the caller
+         supplies the legacy daemon-root). Without ``legacy_root`` we
+         still return the cwd-derived path; callers that want legacy
+         behavior handle it themselves.
+    """
+    if explicit is not None:
+        return explicit.resolve()
+    if legacy_root is not None:
+        # legacy_root takes precedence over cwd-derived when explicitly
+        # requested. Used by ``--no-work-dir`` which falls back to the
+        # old ``work_dir_root / provider / task_id`` layout (the caller
+        # passes the resolved path).
+        return legacy_root
+    return (cwd / ".agt" / "tasks" / task_id).resolve()
+
+
+def _validate_cwd(cwd: Path) -> None:
+    """Validate the user's cwd as a usable workdir parent.
+
+    Raises ``CLIError`` on:
+      - cwd not writable
+      - cwd on system-directory blacklist
+      - ``<cwd>/.agt`` exists but is not a directory
+    """
+    if not os.access(cwd, os.W_OK):
+        raise CLIError(f"cwd '{cwd}' is not writable")
+    resolved = cwd.resolve()
+    for blocked in _SYSTEM_DIR_BLACKLIST:
+        if blocked.resolve() == resolved:
+            raise CLIError(
+                f"cwd '{cwd}' is a system path; refusing to use as workdir parent"
+            )
+    agt_dir = cwd / ".agt"
+    if agt_dir.exists() and not agt_dir.is_dir():
+        raise CLIError(f"'{agt_dir}' exists but is not a directory")
+
+
+def _ensure_gitignore(cwd: Path) -> None:
+    """Idempotently append ``.agt/`` to ``<cwd>/.gitignore`` when cwd is a
+    git project and the entry isn't already listed.
+
+    Never calls ``git add`` or ``git commit``. Never strips existing
+    entries. Idempotent under repeated invocation.
+    """
+    if not (cwd / ".git").exists():
+        return
+    gitignore = cwd / ".gitignore"
+    existing = gitignore.read_text() if gitignore.exists() else ""
+    # Match any per-line gitignore entry that already covers ``.agt/``:
+    # the literal entry, the bare token, or a wildcard like ``.agt*`` /
+    # ``.agt/**`` that subsumes it.
+    if any(
+        line.strip() in (".agt", ".agt/", ".agt*", ".agt/**")
+        or line.strip().startswith((".agt/", ".agt*", ".agt/**"))
+        for line in existing.splitlines()
+    ):
+        return
+    with gitignore.open("a") as f:
+        if existing and not existing.endswith("\n"):
+            f.write("\n")
+        f.write("\n# AGT metadata (added by `agt run`)\n")
+        f.write(".agt/\n")
 
 
 @click.group()
@@ -93,13 +191,81 @@ def _echo_task_result(data: dict) -> None:
         click.echo("--- end stderr ---")
 
 
-def _run_local(prompt: str, provider: str) -> None:
+def _prepare_workdir(
+    cwd: Path,
+    task_id: str,
+    work_dir_arg: str | None,
+    no_work_dir: bool,
+) -> tuple[Path, str | None]:
+    """Validate cwd, ensure gitignore, resolve meta dir.
+
+    Returns ``(agt_meta_dir, work_dir_str)`` where ``work_dir_str`` is the
+    string sent to the Server (``None`` when ``--no-work-dir`` was given,
+    so the daemon uses its legacy fallback path).
+    """
+    if not no_work_dir:
+        try:
+            _validate_cwd(cwd)
+        except CLIError as exc:
+            click.echo(f"Error: {exc}", err=True)
+            sys.exit(2)
+        _ensure_gitignore(cwd)
+    explicit = Path(work_dir_arg).resolve() if work_dir_arg else None
+    legacy_root = cwd if no_work_dir else None
+    agt_meta_dir = _resolve_agt_meta_dir(
+        cwd, task_id, explicit, legacy_root=legacy_root,
+    )
+    work_dir_str = None if no_work_dir else str(agt_meta_dir)
+    return agt_meta_dir, work_dir_str
+
+
+async def _submit_and_wait(
+    server_url: str,
+    *,
+    prompt: str,
+    provider: str,
+    task_id: str,
+    target_daemon_id: str,
+    work_dir_str: str | None,
+) -> dict | None:
+    """Submit a task to the Server and poll until terminal. Returns the
+    final task dict, or ``None`` if the daemon never responded."""
+    async with ServerClient(base_url=server_url, daemon_id="cli-direct") as client:
+        assigned = await client.submit_task(
+            prompt=prompt,
+            provider=provider,
+            task_id=task_id,
+            target_daemon_id=target_daemon_id,
+            work_dir=work_dir_str,
+        )
+        try:
+            return await client.wait_task(assigned)
+        except TimeoutError:
+            click.echo(
+                f"⚠️  Task {assigned} still pending — is daemon "
+                f"'{target_daemon_id}' online?",
+                err=True,
+            )
+            return None
+
+
+def _run_local(
+    prompt: str,
+    provider: str,
+    agent_cwd: Path,
+    agt_meta_dir: Path,
+) -> None:
     """Run the agent on this machine (no Server round-trip). Exits 0/2."""
     controller = DaemonController()
     click.echo(f"🚀 Executing with {provider}...\n")
 
     async def _run():
-        return await controller.run(provider=provider, prompt=prompt)
+        return await controller.run(
+            provider=provider,
+            prompt=prompt,
+            agent_cwd=agent_cwd,
+            agt_meta_dir=agt_meta_dir,
+        )
 
     result = asyncio.run(_run())
 
@@ -253,11 +419,27 @@ def _pick_provider(
     show_default=True,
     envvar="AGT_SERVER_URL",
 )
+@click.option(
+    "--work-dir",
+    "work_dir",
+    default=None,
+    type=click.Path(),
+    help="Override the AGT metadata directory (defaults to <cwd>/.agt/tasks/<id>/). "
+         "Does NOT change the agent's working directory.",
+)
+@click.option(
+    "--no-work-dir",
+    is_flag=True,
+    help="Use the legacy daemon-local layout (~/.agt/workspaces/<provider>/<id>/) "
+         "for both agent cwd and AGT metadata.",
+)
 def run(
     prompt: str,
     provider: str | None,
     target_daemon_id: str | None,
     server_url: str,
+    work_dir: str | None,
+    no_work_dir: bool,
 ) -> None:
     """Spawn the agent once with the given prompt and stream its output.
 
@@ -268,33 +450,32 @@ def run(
     If ``--provider`` is omitted, the first available agent is auto-picked
     (local probe without ``--daemon``; the target daemon's registered
     runtimes otherwise).
+
+    The agent's working directory is always the user's cwd at submit time
+    unless ``--no-work-dir`` is given (legacy single-path mode). The AGT
+    metadata directory defaults to ``<cwd>/.agt/tasks/<id>/`` and can be
+    overridden with ``--work-dir``.
     """
+    cwd = Path(os.getcwd())
+    # Stable task_id so chat continuation can reuse the same id.
+    task_id = uuid.uuid4().hex[:8]
+    agt_meta_dir, work_dir_str = _prepare_workdir(cwd, task_id, work_dir, no_work_dir)
+
     provider = _pick_provider(provider, target_daemon_id, server_url)
     if target_daemon_id is None:
-        _run_local(prompt, provider)
+        _run_local(prompt, provider, agent_cwd=cwd, agt_meta_dir=agt_meta_dir)
         return
 
     click.echo(f"🚀 Submitting to daemon '{target_daemon_id}' ({provider})...\n")
-
-    async def _remote() -> dict | None:
-        async with ServerClient(base_url=server_url, daemon_id="cli-direct") as client:
-            task_id = await client.submit_task(
-                prompt=prompt,
-                provider=provider,
-                target_daemon_id=target_daemon_id,
-            )
-            try:
-                return await client.wait_task(task_id)
-            except TimeoutError:
-                click.echo(
-                    f"⚠️  Task {task_id} still pending — is daemon "
-                    f"'{target_daemon_id}' online?",
-                    err=True,
-                )
-                return None
-
     try:
-        data = asyncio.run(_remote())
+        data = asyncio.run(_submit_and_wait(
+            server_url,
+            prompt=prompt,
+            provider=provider,
+            task_id=task_id,
+            target_daemon_id=target_daemon_id,
+            work_dir_str=work_dir_str,
+        ))
     except Exception as exc:
         click.echo(f"Error: {exc}", err=True)
         sys.exit(1)
@@ -305,10 +486,23 @@ def run(
     sys.exit(0 if data.get("status") == "completed" else 2)
 
 
-def _chat_turn_local(controller: DaemonController, provider: str, prompt: str, task_id: str) -> None:
+def _chat_turn_local(
+    controller: DaemonController,
+    provider: str,
+    prompt: str,
+    task_id: str,
+    agent_cwd: Path,
+    agt_meta_dir: Path,
+) -> None:
     """Run one chat turn against the local daemon."""
     async def _run():
-        return await controller.run(provider=provider, prompt=prompt, task_id=task_id)
+        return await controller.run(
+            provider=provider,
+            prompt=prompt,
+            task_id=task_id,
+            agent_cwd=agent_cwd,
+            agt_meta_dir=agt_meta_dir,
+        )
 
     result = asyncio.run(_run())
     if result.resume_rejected:
@@ -327,6 +521,7 @@ def _chat_turn_remote(
     task_id: str,
     target_daemon_id: str,
     server_url: str,
+    work_dir_str: str | None,
 ) -> None:
     """Run one chat turn pinned to a remote daemon via the Server."""
     async def _remote() -> dict | None:
@@ -336,6 +531,7 @@ def _chat_turn_remote(
                 provider=provider,
                 task_id=task_id,
                 target_daemon_id=target_daemon_id,
+                work_dir=work_dir_str,
             )
             try:
                 return await client.wait_task(task_id)
@@ -382,10 +578,26 @@ def _chat_turn_remote(
     show_default=True,
     envvar="AGT_SERVER_URL",
 )
+@click.option(
+    "--work-dir",
+    "work_dir",
+    default=None,
+    type=click.Path(),
+    help="Override the AGT metadata directory (defaults to <cwd>/.agt/tasks/<id>/). "
+         "Does NOT change the agent's working directory.",
+)
+@click.option(
+    "--no-work-dir",
+    is_flag=True,
+    help="Use the legacy daemon-local layout (~/.agt/workspaces/<provider>/<id>/) "
+         "for both agent cwd and AGT metadata.",
+)
 def chat(
     provider: str | None,
     target_daemon_id: str | None,
     server_url: str,
+    work_dir: str | None,
+    no_work_dir: bool,
 ) -> None:
     """Interactive chat mode with session continuity.
 
@@ -395,12 +607,19 @@ def chat(
     runs directly.
 
     If ``--provider`` is omitted, the first available agent is auto-picked.
+
+    The agent's working directory is always the user's cwd at chat start
+    unless ``--no-work-dir`` is given. The AGT metadata directory defaults
+    to ``<cwd>/.agt/tasks/<id>/`` and can be overridden with ``--work-dir``.
     """
+    cwd = Path(os.getcwd())
     controller = DaemonController() if target_daemon_id is None else None
     provider = _pick_provider(
         provider, target_daemon_id, server_url, local_controller=controller,
     )
     task_id = f"chat-{uuid.uuid4().hex[:8]}"
+    agt_meta_dir, work_dir_str = _prepare_workdir(cwd, task_id, work_dir, no_work_dir)
+
     mode = f"provider={provider}"
     if target_daemon_id is not None:
         mode += f", daemon={target_daemon_id}"
@@ -424,10 +643,15 @@ def chat(
             return
 
         if controller is not None:
-            _chat_turn_local(controller, provider, line, task_id)
+            _chat_turn_local(
+                controller, provider, line, task_id, cwd, agt_meta_dir,
+            )
         else:
             assert target_daemon_id is not None  # else branch ⟹ --daemon given
-            _chat_turn_remote(provider, line, task_id, target_daemon_id, server_url)
+            _chat_turn_remote(
+                provider, line, task_id, target_daemon_id, server_url,
+                work_dir_str,
+            )
 
 
 # ── server (Phase 2) ──────────────────────────────────────────────
@@ -552,6 +776,97 @@ def task_status(task_id: str, server_url: str) -> None:
         sys.exit(1)
 
     _echo_task_result(data)
+
+
+@task.command("clean")
+@click.argument("task_id", required=False)
+@click.option(
+    "--all-done",
+    "all_done",
+    is_flag=True,
+    help="Remove work_dir for every completed/failed/timeout task.",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Allow removal even when the task is still running.",
+)
+@click.option(
+    "--server-url",
+    default="http://127.0.0.1:8420",
+    show_default=True,
+    envvar="AGT_SERVER_URL",
+)
+def task_clean(
+    task_id: str | None,
+    all_done: bool,
+    force: bool,
+    server_url: str,
+) -> None:
+    """Remove a task's local AGT metadata directory.
+
+    Reads the task's ``work_dir`` from the Server (Phase 4: cwd-derived,
+    e.g. ``<cwd>/.agt/tasks/<id>/``) and ``shutil.rmtree``'s it. Refuses
+    to touch running tasks unless ``--force`` is given, and warns (exit 4)
+    when the task has no ``work_dir`` — i.e. it belongs to a remote
+    daemon whose filesystem we don't share.
+    """
+
+    async def _fetch(ids: list[str]) -> list[dict]:
+        async with ServerClient(base_url=server_url, daemon_id="cli-direct") as client:
+            if ids:
+                return [await client.task_status(i) for i in ids]
+            return await client.list_tasks(
+                statuses=["completed", "failed", "timeout"],
+            )
+
+    if not task_id and not all_done:
+        click.echo("Error: provide a TASK_ID or pass --all-done", err=True)
+        sys.exit(2)
+
+    try:
+        tasks = asyncio.run(_fetch([task_id] if task_id else []))
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    if not tasks:
+        click.echo("No matching tasks.", err=True)
+        sys.exit(4)
+
+    failures = sum(1 for t in tasks if not _clean_one_task(t, force))
+    if failures:
+        sys.exit(4)
+
+
+def _clean_one_task(task: dict, force: bool) -> bool:
+    """Best-effort clean of one task's work_dir. Returns True on success."""
+    tid = task["task_id"]
+    status = task.get("status")
+    work_dir = task.get("work_dir")
+    if status == "running" and not force:
+        click.echo(
+            f"⚠️  {tid}: status=running, refusing to clean (use --force).",
+            err=True,
+        )
+        return False
+    if not work_dir:
+        click.echo(
+            f"⚠️  {tid}: no work_dir (remote daemon task). Skipping.",
+            err=True,
+        )
+        return False
+    path = Path(work_dir)
+    if not path.exists():
+        click.echo(f"⚠️  {tid}: {path} does not exist. Skipping.", err=True)
+        return True  # already clean — not a failure
+    try:
+        shutil.rmtree(path)
+    except OSError as exc:
+        click.echo(f"❌  {tid}: failed to remove {path}: {exc}", err=True)
+        return False
+    click.echo(f"🧹 {tid}: removed {path}")
+    return True
 
 
 # ── runtime (Phase 3.4: registry queries) ──────────────────────────

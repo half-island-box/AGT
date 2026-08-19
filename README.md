@@ -173,6 +173,52 @@ All configuration is via `AGT_*` environment variables (read by `DaemonConfig.fr
 - **No WebSocket.** Phase 2 uses HTTP. WS-RPC for the rare Uncertain-frame scenarios is Phase 3.
 - **No multi-agent orchestration.** Tasks are 1:1 with one agent run. `Task.parent_task_id` is persisted (Phase 3 placeholder) but no orchestrator reads it yet.
 
+## Phase 4 workdir: cwd-based task workdir
+
+`agt run` / `agt chat` derive a task's *AGT metadata directory* from the
+user's current working directory. The agent itself runs in that same cwd —
+intuitive and "what you see is what you operate on".
+
+```
+cd /home/user/project-x
+agt run --prompt "explain this module"
+#     agent cwd  = /home/user/project-x           (the user's cwd)
+#     AGT meta   = /home/user/project-x/.agt/tasks/<id>/   (sessions.json, etc.)
+```
+
+If `/home/user/project-x/.git` exists, `agt run` idempotently appends
+`.agt/` to `.gitignore` so the metadata never leaks into a commit.
+
+### Flags
+
+| Flag | Purpose |
+|------|---------|
+| `--work-dir <path>` | Override the AGT metadata directory. Agent cwd is **not** changed. Useful for sandboxed setups. |
+| `--no-work-dir` | Use the legacy daemon-local layout (`~/.agt/workspaces/<provider>/<id>/`) for both agent cwd and AGT metadata. |
+
+### Cleaning up
+
+```
+agt task clean <task_id>          # remove one task's AGT metadata
+agt task clean --all-done         # batch-remove completed/failed/timeout tasks
+agt task clean <task_id> --force  # also remove a still-running task's metadata
+```
+
+Remote-daemon tasks (no `work_dir` on the Server) are warned about and
+skipped — the receiving daemon's filesystem isn't ours to touch.
+
+### Identity AGENT.md path change
+
+Identity `AGENT.md` files moved from `~/.agt/workspaces/<provider>/identity/<did>/`
+to `~/.agt/identities/<did>/`. Identity is now daemon-local and **decoupled
+from provider** — the same identity shares one AGENT.md across providers.
+
+If you have existing files, move them once:
+
+```
+mv -r ~/.agt/workspaces/*/identity/* ~/.agt/identities/
+```
+
 ## Architecture
 
 See [docs/spec/local-agent-runtime-flow.md](docs/spec/local-agent-runtime-flow.md) for the high-level model, and [docs/impl/python-replication-design.md](docs/impl/python-replication-design.md) for the Python implementation details. The key invariant in Phase 1:

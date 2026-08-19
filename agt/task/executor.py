@@ -335,10 +335,22 @@ class TaskExecutor:
         return env
 
     def _ensure_work_dir(self, task: Task) -> Path:
-        if task.work_dir is None:
-            return Path.cwd()
-        task.work_dir.mkdir(parents=True, exist_ok=True)
-        return task.work_dir
+        """Prepare ``task.work_dir`` and return the directory the agent
+        subprocess should spawn in.
+
+        Returns ``task.agent_cwd`` (the user's cwd at submit time) when
+        set, else falls back to ``task.work_dir`` (legacy single-path
+        mode). When ``task.work_dir`` is ``None`` we use the daemon's
+        own cwd as a last-resort safety net — the caller's contract is
+        to always set at least one of the two.
+        """
+        # Phase 4 workdir: create the AGT metadata directory first so
+        # session.json / meta.json writes inside the executor never race
+        # with mkdir. The agent cwd is kept *separate* from this — we
+        # never write bookkeeping files there.
+        if task.work_dir is not None:
+            task.work_dir.mkdir(parents=True, exist_ok=True)
+        return task.agent_cwd or task.work_dir or Path.cwd()
 
 
 __all__ = ["TaskExecutor", "AgentNotFoundError"]

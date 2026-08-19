@@ -44,6 +44,10 @@ class SubmitTaskRequest(BaseModel):
     task_id: str | None = None  # if provided, server resumes that task's session
     # Step 3.6: pin this task to a specific daemon. None = free task.
     target_daemon_id: str | None = None
+    # Phase 4 workdir: AGT metadata directory, derived from the user's cwd.
+    # Server persists it ONLY for local daemons; remote daemons supply
+    # their own fallback path on the receiving side.
+    work_dir: str | None = None
 
 
 class SubmitTaskResponse(BaseModel):
@@ -104,6 +108,7 @@ class TaskStatusResponse(BaseModel):
     updated_at: str
     daemon_id: str | None = None
     target_daemon_id: str | None = None
+    work_dir: str | None = None  # Phase 4: AGT metadata directory (None = legacy / remote)
 
 
 # ── Session ─────────────────────────────────────────────────────────

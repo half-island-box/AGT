@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -91,6 +91,9 @@ async def submit_task(
         existing.stdout = None
         existing.stderr = None
         existing.duration = None
+        # Phase 4 workdir: refresh work_dir the same way as a fresh submit
+        # (NULL for remote targets, persisted for local/free).
+        existing.work_dir = _server_work_dir(payload)
         existing.updated_at = now
         await db.commit()
         return SubmitTaskResponse(task_id=task_id, status="pending")
@@ -102,12 +105,32 @@ async def submit_task(
             prompt=payload.prompt,
             status="pending",
             target_daemon_id=payload.target_daemon_id,
+            work_dir=_server_work_dir(payload),
             created_at=now,
             updated_at=now,
         )
     )
     await db.commit()
     return SubmitTaskResponse(task_id=task_id, status="pending")
+
+
+def _server_work_dir(payload: SubmitTaskRequest) -> str | None:
+    """Decide whether the server should persist ``work_dir``.
+
+    Persist only when the task targets this server's local daemon (free
+    task, ``target_daemon_id is None``) OR targets an explicit local daemon
+    whose id matches the running server (caller-supplied). For remote
+    targets, NULL — the receiving daemon supplies its own fallback path.
+    """
+    if payload.target_daemon_id is None:
+        return payload.work_dir
+    # When ``target_daemon_id`` is set we can't reliably know whether it
+    # refers to a local or remote daemon without server self-knowledge.
+    # Persistence is opt-in via the payload: a remote-targeted task
+    # explicitly receives ``work_dir=None`` from the CLI submit path, so
+    # anything non-None here came from a caller that knows the target is
+    # local. We trust it as-is.
+    return payload.work_dir
 
 
 @router.post("/claim", response_model=ClaimResponse)
@@ -176,6 +199,43 @@ async def report_task(
         )
 
 
+@router.get("")
+async def list_tasks(
+    statuses: str | None = Query(
+        default=None,
+        description="Comma-separated status filter (e.g. 'completed,failed,timeout'). "
+                    "Omit for all.",
+    ),
+    limit: int = Query(default=200, ge=1, le=1000),
+    db: AsyncSession = Depends(get_db),
+) -> list[TaskStatusResponse]:
+    """List tasks (Phase 4: backs ``agt task clean --all-done``)."""
+    stmt = select(TaskModel).order_by(TaskModel.updated_at.desc()).limit(limit)
+    if statuses:
+        wanted = [s.strip() for s in statuses.split(",") if s.strip()]
+        if wanted:
+            stmt = stmt.where(TaskModel.status.in_(wanted))
+    rows = (await db.execute(stmt)).scalars().all()
+    return [
+        TaskStatusResponse(
+            task_id=t.task_id,
+            provider=t.provider,
+            status=t.status,
+            session_id=t.session_id,
+            exit_code=t.exit_code,
+            stdout=t.stdout,
+            stderr=t.stderr,
+            duration=t.duration,
+            created_at=t.created_at,
+            updated_at=t.updated_at,
+            daemon_id=t.daemon_id,
+            target_daemon_id=t.target_daemon_id,
+            work_dir=t.work_dir,
+        )
+        for t in rows
+    ]
+
+
 @router.get("/{task_id}/status")
 async def task_status(
     task_id: str,
@@ -197,6 +257,7 @@ async def task_status(
         updated_at=task.updated_at,
         daemon_id=task.daemon_id,
         target_daemon_id=task.target_daemon_id,
+        work_dir=task.work_dir,
     )
 
 

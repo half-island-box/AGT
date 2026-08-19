@@ -32,6 +32,17 @@ class SessionStore:
         self._records: dict[str, SessionRecord] = {}
         self._load()
 
+    @classmethod
+    def at(cls, path: Path) -> "SessionStore":
+        """Convenience constructor for a per-task store rooted at ``path``.
+
+        Phase 4: when ``task.work_dir`` is set, the daemon writes the
+        session pointer there instead of the global ``~/.agt/sessions.json``
+        so each task's session state lives next to its other AGT
+        metadata and `agt task clean` can remove it cleanly.
+        """
+        return cls(path=path / "sessions.json")
+
     # ── Public API ──────────────────────────────────────────────
 
     def get(self, task_id: str, provider: str) -> str | None:

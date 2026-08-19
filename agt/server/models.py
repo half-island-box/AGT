@@ -58,6 +58,11 @@ class TaskModel(Base):
         ForeignKey("tasks.task_id", ondelete="SET NULL"),
         nullable=True,
     )
+    # Phase 4 workdir: AGT metadata directory for this task, derived from
+    # the user's cwd at submit time. NULL for legacy tasks (daemon falls
+    # back to work_dir_root) and for remote-daemon tasks (daemon uses its
+    # own fallback).
+    work_dir: Mapped[str | None] = mapped_column(String(512), nullable=True)
     created_at: Mapped[str] = mapped_column(String(32), nullable=False)
     updated_at: Mapped[str] = mapped_column(String(32), nullable=False)
 

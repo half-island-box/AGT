@@ -35,5 +35,15 @@ def ensure_schema(conn: Connection) -> None:
         )
         log.info("Migrated tasks table: added target_daemon_id column")
 
+    # Phase 4 workdir: AGT metadata directory for the task, derived from
+    # the user's cwd at submit time. NULL for legacy tasks (daemon falls
+    # back to work_dir_root / provider / task_id) and for remote-daemon
+    # tasks (the receiving daemon supplies its own fallback path).
+    if "work_dir" not in _column_names(conn, "tasks"):
+        conn.exec_driver_sql(
+            "ALTER TABLE tasks ADD COLUMN work_dir VARCHAR(512)"
+        )
+        log.info("Migrated tasks table: added work_dir column")
+
 
 __all__ = ["ensure_schema"]
