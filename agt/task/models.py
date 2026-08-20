@@ -18,9 +18,10 @@ class Task:
 
     prompt: str
     provider: str
-    # AGT metadata directory: where AGT writes session.json / meta.json /
-    # claim state. Derived from the user's cwd at submit time and persisted
-    # to ``tasks.work_dir`` so chat resume stays consistent.
+    # Optional AGT metadata directory for the task. Bare ``agt chat``
+    # leaves this ``None`` (no per-task subdir is created). Set only when
+    # the caller explicitly asked for one (``--work-dir`` override,
+    # ``--no-work-dir`` legacy path, or a server-supplied value).
     work_dir: Path | None = None
     # Directory the agent subprocess runs in (its ``cwd``). Defaults to the
     # user's cwd at submit time. Not persisted — when missing, the executor

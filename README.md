@@ -15,12 +15,12 @@ This installs the `agt` console script (entry point declared in `pyproject.toml`
 
 ## Commands
 
-| Command | Purpose |
-|---------|---------|
-| `agt probe` | Discover AI agent CLIs installed on this machine. |
-| `agt run -p "..."` | Spawn the agent once with a prompt and stream its output. |
-| `agt chat` | Interactive chat — each turn spawns a fresh agent subprocess; session id is reused across turns via the `SessionStore` so Claude Code's `--resume` carries conversation context forward. |
-| `agt daemon start` | Phase 2 placeholder. In Phase 1, `run` / `chat` work without a background daemon. |
+| Command              | Purpose                                                                                                                                                                                      |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `agt probe`        | Discover AI agent CLIs installed on this machine.                                                                                                                                            |
+| `agt run -p "..."` | Spawn the agent once with a prompt and stream its output.                                                                                                                                    |
+| `agt chat`         | Interactive chat — each turn spawns a fresh agent subprocess; the session id is persisted per-cwd in `<cwd>/.agt/sessions.json` (tagged with the provider) so Claude Code's `--resume` carries context forward. `--list` shows every session in the cwd with a `PROVIDER` column; `--list --provider X` filters to one agent; `--resume <sid>` restores one; bare `agt chat` starts a new session. |
+| `agt daemon start` | Phase 2 placeholder. In Phase 1,`run` / `chat` work without a background daemon.                                                                                                         |
 
 ### Examples
 
@@ -53,6 +53,31 @@ agt> 再加个 --version 参数
 
 agt> exit
 👋 Bye!
+
+# List every session created in this cwd (with its provider), then resume one
+$ agt chat --list
+2 session(s) in /home/user/project-x/.agt/
+
+  SESSION                 PROVIDER  LAST USED   TURNS  FIRST PROMPT
+  ────────────────────────────────────────────────────────────────
+  abc-1234…               claude    5 min ago   3     帮我加个 --debug 参数
+  def-5678…               codex     2 days ago  1     加个日志
+
+$ agt chat --list --provider codex   # filter to one agent
+1 session(s) in /home/user/project-x/.agt/
+
+  SESSION                 PROVIDER  LAST USED   TURNS  FIRST PROMPT
+  ────────────────────────────────────────────────────────────────
+  def-5678…               codex     2 days ago  1     加个日志
+
+$ agt chat --resume abc-1234…
+─── history of abc-1234… (6 message(s)) ───
+> user: 帮我加个 --debug 参数
+· assistant: ...
+─── end history ───
+
+🚀 agt chat mode (provider=claude, task=chat-…, resume=abc-1234…). ...
+agt>
 ```
 
 ## Phase 2: Server + background Daemon
@@ -88,19 +113,19 @@ $ for i in 1 2 3; do agt task submit -p "task $i" &; done
 $ agt daemon stop
 ```
 
-The Server exposes its full API surface at <http://127.0.0.1:8420/docs> (FastAPI auto-generated OpenAPI).
+The Server exposes its full API surface at [http://127.0.0.1:8420/docs](http://127.0.0.1:8420/docs) (FastAPI auto-generated OpenAPI).
 
 ### New env vars (Phase 2)
 
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `AGT_SERVER_PORT` | `8420` | Server TCP port |
-| `AGT_SERVER_HOST` | `127.0.0.1` | Server bind address (localhost-only) |
-| `AGT_DB_PATH` | `~/.agt/agt.db` | SQLite database file |
-| `AGT_DAEMON_PORT` | `8421` | Local resource server (only for agent subprocesses) |
-| `AGT_SERVER_SECRET` | — | **Phase 3, required.** Shared HMAC secret between Server and Daemon for task-scoped tokens. Generate with `openssl rand -hex 32`. |
-| `AGT_DAEMON_LOCAL_TOKEN` | random per launch | Phase 3. Token for `X-Daemon-Local-Token` on the local resource server. Auto-rotated each daemon restart. |
-| `AGT_USE_WS_CLAIM` | `0` | **Phase 3.3, opt-in.** Remote daemon only. Set to `1` to claim via WS-first (`ws://<server>/ws/daemon`) with HTTP fallback; HTTP-only otherwise. |
+| Variable                   | Default           | Purpose                                                                                                                                                    |
+| -------------------------- | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AGT_SERVER_PORT`        | `8420`          | Server TCP port                                                                                                                                            |
+| `AGT_SERVER_HOST`        | `127.0.0.1`     | Server bind address (localhost-only)                                                                                                                       |
+| `AGT_DB_PATH`            | `~/.agt/agt.db` | SQLite database file                                                                                                                                       |
+| `AGT_DAEMON_PORT`        | `8421`          | Local resource server (only for agent subprocesses)                                                                                                        |
+| `AGT_SERVER_SECRET`      | —                | **Phase 3, required.** Shared HMAC secret between Server and Daemon for task-scoped tokens. Generate with `openssl rand -hex 32`.                  |
+| `AGT_DAEMON_LOCAL_TOKEN` | random per launch | Phase 3. Token for`X-Daemon-Local-Token` on the local resource server. Auto-rotated each daemon restart.                                                 |
+| `AGT_USE_WS_CLAIM`       | `0`             | **Phase 3.3, opt-in.** Remote daemon only. Set to `1` to claim via WS-first (`ws://<server>/ws/daemon`) with HTTP fallback; HTTP-only otherwise. |
 
 `AGT_SERVER_URL` is read by both the CLI's `task` commands and the Daemon.
 
@@ -155,17 +180,17 @@ double-claim on transient disconnects.
 
 All configuration is via `AGT_*` environment variables (read by `DaemonConfig.from_env()`):
 
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `AGT_SERVER_URL` | — | Multica server URL (Phase 2) |
-| `AGT_DAEMON_ID` | auto uuid[:8] | Stable daemon identifier |
-| `AGT_DEVICE_NAME` | hostname | Display name for this machine |
-| `AGT_RUNTIME_NAME` | — | Optional override for Runtime names |
-| `AGT_MAX_CONCURRENT` | 1 | Phase 2: parallel task limit |
-| `AGT_AGENT_TIMEOUT` | 600 | Seconds before a hung agent is killed |
-| `AGT_WORK_DIR` | `~/.agt/workspaces` | Root for per-task working directories |
-| `AGT_CLAUDE_PATH` | — | Override path to `claude` binary |
-| `AGT_EXTRA_AGENTS` | — | Extra agent definitions: `cmd:provider:Display,cmd:provider:Display` |
+| Variable               | Default               | Purpose                                                               |
+| ---------------------- | --------------------- | --------------------------------------------------------------------- |
+| `AGT_SERVER_URL`     | —                    | Multica server URL (Phase 2)                                          |
+| `AGT_DAEMON_ID`      | auto uuid[:8]         | Stable daemon identifier                                              |
+| `AGT_DEVICE_NAME`    | hostname              | Display name for this machine                                         |
+| `AGT_RUNTIME_NAME`   | —                    | Optional override for Runtime names                                   |
+| `AGT_MAX_CONCURRENT` | 1                     | Phase 2: parallel task limit                                          |
+| `AGT_AGENT_TIMEOUT`  | 600                   | Seconds before a hung agent is killed                                 |
+| `AGT_WORK_DIR`       | `~/.agt/workspaces` | Root for per-task working directories                                 |
+| `AGT_CLAUDE_PATH`    | —                    | Override path to`claude` binary                                     |
+| `AGT_EXTRA_AGENTS`   | —                    | Extra agent definitions:`cmd:provider:Display,cmd:provider:Display` |
 
 ## Phase 2 limitations
 
@@ -175,15 +200,17 @@ All configuration is via `AGT_*` environment variables (read by `DaemonConfig.fr
 
 ## Phase 4 workdir: cwd-based task workdir
 
-`agt run` / `agt chat` derive a task's *AGT metadata directory* from the
-user's current working directory. The agent itself runs in that same cwd —
-intuitive and "what you see is what you operate on".
+`agt run` / `agt chat` run the agent in the user's current working
+directory — intuitive and "what you see is what you operate on". Bare
+`agt chat` no longer creates a per-task `<cwd>/.agt/tasks/<id>/`
+subdirectory (that directory was always empty and just accumulated).
+The session index is the only thing stored per cwd.
 
 ```
 cd /home/user/project-x
 agt run --prompt "explain this module"
 #     agent cwd  = /home/user/project-x           (the user's cwd)
-#     AGT meta   = /home/user/project-x/.agt/tasks/<id>/   (sessions.json, etc.)
+#     chat sessions = /home/user/project-x/.agt/sessions.json  (one entry per chat)
 ```
 
 If `/home/user/project-x/.git` exists, `agt run` idempotently appends
@@ -191,10 +218,10 @@ If `/home/user/project-x/.git` exists, `agt run` idempotently appends
 
 ### Flags
 
-| Flag | Purpose |
-|------|---------|
-| `--work-dir <path>` | Override the AGT metadata directory. Agent cwd is **not** changed. Useful for sandboxed setups. |
-| `--no-work-dir` | Use the legacy daemon-local layout (`~/.agt/workspaces/<provider>/<id>/`) for both agent cwd and AGT metadata. |
+| Flag                  | Purpose                                                                                                          |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `--work-dir <path>` | Create an AGT metadata directory at the given path (bare chat creates none by default). Agent cwd is**not** changed. Useful for sandboxed setups. |
+| `--no-work-dir`     | Use the legacy daemon-local layout (`~/.agt/workspaces/<provider>/<id>/`) for both agent cwd and AGT metadata. |
 
 ### Cleaning up
 
@@ -231,6 +258,7 @@ See [docs/spec/local-agent-runtime-flow.md](docs/spec/local-agent-runtime-flow.m
 │  Server  │<──────────────────────>│  Daemon  │<─────────────────────>│ Agent CLI   │
 └──────────┘   heartbeat/claim      └──────────┘   spawn → exec → exit └─────────────┘
                                        │
-                                       └─ SessionStore (~/.agt/sessions.json)
-                                          task_id → session_id (pointer only)
+                                       └─ CwdSessionStore (<cwd>/.agt/sessions.json)
+                                          session_id → {provider, task_id, turn_count, first_prompt}
+                                          (append-only, one entry per chat session)
 ```

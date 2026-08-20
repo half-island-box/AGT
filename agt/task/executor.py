@@ -40,6 +40,12 @@ _SESSION_ID_REGEXES: tuple[re.Pattern[str], ...] = (
     re.compile(r"\b(?:created|new)\s+session[:\s]+([A-Za-z0-9_-]{6,})", re.IGNORECASE),
 )
 
+# A full UUID — the session id embedded in Codex rollout filenames
+# (``rollout-<ts>-<uuid>.jsonl``).
+_UUID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+
 
 def _newest_jsonl_session(projects_root: Path) -> str | None:
     """Find the most recently modified <uuid>.jsonl under projects_root."""
@@ -94,15 +100,50 @@ def _extract_session_id_from_claude_projects(work_dir: Path | None) -> str | Non
     return _newest_jsonl_session(projects_root)
 
 
-def _extract_session_id(stdout: str, stderr: str, work_dir: Path | None) -> str | None:
+def _extract_session_id_from_codex() -> str | None:
+    """Fallback: the session uuid of Codex's newest rollout file.
+
+    Codex stores one ``rollout-<ts>-<uuid>.jsonl`` per session under
+    ``~/.codex/sessions/<YYYY>/<MM>/<DD>/``. When ``codex exec`` doesn't
+    print a parseable session id, the most-recently-modified rollout's
+    uuid is the best-effort answer to "which session did we just create".
+    """
+    sessions_root = Path.home() / ".codex" / "sessions"
+    if not sessions_root.is_dir():
+        return None
+    candidates: list[tuple[float, str]] = []
+    for path in sessions_root.rglob("*.jsonl"):
+        match = _UUID_RE.search(path.stem)
+        if not match:
+            continue
+        try:
+            candidates.append((path.stat().st_mtime, match.group(0)))
+        except OSError:
+            continue
+    if not candidates:
+        return None
+    candidates.sort(key=lambda pair: pair[0], reverse=True)
+    return candidates[0][1]
+
+
+def _extract_session_id(
+    stdout: str,
+    stderr: str,
+    work_dir: Path | None,
+    provider: str | None = None,
+) -> str | None:
     """Extract a fresh session id from output (stdout+stderr), then disk.
 
     Some CLIs print their session banner on stderr (codex exec does),
-    so both streams are searched.
+    so both streams are searched. The disk fallback is provider-specific:
+    codex reads ``~/.codex/sessions``, everything else reads Claude
+    Code's ``~/.claude/projects``.
     """
     from_output = _extract_session_id_from_output(stdout + "\n" + stderr)
     if from_output:
         return from_output
+    if provider == "codex":
+        return _extract_session_id_from_codex()
     return _extract_session_id_from_claude_projects(work_dir)
 
 
@@ -199,7 +240,7 @@ class TaskExecutor:
                 session_id = task.resume_session_id
                 resume_rejected = False
         else:
-            session_id = _extract_session_id(stdout, stderr, work_dir)
+            session_id = _extract_session_id(stdout, stderr, work_dir, task.provider)
             resume_rejected = False
 
         if exit_code == 0:
@@ -281,12 +322,14 @@ class TaskExecutor:
 
         Style is taken from the probed ``AgentEntry.cli_style``:
 
-        - ``"codex"``: ``<bin> exec --skip-git-repo-check [resume <id>]
-          <prompt>`` — Codex's non-interactive mode is the ``exec``
+        - ``"codex"``: ``<bin> exec --skip-git-repo-check [resume <id>
+          --all] <prompt>`` — Codex's non-interactive mode is the ``exec``
           subcommand with a positional prompt; resume is a nested
           subcommand. ``--skip-git-repo-check`` is required because our
           per-task work dirs aren't git repos and codex refuses to run
-          outside one without it.
+          outside one without it. ``--all`` makes the resume search
+          every directory, not just the cwd (codex scopes resume/--last
+          to the cwd by default, unlike Claude Code's project-hash).
         - ``"claude"`` (default): ``<bin> [--resume <id>] -p <prompt>``
           — Claude Code and most ``-p``-style CLIs.
         """
@@ -294,7 +337,7 @@ class TaskExecutor:
         if style == "codex":
             cmd: list[str] = [str(binary), "exec", "--skip-git-repo-check"]
             if task.resume_session_id:
-                cmd += ["resume", task.resume_session_id]
+                cmd += ["resume", task.resume_session_id, "--all"]
             cmd += [task.prompt]
             return cmd
         cmd = [str(binary)]
@@ -344,10 +387,12 @@ class TaskExecutor:
         own cwd as a last-resort safety net — the caller's contract is
         to always set at least one of the two.
         """
-        # Phase 4 workdir: create the AGT metadata directory first so
-        # session.json / meta.json writes inside the executor never race
-        # with mkdir. The agent cwd is kept *separate* from this — we
-        # never write bookkeeping files there.
+        # Phase 4 workdir: when an explicit meta dir is set (e.g.
+        # ``--work-dir`` override), ensure it exists before the
+        # subprocess spawns. Bare ``agt chat`` leaves ``task.work_dir``
+        # as ``None`` and we skip the mkdir entirely — nothing is ever
+        # written under it. The agent cwd is kept *separate* from any
+        # meta dir; we never write bookkeeping files there.
         if task.work_dir is not None:
             task.work_dir.mkdir(parents=True, exist_ok=True)
         return task.agent_cwd or task.work_dir or Path.cwd()

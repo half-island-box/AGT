@@ -101,7 +101,7 @@ def test_codex_style_resume_command() -> None:
     )
     assert cmd == [
         "/usr/bin/codex", "exec", "--skip-git-repo-check",
-        "resume", "s-abc-456", "hello world",
+        "resume", "s-abc-456", "--all", "hello world",
     ]
 
 

@@ -19,7 +19,7 @@ from agt.daemon.daemon import Daemon
 from agt.runtime.models import AgentEntry, Runtime
 from agt.task.executor import TaskExecutor
 from agt.task.models import Task, TaskResult
-from agt.task.session import SessionStore
+from agt.task.session import CwdSessionStore
 
 
 SECRET = "interactive-test-secret"
@@ -163,7 +163,6 @@ def _make_daemon(tmp_path: Path) -> Daemon:
     controller = Daemon(config=cfg)
     controller._started = True
     controller._runtimes["claude"] = _runtime()
-    controller.session_store = SessionStore(tmp_path / "sessions.json")
     return controller
 
 
@@ -194,8 +193,8 @@ def test_daemon_run_threads_interactive_to_executor(
     asyncio.run(_run())
 
     assert captured["interactive"] is True
-    saved = controller.session_store.get("t-cli", "claude")
-    assert saved is None, "session_id should NOT be written in interactive mode"
+    store = CwdSessionStore.load_or_create(tmp_path / "claude" / "t-cli")
+    assert store.is_empty(), "session_id should NOT be written in interactive mode"
 
 
 def test_daemon_run_pipe_mode_writes_session(
@@ -223,5 +222,143 @@ def test_daemon_run_pipe_mode_writes_session(
     asyncio.run(_run())
 
     assert captured["interactive"] is False
-    saved = controller.session_store.get("t-pipe", "claude")
-    assert saved == "s-xyz"
+    store = CwdSessionStore.load_or_create(tmp_path / "claude" / "t-pipe")
+    assert store.get("s-xyz") is not None
+
+
+def test_bare_chat_does_not_create_tasks_subdir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``Daemon.run`` called like bare ``agt chat`` (agent_cwd given,
+    agt_meta_dir=None) must NOT create ``<agent_cwd>/.agt/tasks/<id>/``.
+    That subdirectory was always empty and just accumulated over time.
+    """
+    async def fake_execute(self, task, *, interactive=False):
+        return _fake_result(task.task_id, task.provider, session_id=None)
+
+    monkeypatch.setattr(
+        "agt.task.executor.TaskExecutor.execute", fake_execute,
+    )
+
+    agent_cwd = tmp_path / "proj"
+    agent_cwd.mkdir()
+
+    async def _run() -> None:
+        controller = _make_daemon(tmp_path)
+        await controller.run(
+            provider="claude", prompt="hi", task_id="chat-abcd1234",
+            agent_cwd=agent_cwd,
+            # agt_meta_dir deliberately omitted (bare-chat path).
+        )
+
+    asyncio.run(_run())
+
+    tasks_dir = agent_cwd / ".agt" / "tasks"
+    assert not tasks_dir.exists(), (
+        f"bare chat must not create {tasks_dir}; "
+        f"contents: {sorted(p.name for p in tasks_dir.iterdir()) if tasks_dir.exists() else 'n/a'}"
+    )
+
+
+def test_explicit_work_dir_still_creates_meta_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Regression: ``--work-dir`` / ``--no-work-dir`` overrides still
+    create their per-task meta dirs as the user explicitly asked."""
+    captured: dict = {}
+
+    async def fake_execute(self, task, *, interactive=False):
+        captured["work_dir"] = task.work_dir
+        return _fake_result(task.task_id, task.provider, session_id=None)
+
+    monkeypatch.setattr(
+        "agt.task.executor.TaskExecutor.execute", fake_execute,
+    )
+
+    explicit = tmp_path / "meta"
+
+    async def _run() -> None:
+        controller = _make_daemon(tmp_path)
+        await controller.run(
+            provider="claude", prompt="hi", task_id="t-explicit",
+            agent_cwd=tmp_path / "proj",
+            agt_meta_dir=explicit,
+        )
+
+    asyncio.run(_run())
+
+    assert captured["work_dir"] == explicit, (
+        "explicit agt_meta_dir must be wired into task.work_dir"
+    )
+
+    # Now exercise the real ``_ensure_work_dir`` to confirm the mkdir
+    # path still works for explicit overrides.
+    task = Task(
+        prompt="hi", provider="claude", task_id="t-explicit",
+        work_dir=tmp_path / "meta2",
+    )
+    executor = TaskExecutor(runtime=_runtime(), config=_config())
+    executor._ensure_work_dir(task)
+    assert (tmp_path / "meta2").is_dir()
+
+
+def test_legacy_fallback_when_both_cwds_absent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Regression: when neither ``agent_cwd`` nor ``agt_meta_dir`` is
+    given, the daemon falls back to its ``work_dir_root`` legacy layout
+    (e.g. ``~/.agt/workspaces/<provider>/<id>/``)."""
+    captured: dict = {}
+
+    async def fake_execute(self, task, *, interactive=False):
+        captured["work_dir"] = task.work_dir
+        captured["agent_cwd"] = task.agent_cwd
+        return _fake_result(task.task_id, task.provider, session_id=None)
+
+    monkeypatch.setattr(
+        "agt.task.executor.TaskExecutor.execute", fake_execute,
+    )
+
+    async def _run() -> TaskResult:
+        controller = _make_daemon(tmp_path)
+        return await controller.run(
+            provider="claude", prompt="hi", task_id="t-legacy",
+        )
+
+    result = asyncio.run(_run())
+
+    assert result.status == "completed"
+    # task.work_dir is wired to the legacy work_dir_root path so that
+    # ``_ensure_work_dir`` will mkdir it when a real executor runs.
+    expected_legacy = tmp_path / "claude" / "t-legacy"
+    assert captured["work_dir"] == expected_legacy
+    # And confirm the real mkdir path still works for legacy.
+    task = Task(
+        prompt="hi", provider="claude", task_id="t-legacy2",
+        work_dir=tmp_path / "claude" / "t-legacy2",
+    )
+    executor = TaskExecutor(runtime=_runtime(), config=_config())
+    executor._ensure_work_dir(task)
+    assert (tmp_path / "claude" / "t-legacy2").is_dir()
+
+
+def test_bare_chat_no_mkdir_when_work_dir_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """When ``task.work_dir`` is ``None`` (bare-chat path), the executor
+    must NOT create any directory — ``_ensure_work_dir`` just returns
+    ``agent_cwd``. This is the executor-side half of the "no per-task
+    subdir" guarantee."""
+    agent_cwd = tmp_path / "proj"
+    agent_cwd.mkdir()
+    task = Task(
+        prompt="hi", provider="claude", task_id="t-bare",
+        agent_cwd=agent_cwd,
+        # work_dir deliberately None.
+    )
+    executor = TaskExecutor(runtime=_runtime(), config=_config())
+    cwd = executor._ensure_work_dir(task)
+    assert cwd == agent_cwd
+    assert not (agent_cwd / ".agt").exists(), (
+        "executor must not create .agt/ under agent_cwd"
+    )

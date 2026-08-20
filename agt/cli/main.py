@@ -17,6 +17,7 @@ import os
 import shutil
 import signal
 import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -26,6 +27,8 @@ from ..comm import ServerClient
 from ..daemon.daemon import Daemon as DaemonController
 from ..runtime.models import AgentEntry
 from ..server.services.auth_service import TaskToken
+from ..task.session import CwdSessionStore
+from ..agent_history import load_history
 
 
 # ── workdir helpers (Phase 4) ──────────────────────────────────────
@@ -493,6 +496,10 @@ def _chat_turn_local(
     task_id: str,
     agent_cwd: Path,
     agt_meta_dir: Path,
+    *,
+    resume_session_id: str | None = None,
+    first_prompt: str | None = None,
+    turn_index: int = 1,
 ) -> None:
     """Run one chat turn against the local daemon."""
     async def _run():
@@ -502,6 +509,9 @@ def _chat_turn_local(
             task_id=task_id,
             agent_cwd=agent_cwd,
             agt_meta_dir=agt_meta_dir,
+            resume_session_id=resume_session_id,
+            first_prompt=first_prompt,
+            turn_index=turn_index,
         )
 
     result = asyncio.run(_run())
@@ -564,7 +574,8 @@ def _chat_turn_remote(
     default=None,
     help="Provider key (e.g. claude, codex, cursor). "
          "Auto-pick first available if omitted "
-         "(local probe without --daemon, daemon's runtimes with --daemon).",
+         "(local probe without --daemon, daemon's runtimes with --daemon). "
+         "With --list, filters the session list to this agent.",
 )
 @click.option(
     "--daemon",
@@ -583,8 +594,9 @@ def _chat_turn_remote(
     "work_dir",
     default=None,
     type=click.Path(),
-    help="Override the AGT metadata directory (defaults to <cwd>/.agt/tasks/<id>/). "
-         "Does NOT change the agent's working directory.",
+    help="Create an AGT metadata directory at the given path (bare chat "
+         "creates none by default). Does NOT change the agent's working "
+         "directory.",
 )
 @click.option(
     "--no-work-dir",
@@ -592,12 +604,36 @@ def _chat_turn_remote(
     help="Use the legacy daemon-local layout (~/.agt/workspaces/<provider>/<id>/) "
          "for both agent cwd and AGT metadata.",
 )
+@click.option(
+    "--list",
+    "list_mode",
+    is_flag=True,
+    help="List chat sessions stored for this cwd (all providers by "
+         "default; add --provider to filter) and exit.",
+)
+@click.option(
+    "--resume",
+    "resume_session_id",
+    default=None,
+    help="Resume an existing session by id. The agent subprocess is "
+         "spawned with --resume <id> (or provider equivalent) so its "
+         "history is restored; the same history is also printed to "
+         "the terminal before the first prompt.",
+)
+@click.option(
+    "--no-history",
+    is_flag=True,
+    help="With --resume: skip printing the history; just resume.",
+)
 def chat(
     provider: str | None,
     target_daemon_id: str | None,
     server_url: str,
     work_dir: str | None,
     no_work_dir: bool,
+    list_mode: bool,
+    resume_session_id: str | None,
+    no_history: bool,
 ) -> None:
     """Interactive chat mode with session continuity.
 
@@ -608,50 +644,276 @@ def chat(
 
     If ``--provider`` is omitted, the first available agent is auto-picked.
 
-    The agent's working directory is always the user's cwd at chat start
-    unless ``--no-work-dir`` is given. The AGT metadata directory defaults
-    to ``<cwd>/.agt/tasks/<id>/`` and can be overridden with ``--work-dir``.
+    The agent's working directory is always the user's cwd at chat start.
+    No per-task meta subdir is created for bare ``agt chat``; the session
+    index lives at ``<cwd>/.agt/sessions.json`` and that's it. ``--work-dir``
+    and ``--no-work-dir`` still create their respective dirs (explicit
+    overrides).
+
+    Sessions are stored per cwd in ``<cwd>/.agt/sessions.json``. Each
+    chat session gets its own entry (no overwrite) tagged with the
+    provider that created it. ``--list`` shows them all (with a
+    ``PROVIDER`` column); ``--list --provider X`` filters to one agent.
+    ``--resume <sid>`` restores one (and spawns the agent with the
+    matching ``--resume`` flag so its own state is recovered).
+    Without either flag, a **new** session is started and recorded on
+    exit.
     """
     cwd = Path(os.getcwd())
+
+    if list_mode:
+        _print_chat_session_list(cwd, provider)
+        return
+
+    if resume_session_id is not None and not no_history:
+        _print_resumed_history(cwd, resume_session_id, target_daemon_id)
+
     controller = DaemonController() if target_daemon_id is None else None
     provider = _pick_provider(
         provider, target_daemon_id, server_url, local_controller=controller,
     )
     task_id = f"chat-{uuid.uuid4().hex[:8]}"
-    agt_meta_dir, work_dir_str = _prepare_workdir(cwd, task_id, work_dir, no_work_dir)
+    # Bare ``agt chat`` no longer creates a per-task meta subdir under
+    # ``<cwd>/.agt/tasks/chat-xxx/`` — that directory was always empty
+    # (nothing wrote to it) and just accumulated over time. The session
+    # index lives at ``<cwd>/.agt/sessions.json`` (keyed by agent_cwd),
+    # and the agent subprocess runs in the user's cwd directly. ``--work-dir``
+    # and ``--no-work-dir`` overrides still create their dirs as before.
+    if work_dir or no_work_dir:
+        agt_meta_dir, work_dir_str = _prepare_workdir(
+            cwd, task_id, work_dir, no_work_dir,
+        )
+    else:
+        _validate_cwd(cwd)
+        _ensure_gitignore(cwd)
+        agt_meta_dir = None
+        work_dir_str = None
+
+    # Bare ``agt chat`` always starts a NEW session. The user wants
+    # this explicit ask in this iteration (no auto-resume of the last
+    # session). To continue an existing one, use ``--resume <sid>``.
+    initial_resume: str | None = resume_session_id
 
     mode = f"provider={provider}"
     if target_daemon_id is not None:
         mode += f", daemon={target_daemon_id}"
+    if resume_session_id:
+        mode += f", resume={resume_session_id[:8]}…"
     click.echo(
         f"🚀 agt chat mode ({mode}, task={task_id}). "
         f"Type 'exit' or 'quit' to leave.\n"
     )
 
+    _chat_loop(
+        controller=controller,
+        provider=provider,
+        task_id=task_id,
+        cwd=cwd,
+        agt_meta_dir=agt_meta_dir,
+        work_dir_str=work_dir_str,
+        target_daemon_id=target_daemon_id,
+        server_url=server_url,
+        initial_resume=initial_resume,
+    )
+
+
+def _chat_loop(
+    *,
+    controller: DaemonController | None,
+    provider: str,
+    task_id: str,
+    cwd: Path,
+    agt_meta_dir: Path,
+    work_dir_str: str | None,
+    target_daemon_id: str | None,
+    server_url: str,
+    initial_resume: str | None,
+) -> None:
+    """Read-eval-print loop. Only the first turn carries the explicit
+    ``resume_session_id``; subsequent turns let the agent subprocess
+    drive continuity via its own in-memory state."""
+    turn_index = 0
+    first_prompt: str | None = None
     while True:
-        try:
-            line = input("agt> ")
-        except (EOFError, KeyboardInterrupt):
+        line = _read_chat_prompt()
+        if line is None:
             click.echo("\n👋 Bye!")
             return
-
-        line = line.strip()
         if not line:
             continue
         if line in ("exit", "quit", ":q"):
             click.echo("👋 Bye!")
             return
 
-        if controller is not None:
-            _chat_turn_local(
-                controller, provider, line, task_id, cwd, agt_meta_dir,
-            )
+        turn_index += 1
+        is_first = turn_index == 1
+        if is_first and first_prompt is None:
+            first_prompt = line
+        _run_chat_turn(
+            controller=controller,
+            provider=provider,
+            line=line,
+            task_id=task_id,
+            cwd=cwd,
+            agt_meta_dir=agt_meta_dir,
+            work_dir_str=work_dir_str,
+            target_daemon_id=target_daemon_id,
+            server_url=server_url,
+            is_first=is_first,
+            initial_resume=initial_resume,
+            first_prompt=first_prompt,
+            turn_index=turn_index,
+        )
+
+
+def _read_chat_prompt() -> str | None:
+    """Read one prompt line; ``None`` on EOF/interrupt, else trimmed."""
+    try:
+        return input("agt> ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return None
+
+
+def _run_chat_turn(
+    *,
+    controller: DaemonController | None,
+    provider: str,
+    line: str,
+    task_id: str,
+    cwd: Path,
+    agt_meta_dir: Path,
+    work_dir_str: str | None,
+    target_daemon_id: str | None,
+    server_url: str,
+    is_first: bool,
+    initial_resume: str | None,
+    first_prompt: str | None,
+    turn_index: int,
+) -> None:
+    """Dispatch one chat turn to the local daemon or the remote Server."""
+    resume_for_turn = initial_resume if is_first else None
+    if controller is not None:
+        _chat_turn_local(
+            controller, provider, line, task_id, cwd, agt_meta_dir,
+            resume_session_id=resume_for_turn,
+            first_prompt=first_prompt if is_first else None,
+            turn_index=turn_index,
+        )
+    else:
+        _chat_turn_remote(
+            provider, line, task_id,
+            target_daemon_id,  # type: ignore[arg-type]
+            server_url, work_dir_str,
+        )
+
+
+def _print_chat_session_list(cwd: Path, provider: str | None = None) -> None:
+    """Print a table of sessions stored in ``<cwd>/.agt/sessions.json``.
+
+    ``provider`` filters to one agent's sessions; ``None`` lists every
+    session in the cwd regardless of which agent created it.
+    """
+    store = CwdSessionStore.load_or_create(cwd)
+    entries = store.list_sessions()
+    if provider is not None:
+        entries = [e for e in entries if e.provider == provider]
+    if not entries:
+        if provider is not None:
+            click.echo(f"No {provider} chat sessions in {cwd}/.agt/ yet.")
         else:
-            assert target_daemon_id is not None  # else branch ⟹ --daemon given
-            _chat_turn_remote(
-                provider, line, task_id, target_daemon_id, server_url,
-                work_dir_str,
-            )
+            click.echo(f"No chat sessions in {cwd}/.agt/ yet.")
+        return
+    click.echo(f"{len(entries)} session(s) in {cwd}/.agt/\n")
+    now = time.time()
+    rows = []
+    for e in entries:
+        age_s = max(0, now - e.last_seen_at)
+        rows.append((
+            e.session_id,
+            e.provider,
+            _humanize_age(age_s),
+            str(e.turn_count),
+            _truncate(e.first_prompt, 60),
+        ))
+    widths = [
+        max(len(r[0]) for r in rows),
+        max(len(r[1]) for r in rows),
+        max(len(r[2]) for r in rows),
+        max(len(r[3]) for r in rows),
+        0,
+    ]
+    widths[4] = max(len(r[4]) for r in rows)
+    header = (
+        f"  {'SESSION':<{widths[0]}}  {'PROVIDER':<{widths[1]}}  "
+        f"{'LAST USED':<{widths[2]}}  {'TURNS':<{widths[3]}}  FIRST PROMPT"
+    )
+    click.echo(header)
+    click.echo("  " + "─" * (sum(widths) + 10))
+    for r in rows:
+        click.echo(
+            f"  {r[0]:<{widths[0]}}  {r[1]:<{widths[1]}}  "
+            f"{r[2]:<{widths[2]}}  {r[3]:<{widths[3]}}  {r[4]}"
+        )
+
+
+def _print_resumed_history(
+    cwd: Path,
+    session_id: str,
+    target_daemon_id: str | None,
+) -> None:
+    """Verify ``session_id`` is in the cwd store, then print history.
+
+    For remote daemons the history lives on the daemon's machine, not
+    here — we skip printing and tell the user.
+    """
+    if target_daemon_id is not None:
+        click.echo(
+            "⚠️  --history printing is local-only; "
+            "remote daemon sessions keep their history on the daemon.",
+            err=True,
+        )
+        return
+    store = CwdSessionStore.load_or_create(cwd)
+    entry = store.get(session_id)
+    if entry is None:
+        click.echo(
+            f"⚠️  session {session_id} not found in {cwd}/.agt/sessions.json",
+            err=True,
+        )
+        sys.exit(2)
+    try:
+        history = load_history(entry.provider, session_id)
+    except NotImplementedError as exc:
+        click.echo(f"⚠️  {exc}", err=True)
+        history = []
+    if not history:
+        click.echo(
+            f"(no history available for {session_id[:8]}…)",
+            err=True,
+        )
+        return
+    click.echo(f"─── history of {session_id[:8]}… ({len(history)} message(s)) ───")
+    for msg in history:
+        marker = ">" if msg.role == "user" else "·"
+        click.echo(f"{marker} {msg.role}: {msg.content}")
+    click.echo("─── end history ───\n")
+
+
+def _humanize_age(seconds: float) -> str:
+    if seconds < 60:
+        return "just now"
+    if seconds < 3600:
+        return f"{int(seconds // 60)} min ago"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)} hours ago"
+    return f"{int(seconds // 86400)} days ago"
+
+
+def _truncate(text: str, limit: int) -> str:
+    text = text.replace("\n", " ").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
 
 
 # ── server (Phase 2) ──────────────────────────────────────────────
