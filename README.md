@@ -246,6 +246,62 @@ If you have existing files, move them once:
 mv -r ~/.agt/workspaces/*/identity/* ~/.agt/identities/
 ```
 
+## Phase 4 Step 1: Identity (agent personas)
+
+Phase 4 Step 1 adds **identities**: persistent agent personas with a DID
+(`did:agt:<daemon_id>:<slug>`), name, description, and capability tags.
+Full reference in [`docs/cli/commands.md`](docs/cli/commands.md) §`agt identity`.
+
+```bash
+# Create — generates the DID and writes ~/.agt/identities/<slug>/AGENT.md
+$ agt identity create --name "Code Reviewer" --capability code-review
+✅ Created identity: did:agt:local:code-reviewer
+
+$ agt identity list
+$ agt identity show did:agt:local:code-reviewer
+$ agt identity update did:agt:local:code-reviewer --add-capability refactor
+$ agt identity deprecate did:agt:local:code-reviewer   # soft (status=deprecated)
+$ agt identity revoke did:agt:local:code-reviewer      # hard  (status=revoked)
+$ agt identity sync-files did:agt:local:code-reviewer   # force-regen AGENT.md
+```
+
+Semantics worth knowing:
+
+- **AGENT.md is write-once**: created with the identity, never overwritten by
+  `update` (manual edits are preserved). Only `sync-files` regenerates it from
+  database state.
+- **Consumption is opt-in**: `agt run` / `agt chat` do not read AGENT.md yet —
+  identity injection arrives in Step 2.
+- **Delete is protected**: `agt identity delete` refuses (HTTP 409) while any
+  task row still references the identity via `tasks.identity_did`.
+- **Backward compatible**: everything works without touching identities;
+  `agt run` / `agt chat` behave exactly as before.
+
+### Migration (automatic, idempotent)
+
+On startup the Server applies `migrate_identities_and_sessions` to the SQLite
+database — safe on both fresh and pre-Phase-4 databases, and re-runnable:
+
+- creates `identities` + `identity_bindings` tables (IF NOT EXISTS)
+- adds `tasks.identity_did` (nullable) if missing
+- creates the five supporting indexes
+- ensures `~/.agt/identities/` exists
+
+To verify manually against your `~/.agt/agt.db`:
+
+```bash
+sqlite3 ~/.agt/agt.db "SELECT name FROM sqlite_master WHERE type='table'
+  AND name IN ('identities','identity_bindings');"
+sqlite3 ~/.agt/agt.db "PRAGMA table_info(tasks);" | grep identity_did
+sqlite3 ~/.agt/agt.db "SELECT name FROM sqlite_master WHERE type='index'
+  AND name LIKE 'idx_%';"
+```
+
+Expected: both tables listed, one `identity_did` row, and indexes
+`idx_identities_daemon`, `idx_identities_status`, `idx_bindings_identity`,
+`idx_bindings_runtime`, `idx_tasks_identity`. Existing task rows are never
+modified — the new column is NULL for legacy tasks.
+
 ## Architecture
 
 See [docs/spec/local-agent-runtime-flow.md](docs/spec/local-agent-runtime-flow.md) for the high-level model, and [docs/impl/python-replication-design.md](docs/impl/python-replication-design.md) for the Python implementation details. The key invariant in Phase 1:

@@ -71,6 +71,13 @@ class ServerClient:
             raise RPCRejected(resp.status_code, {"raw": resp.text})
         return resp.json()
 
+    async def _put(self, path: str, payload: dict) -> dict[str, Any]:
+        assert self._client is not None, "ServerClient must be used as async context manager"
+        resp = await self._client.put(path, json=payload, headers=self._headers())
+        if resp.status_code >= 300:
+            raise RPCRejected(resp.status_code, resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {"raw": resp.text})
+        return resp.json()
+
     # ── Runtimes ──────────────────────────────────────────────────
 
     async def register_runtimes(self, runtimes: list[Runtime]) -> int:
@@ -253,6 +260,67 @@ class ServerClient:
             return resp.get("status") == "ok"
         except (RPCRejected, httpx.HTTPError):
             return False
+
+    # ── Identities (Phase 4 Step 1) ───────────────────────────────
+
+    async def list_identities(
+        self,
+        daemon_id: str | None = None,
+        status: str | None = None,
+    ) -> list[dict]:
+        """List identities with optional daemon_id / status filters."""
+        params: dict[str, Any] = {}
+        if daemon_id:
+            params["daemon_id"] = daemon_id
+        if status:
+            params["status_filter"] = status
+        resp = await self._get("/api/identities", params=params or None)
+        return resp.get("identities", [])
+
+    async def create_identity(self, payload: dict) -> dict:
+        """Create a new identity. Returns the full identity (incl. did)."""
+        return await self._post("/api/identities", payload)
+
+    async def get_identity(self, did: str) -> dict | None:
+        """Return one identity by DID, or None if it doesn't exist."""
+        try:
+            # DIDs contain ':' which is safe unencoded in a path segment,
+            # but be explicit so proxies/log viewers show the full DID.
+            return await self._get(f"/api/identities/{did}")
+        except RPCRejected as exc:
+            if exc.status == 404:
+                return None
+            raise
+
+    async def update_identity(self, did: str, payload: dict) -> dict:
+        """Partially update an identity (name/description/capabilities)."""
+        return await self._put(f"/api/identities/{did}", payload)
+
+    async def deprecate_identity(self, did: str) -> dict:
+        """Soft-delete an identity (status='deprecated')."""
+        return await self._post(f"/api/identities/{did}/deprecate", {})
+
+    async def revoke_identity(self, did: str) -> dict:
+        """Hard-revoke an identity (status='revoked')."""
+        return await self._post(f"/api/identities/{did}/revoke", {})
+
+    async def delete_identity(self, did: str) -> bool:
+        """Physically delete an identity. Returns True on 204."""
+        resp = await self._client.delete(
+            f"/api/identities/{did}", headers=self._headers()
+        )
+        if resp.status_code == 204:
+            return True
+        if resp.status_code >= 300:
+            raise RPCRejected(
+                resp.status_code,
+                resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {"raw": resp.text},
+            )
+        return False
+
+    async def sync_identity_files(self, did: str) -> dict:
+        """Force regenerate AGENT.md from current database state."""
+        return await self._post(f"/api/identities/{did}/sync-files", {})
 
 
 __all__ = ["ServerClient", "DEFAULT_TIMEOUT"]

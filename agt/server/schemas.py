@@ -145,6 +145,72 @@ class HealthResponse(BaseModel):
     status: str = "ok"
 
 
+# ── Identity (Phase 4 Step 1) ───────────────────────────────────────
+
+
+class IdentityCreate(BaseModel):
+    """Request to create a new identity."""
+
+    daemon_id: str
+    name: str
+    slug: str | None = None  # If not provided, derived from name
+    description: str = ""
+    capabilities: list[str] = []
+    visibility: str = "private"
+    created_by: str = "user"
+
+
+class IdentityOut(BaseModel):
+    """Full identity response."""
+
+    did: str
+    daemon_id: str
+    name: str
+    description: str
+    capabilities: list[str]
+    status: str
+    visibility: str
+    created_by: str | None
+    created_at: str
+    updated_at: str
+
+
+class IdentityUpdate(BaseModel):
+    """Partial update request for an identity."""
+
+    name: str | None = None
+    description: str | None = None
+    add_capabilities: list[str] = []
+    remove_capabilities: list[str] = []
+
+
+class IdentityBindingCreate(BaseModel):
+    """Request to create a binding between identity and runtime."""
+
+    daemon_id: str
+    provider: str
+    priority: int = 0
+    is_default: bool = False
+
+
+class IdentityBindingOut(BaseModel):
+    """Binding response."""
+
+    id: int
+    identity_did: str
+    daemon_id: str
+    provider: str
+    priority: int
+    is_default: bool
+    created_at: str
+
+
+class ListIdentitiesResponse(BaseModel):
+    """Response listing identities."""
+
+    identities: list[IdentityOut]
+
+
 ClaimResponse.model_rebuild()
 __all__ = [
     "RuntimeInfo",
@@ -164,4 +230,10 @@ __all__ = [
     "HeartbeatRequest",
     "HeartbeatResponse",
     "HealthResponse",
+    "IdentityCreate",
+    "IdentityOut",
+    "IdentityUpdate",
+    "IdentityBindingCreate",
+    "IdentityBindingOut",
+    "ListIdentitiesResponse",
 ]

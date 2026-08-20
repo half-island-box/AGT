@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import AsyncIterator
 
 import uvicorn
@@ -14,10 +15,11 @@ from .config import DaemonTarget, ServerConfig
 from .daemon_link import DaemonLink
 from .database import bind_get_db, make_engine, make_session_factory, session_scope
 from .middleware.auth import bind_verify_task_token
-from .migrate_schema import ensure_schema
+from .migrate_schema import ensure_schema, migrate_identities_and_sessions
 from .migrate_sessions import migrate_sessions_json
 from .models import Base
 from .routes.heartbeat import router as heartbeat_router
+from .routes.identities import router as identities_router
 from .routes.runtimes import router as runtimes_router
 from .routes.sessions import router as sessions_router
 from .routes.tasks import router as tasks_router
@@ -44,6 +46,8 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
             await conn.run_sync(ensure_schema)
+        async with engine.begin() as conn:
+            await conn.run_sync(migrate_identities_and_sessions, Path(cfg.db_path).parent)
         # Startup sweep: drop runtime rows whose ``last_seen`` is older than
         # the liveness TTL. These are remnants from daemons that crashed
         # without deregistering, or whose machine / id changed — without
@@ -117,6 +121,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     app.include_router(tasks_router)
     app.include_router(sessions_router)
     app.include_router(heartbeat_router)
+    app.include_router(identities_router)
 
     return app
 

@@ -1241,6 +1241,326 @@ def runtime_list(server_url: str) -> None:
         )
 
 
+# ── identity (Phase 4 Step 1) ────────────────────────────────────────
+
+
+@cli.group()
+def identity() -> None:
+    """Identity management (Phase 4): create and manage agent identities."""
+
+
+@identity.command("list")
+@click.option("--daemon", "daemon_id", default=None, help="Filter by daemon_id.")
+@click.option("--status", "status_filter", default=None,
+              help="Filter by status (active/deprecated/revoked).")
+@click.option(
+    "--server-url",
+    default="http://127.0.0.1:8420",
+    show_default=True,
+    envvar="AGT_SERVER_URL",
+)
+def identity_list(daemon_id: str | None, status_filter: str | None, server_url: str) -> None:
+    """List identities on the Server."""
+
+    async def _run() -> list[dict]:
+        async with ServerClient(
+            base_url=server_url,
+            daemon_id="cli-direct",
+        ) as client:
+            return await client.list_identities(
+                daemon_id=daemon_id,
+                status=status_filter,
+            )
+
+    try:
+        identities = asyncio.run(_run())
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    if not identities:
+        click.echo("No identities on the Server.")
+        return
+
+    click.echo(f"🪪 {len(identities)} identit(y/ies) on the Server\n")
+    click.echo(
+        f"  {'DID':<48} {'NAME':<20} {'STATUS':<12} {'CAPABILITIES':<24}"
+    )
+    click.echo("  " + "─" * 108)
+    for ident in identities:
+        caps = ",".join(ident.get("capabilities", [])) or "—"
+        click.echo(
+            f"  {ident['did']:<48} {ident['name'][:20]:<20} "
+            f"{ident['status']:<12} {caps[:24]:<24}"
+        )
+
+
+@identity.command("show")
+@click.argument("did")
+@click.option(
+    "--server-url",
+    default="http://127.0.0.1:8420",
+    show_default=True,
+    envvar="AGT_SERVER_URL",
+)
+def identity_show(did: str, server_url: str) -> None:
+    """Show one identity's full details."""
+
+    async def _run() -> dict | None:
+        async with ServerClient(
+            base_url=server_url,
+            daemon_id="cli-direct",
+        ) as client:
+            return await client.get_identity(did)
+
+    try:
+        ident = asyncio.run(_run())
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    if ident is None:
+        click.echo(f"Identity not found: {did}", err=True)
+        sys.exit(2)
+
+    caps = ", ".join(ident.get("capabilities", [])) or "—"
+    click.echo(f"did         : {ident['did']}")
+    click.echo(f"daemon_id   : {ident['daemon_id']}")
+    click.echo(f"name        : {ident['name']}")
+    click.echo(f"description : {ident.get('description') or '—'}")
+    click.echo(f"capabilities: {caps}")
+    click.echo(f"status      : {ident['status']}")
+    click.echo(f"visibility  : {ident.get('visibility', 'private')}")
+    click.echo(f"created_by  : {ident.get('created_by') or '—'}")
+    click.echo(f"created_at  : {ident.get('created_at', '—')}")
+    click.echo(f"updated_at  : {ident.get('updated_at', '—')}")
+
+
+@identity.command("create")
+@click.option("--name", required=True, help="Human-readable identity name.")
+@click.option("--slug", default=None,
+              help="Machine slug (default: derived from name).")
+@click.option("--daemon-id", default=None,
+              help="Owning daemon namespace (default: 'local').")
+@click.option("--description", default="", help="Identity description.")
+@click.option("--capability", "capabilities", multiple=True,
+              help="Capability tag; repeat for multiple.")
+@click.option("--visibility", default="private",
+              type=click.Choice(["private", "public"]),
+              help="Cross-daemon visibility (default: private).")
+@click.option(
+    "--server-url",
+    default="http://127.0.0.1:8420",
+    show_default=True,
+    envvar="AGT_SERVER_URL",
+)
+def identity_create(
+    name: str,
+    slug: str | None,
+    daemon_id: str | None,
+    description: str,
+    capabilities: tuple[str, ...],
+    visibility: str,
+    server_url: str,
+) -> None:
+    """Create a new identity (also writes AGENT.md to ~/.agt/identities/)."""
+
+    payload = {
+        "daemon_id": daemon_id or "local",
+        "name": name,
+        "slug": slug,
+        "description": description,
+        "capabilities": list(capabilities),
+        "visibility": visibility,
+    }
+
+    async def _run() -> dict:
+        async with ServerClient(
+            base_url=server_url,
+            daemon_id="cli-direct",
+        ) as client:
+            return await client.create_identity(payload)
+
+    try:
+        ident = asyncio.run(_run())
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    click.echo(f"✅ Created identity: {ident['did']}")
+    click.echo(f"  AGENT.md: ~/.agt/identities/<slug>/AGENT.md (opt-in consumption)")
+
+
+@identity.command("update")
+@click.argument("did")
+@click.option("--name", default=None, help="New name.")
+@click.option("--description", default=None, help="New description.")
+@click.option("--add-capability", "add_capabilities", multiple=True,
+              help="Capability to add; repeat for multiple.")
+@click.option("--remove-capability", "remove_capabilities", multiple=True,
+              help="Capability to remove; repeat for multiple.")
+@click.option(
+    "--server-url",
+    default="http://127.0.0.1:8420",
+    show_default=True,
+    envvar="AGT_SERVER_URL",
+)
+def identity_update(
+    did: str,
+    name: str | None,
+    description: str | None,
+    add_capabilities: tuple[str, ...],
+    remove_capabilities: tuple[str, ...],
+    server_url: str,
+) -> None:
+    """Update an identity (AGENT.md is NOT overwritten; use sync-files)."""
+
+    payload: dict = {}
+    if name is not None:
+        payload["name"] = name
+    if description is not None:
+        payload["description"] = description
+    if add_capabilities:
+        payload["add_capabilities"] = list(add_capabilities)
+    if remove_capabilities:
+        payload["remove_capabilities"] = list(remove_capabilities)
+
+    if not payload:
+        click.echo("Nothing to update. Provide at least one of --name, "
+                   "--description, --add-capability, --remove-capability.", err=True)
+        sys.exit(2)
+
+    async def _run() -> dict:
+        async with ServerClient(
+            base_url=server_url,
+            daemon_id="cli-direct",
+        ) as client:
+            return await client.update_identity(did, payload)
+
+    try:
+        asyncio.run(_run())
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    click.echo(f"✅ Updated identity: {did}")
+    click.echo("  (AGENT.md unchanged; run `agt identity sync-files "
+               f"{did}` to regenerate)")
+
+
+@identity.command("deprecate")
+@click.argument("did")
+@click.option(
+    "--server-url",
+    default="http://127.0.0.1:8420",
+    show_default=True,
+    envvar="AGT_SERVER_URL",
+)
+def identity_deprecate(did: str, server_url: str) -> None:
+    """Soft-delete an identity (status='deprecated')."""
+
+    async def _run() -> dict:
+        async with ServerClient(
+            base_url=server_url,
+            daemon_id="cli-direct",
+        ) as client:
+            return await client.deprecate_identity(did)
+
+    try:
+        asyncio.run(_run())
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    click.echo(f"🗑️  Deprecated identity: {did}")
+
+
+@identity.command("revoke")
+@click.argument("did")
+@click.option(
+    "--server-url",
+    default="http://127.0.0.1:8420",
+    show_default=True,
+    envvar="AGT_SERVER_URL",
+)
+def identity_revoke(did: str, server_url: str) -> None:
+    """Hard-revoke an identity (status='revoked')."""
+
+    async def _run() -> dict:
+        async with ServerClient(
+            base_url=server_url,
+            daemon_id="cli-direct",
+        ) as client:
+            return await client.revoke_identity(did)
+
+    try:
+        asyncio.run(_run())
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    click.echo(f"⛔ Revoked identity: {did}")
+
+
+@identity.command("delete")
+@click.argument("did")
+@click.option(
+    "--server-url",
+    default="http://127.0.0.1:8420",
+    show_default=True,
+    envvar="AGT_SERVER_URL",
+)
+def identity_delete(did: str, server_url: str) -> None:
+    """Physically delete an identity (fails if tasks reference it)."""
+
+    async def _run() -> bool:
+        async with ServerClient(
+            base_url=server_url,
+            daemon_id="cli-direct",
+        ) as client:
+            return await client.delete_identity(did)
+
+    try:
+        deleted = asyncio.run(_run())
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    if deleted:
+        click.echo(f"❌ Deleted identity: {did}")
+    else:
+        click.echo(f"Identity not found: {did}", err=True)
+        sys.exit(2)
+
+
+@identity.command("sync-files")
+@click.argument("did")
+@click.option(
+    "--server-url",
+    default="http://127.0.0.1:8420",
+    show_default=True,
+    envvar="AGT_SERVER_URL",
+)
+def identity_sync_files(did: str, server_url: str) -> None:
+    """Force-regenerate the AGENT.md file from database state."""
+
+    async def _run() -> dict:
+        async with ServerClient(
+            base_url=server_url,
+            daemon_id="cli-direct",
+        ) as client:
+            return await client.sync_identity_files(did)
+
+    try:
+        asyncio.run(_run())
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    click.echo(f"🔄 Synced AGENT.md for identity: {did}")
+    click.echo("  (overwrites manual edits with database truth)")
+
+
 # ── daemon (Phase 2 real implementation) ────────────────────────────
 
 
