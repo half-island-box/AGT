@@ -1040,6 +1040,66 @@ def task_status(task_id: str, server_url: str) -> None:
     _echo_task_result(data)
 
 
+@task.command("list")
+@click.option(
+    "--status",
+    "statuses",
+    multiple=True,
+    help="Filter by task status (pending/running/completed/failed/timeout/cancelled). "
+         "Repeat for multiple values. Omit for all statuses.",
+)
+@click.option(
+    "--limit",
+    default=50,
+    show_default=True,
+    help="Max number of tasks to return (1-1000).",
+)
+@click.option(
+    "--server-url",
+    default="http://127.0.0.1:8420",
+    show_default=True,
+    envvar="AGT_SERVER_URL",
+)
+def task_list(statuses: tuple[str, ...], limit: int, server_url: str) -> None:
+    """List tasks on the Server (newest first)."""
+
+    async def _run() -> list[dict]:
+        async with ServerClient(
+            base_url=server_url,
+            daemon_id="cli-direct",
+        ) as client:
+            return await client.list_tasks(
+                statuses=list(statuses) if statuses else None,
+                limit=limit,
+            )
+
+    try:
+        tasks = asyncio.run(_run())
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    if not tasks:
+        click.echo("No tasks on the Server.")
+        return
+
+    click.echo(f"📋 {len(tasks)} task(s) on the Server\n")
+    click.echo(
+        f"  {'TASK_ID':<10} {'PROVIDER':<10} {'STATUS':<10} "
+        f"{'EXIT':<6} {'DURATION':<9} {'UPDATED':<19}"
+    )
+    click.echo("  " + "─" * 70)
+    for t in tasks:
+        exit_code = t.get("exit_code")
+        exit_str = str(exit_code) if exit_code is not None else "—"
+        duration = t.get("duration")
+        duration_str = f"{duration:.2f}s" if duration is not None else "—"
+        click.echo(
+            f"  {t['task_id']:<10} {t['provider']:<10} {t['status']:<10} "
+            f"{exit_str:<6} {duration_str:<9} {t.get('updated_at', '') or '—':<19}"
+        )
+
+
 @task.command("clean")
 @click.argument("task_id", required=False)
 @click.option(
