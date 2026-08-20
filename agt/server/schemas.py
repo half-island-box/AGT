@@ -211,6 +211,62 @@ class ListIdentitiesResponse(BaseModel):
     identities: list[IdentityOut]
 
 
+class ListBindingsResponse(BaseModel):
+    """Response listing an identity's bindings."""
+
+    bindings: list[IdentityBindingOut]
+
+
+class ResolveRequest(BaseModel):
+    """Dry-run selection: which runtime would this identity run on?
+
+    ``identity_did`` is required — callers decide themselves whether to
+    take the no-identity legacy path (there is no daemon-level default
+    identity; see phase4-design.md §12.1). It is optional at the Pydantic
+    layer only so the route can answer a plain 400 (not FastAPI's 422)
+    when it is missing.
+    """
+
+    identity_did: str | None = None
+    runtime_hint: str | None = None
+    daemon_id: str = "local"
+
+
+class DaemonProviderOut(BaseModel):
+    """One runtime row as seen inside a daemon's provider list."""
+
+    provider: str
+    name: str
+    version: str
+    status: str
+    last_seen: str
+
+
+class DaemonOut(BaseModel):
+    """Aggregated daemon summary (grouped from runtimes rows)."""
+
+    daemon_id: str
+    device_name: str
+    providers: list[DaemonProviderOut]
+    runtime_count: int
+    last_seen: str
+    online: bool
+
+
+class ListDaemonsResponse(BaseModel):
+    """Response listing all known daemons."""
+
+    daemons: list[DaemonOut]
+
+
+class ResolveResponse(BaseModel):
+    """Selection result for a dry-run resolve."""
+
+    daemon_id: str
+    provider: str
+    identity_did: str
+
+
 ClaimResponse.model_rebuild()
 __all__ = [
     "RuntimeInfo",
@@ -236,4 +292,10 @@ __all__ = [
     "IdentityBindingCreate",
     "IdentityBindingOut",
     "ListIdentitiesResponse",
+    "ListBindingsResponse",
+    "ResolveRequest",
+    "ResolveResponse",
+    "DaemonProviderOut",
+    "DaemonOut",
+    "ListDaemonsResponse",
 ]

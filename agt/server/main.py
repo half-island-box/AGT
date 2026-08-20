@@ -18,6 +18,7 @@ from .middleware.auth import bind_verify_task_token
 from .migrate_schema import ensure_schema, migrate_identities_and_sessions
 from .migrate_sessions import migrate_sessions_json
 from .models import Base
+from .routes.daemons import router as daemons_router
 from .routes.heartbeat import router as heartbeat_router
 from .routes.identities import router as identities_router
 from .routes.runtimes import router as runtimes_router
@@ -118,6 +119,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     bind_verify_task_token(app, cfg.secret)
 
     app.include_router(runtimes_router)
+    app.include_router(daemons_router)
     app.include_router(tasks_router)
     app.include_router(sessions_router)
     app.include_router(heartbeat_router)

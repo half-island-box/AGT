@@ -1561,6 +1561,190 @@ def identity_sync_files(did: str, server_url: str) -> None:
     click.echo("  (overwrites manual edits with database truth)")
 
 
+# ── identity bindings + selection (Phase 4 Step 2) ──────────────────
+
+
+def _find_binding_id(bindings: list[dict], daemon_id: str, provider: str) -> int | None:
+    """Locate a binding id by (daemon, provider) triple; None if absent."""
+    for b in bindings:
+        if b.get("daemon_id") == daemon_id and b.get("provider") == provider:
+            return int(b["id"])
+    return None
+
+
+@identity.command("bind")
+@click.argument("did")
+@click.option("--daemon", "daemon_id", required=True, help="Daemon namespace.")
+@click.option("--runtime", "provider", required=True, help="Provider to bind.")
+@click.option("--priority", default=0, show_default=True,
+              help="Preference weight (higher wins when no default).")
+@click.option("--default", "is_default", is_flag=True,
+              help="Mark as the identity's default (atomically unflags others).")
+@click.option(
+    "--server-url",
+    default="http://127.0.0.1:8420",
+    show_default=True,
+    envvar="AGT_SERVER_URL",
+)
+def identity_bind(
+    did: str,
+    daemon_id: str,
+    provider: str,
+    priority: int,
+    is_default: bool,
+    server_url: str,
+) -> None:
+    """Bind an identity to a runtime (daemon + provider)."""
+
+    payload = {
+        "daemon_id": daemon_id,
+        "provider": provider,
+        "priority": priority,
+        "is_default": is_default,
+    }
+
+    async def _run() -> dict:
+        async with ServerClient(
+            base_url=server_url,
+            daemon_id="cli-direct",
+        ) as client:
+            return await client.create_binding(did, payload)
+
+    try:
+        binding = asyncio.run(_run())
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    marker = " (default)" if binding.get("is_default") else ""
+    click.echo(
+        f"🔗 Bound {did} → {binding['daemon_id']}/{binding['provider']}{marker}"
+    )
+
+
+@identity.command("unbind")
+@click.argument("did")
+@click.option("--daemon", "daemon_id", required=True, help="Daemon namespace.")
+@click.option("--runtime", "provider", required=True, help="Provider to unbind.")
+@click.option(
+    "--server-url",
+    default="http://127.0.0.1:8420",
+    show_default=True,
+    envvar="AGT_SERVER_URL",
+)
+def identity_unbind(did: str, daemon_id: str, provider: str, server_url: str) -> None:
+    """Remove a binding (located by daemon + runtime)."""
+
+    async def _run() -> bool:
+        async with ServerClient(
+            base_url=server_url,
+            daemon_id="cli-direct",
+        ) as client:
+            bindings = await client.list_bindings(did, daemon_id=daemon_id)
+            binding_id = _find_binding_id(bindings, daemon_id, provider)
+            if binding_id is None:
+                return False
+            return await client.delete_binding(did, binding_id)
+
+    try:
+        deleted = asyncio.run(_run())
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    if deleted:
+        click.echo(f"🔓 Unbound {daemon_id}/{provider} from {did}")
+    else:
+        click.echo(
+            f"No binding for {did} on daemon '{daemon_id}' provider '{provider}'",
+            err=True,
+        )
+        sys.exit(2)
+
+
+@identity.command("bindings")
+@click.argument("did")
+@click.option("--daemon", "daemon_id", default=None, help="Filter by daemon_id.")
+@click.option(
+    "--server-url",
+    default="http://127.0.0.1:8420",
+    show_default=True,
+    envvar="AGT_SERVER_URL",
+)
+def identity_bindings(did: str, daemon_id: str | None, server_url: str) -> None:
+    """List an identity's bindings."""
+
+    async def _run() -> list[dict]:
+        async with ServerClient(
+            base_url=server_url,
+            daemon_id="cli-direct",
+        ) as client:
+            return await client.list_bindings(did, daemon_id=daemon_id)
+
+    try:
+        bindings = asyncio.run(_run())
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    if not bindings:
+        click.echo(f"No bindings for {did}. Use 'agt identity bind' to add one.")
+        return
+
+    click.echo(f"🔗 {len(bindings)} binding(s) for {did}\n")
+    click.echo(
+        f"  {'ID':<6} {'DAEMON':<16} {'RUNTIME':<12} {'PRIORITY':<10} {'DEFAULT':<8}"
+    )
+    click.echo("  " + "─" * 56)
+    for b in bindings:
+        click.echo(
+            f"  {b['id']:<6} {b['daemon_id'][:16]:<16} {b['provider'][:12]:<12} "
+            f"{b['priority']:<10} {'yes' if b['is_default'] else '—':<8}"
+        )
+
+
+@identity.command("default")
+@click.argument("did")
+@click.option("--daemon", "daemon_id", required=True, help="Daemon namespace.")
+@click.option("--runtime", "provider", required=True, help="Provider to make default.")
+@click.option(
+    "--server-url",
+    default="http://127.0.0.1:8420",
+    show_default=True,
+    envvar="AGT_SERVER_URL",
+)
+def identity_default(did: str, daemon_id: str, provider: str, server_url: str) -> None:
+    """Switch an identity's default binding (atomic)."""
+
+    async def _run() -> dict:
+        async with ServerClient(
+            base_url=server_url,
+            daemon_id="cli-direct",
+        ) as client:
+            bindings = await client.list_bindings(did, daemon_id=daemon_id)
+            binding_id = _find_binding_id(bindings, daemon_id, provider)
+            if binding_id is None:
+                return {}
+            return await client.set_default_binding(did, binding_id)
+
+    try:
+        binding = asyncio.run(_run())
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    if not binding:
+        click.echo(
+            f"No binding for {did} on daemon '{daemon_id}' provider '{provider}'",
+            err=True,
+        )
+        sys.exit(2)
+
+    click.echo(
+        f"⭐ Default for {did} → {binding['daemon_id']}/{binding['provider']}"
+    )
+
+
 # ── daemon (Phase 2 real implementation) ────────────────────────────
 
 
@@ -1598,6 +1782,94 @@ def daemon_status() -> None:
 
     args = argparse.Namespace()
     sys.exit(cmd_status(args))
+
+
+@daemon.command("list")
+@click.option(
+    "--server-url",
+    default="http://127.0.0.1:8420",
+    show_default=True,
+    envvar="AGT_SERVER_URL",
+)
+def daemon_list(server_url: str) -> None:
+    """List every daemon registered on the Server (Server view).
+
+    Unlike ``agt daemon status`` (which checks the LOCAL pid file), this
+    queries the Server's daemon registry aggregated from runtime rows.
+    """
+
+    async def _run() -> list[dict]:
+        async with ServerClient(
+            base_url=server_url,
+            daemon_id="cli-direct",
+        ) as client:
+            return await client.list_daemons()
+
+    try:
+        daemons = asyncio.run(_run())
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    if not daemons:
+        click.echo("No daemons registered on the Server.")
+        return
+
+    click.echo(f"🖥️  {len(daemons)} daemon(s) registered on the Server\n")
+    click.echo(
+        f"  {'DAEMON_ID':<16} {'DEVICE':<20} {'RUNTIME':<8} "
+        f"{'PROVIDERS':<20} {'ONLINE':<8} {'LAST SEEN':<20}"
+    )
+    click.echo("  " + "─" * 96)
+    for d in daemons:
+        providers = ",".join(p["provider"] for p in d["providers"]) or "—"
+        click.echo(
+            f"  {d['daemon_id'][:16]:<16} {d['device_name'][:20]:<20} "
+            f"{d['runtime_count']:<8} {providers[:20]:<20} "
+            f"{'yes' if d['online'] else 'no':<8} {d['last_seen']:<20}"
+        )
+
+
+@daemon.command("show")
+@click.argument("daemon_id")
+@click.option(
+    "--server-url",
+    default="http://127.0.0.1:8420",
+    show_default=True,
+    envvar="AGT_SERVER_URL",
+)
+def daemon_show(daemon_id: str, server_url: str) -> None:
+    """Show one daemon's details from the Server registry."""
+
+    async def _run() -> dict | None:
+        async with ServerClient(
+            base_url=server_url,
+            daemon_id="cli-direct",
+        ) as client:
+            return await client.get_daemon(daemon_id)
+
+    try:
+        daemon = asyncio.run(_run())
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    if daemon is None:
+        click.echo(f"Daemon not found: {daemon_id}", err=True)
+        sys.exit(2)
+
+    click.echo(f"daemon_id    : {daemon['daemon_id']}")
+    click.echo(f"device_name  : {daemon['device_name']}")
+    click.echo(f"online       : {'yes' if daemon['online'] else 'no'}")
+    click.echo(f"last_seen    : {daemon['last_seen']}")
+    click.echo(f"runtime_count: {daemon['runtime_count']}\n")
+    click.echo(f"  {'PROVIDER':<12} {'VERSION':<12} {'STATUS':<10} {'LAST SEEN':<20}")
+    click.echo("  " + "─" * 56)
+    for p in daemon["providers"]:
+        click.echo(
+            f"  {p['provider'][:12]:<12} {p['version'][:12]:<12} "
+            f"{p['status'][:10]:<10} {p['last_seen']:<20}"
+        )
 
 
 # ── token (Phase 3, dev/debug) ──────────────────────────────────────

@@ -82,6 +82,7 @@ class ServerClient:
 
     async def register_runtimes(self, runtimes: list[Runtime]) -> int:
         """Wipe the daemon's prior runtimes and re-register the given list."""
+        """Wipe the daemon's prior runtimes and re-register the given list."""
         payload = {
             "daemon_id": self._daemon_id,
             "runtimes": [
@@ -106,6 +107,22 @@ class ServerClient:
         """Remove all runtime registrations for this daemon (called on shutdown)."""
         resp = await self._do_delete(f"/api/runtimes/unregister/{self._daemon_id}")
         return int(resp.get("removed", 0))
+
+    # ── Daemons (aggregated registry view, Phase 4) ────────────────
+
+    async def list_daemons(self) -> list[dict]:
+        """List every known daemon (offline included), aggregated by id."""
+        resp = await self._get("/api/daemons")
+        return resp.get("daemons", [])
+
+    async def get_daemon(self, daemon_id: str) -> dict | None:
+        """Return one daemon's aggregated details, or None if it has none."""
+        try:
+            return await self._get(f"/api/daemons/{daemon_id}")
+        except RPCRejected as exc:
+            if exc.status == 404:
+                return None
+            raise
 
     # ── Tasks ─────────────────────────────────────────────────────
 
@@ -321,6 +338,54 @@ class ServerClient:
     async def sync_identity_files(self, did: str) -> dict:
         """Force regenerate AGENT.md from current database state."""
         return await self._post(f"/api/identities/{did}/sync-files", {})
+
+    # ── Identity bindings + selection (Phase 4 Step 2) ─────────────
+
+    async def list_bindings(self, did: str, daemon_id: str | None = None) -> list[dict]:
+        """List an identity's bindings, optionally filtered by daemon."""
+        params: dict[str, Any] = {}
+        if daemon_id:
+            params["daemon_id"] = daemon_id
+        resp = await self._get(f"/api/identities/{did}/bindings", params=params or None)
+        return resp.get("bindings", [])
+
+    async def create_binding(self, did: str, payload: dict) -> dict:
+        """Create a binding (daemon_id + provider + priority/is_default)."""
+        return await self._post(f"/api/identities/{did}/bindings", payload)
+
+    async def delete_binding(self, did: str, binding_id: int) -> bool:
+        """Delete a binding by id. Returns True on 204."""
+        assert self._client is not None, "ServerClient must be used as async context manager"
+        resp = await self._client.delete(
+            f"/api/identities/{did}/bindings/{binding_id}",
+            headers=self._headers(),
+        )
+        if resp.status_code == 204:
+            return True
+        if resp.status_code >= 300:
+            raise RPCRejected(
+                resp.status_code,
+                resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {"raw": resp.text},
+            )
+        return False
+
+    async def set_default_binding(self, did: str, binding_id: int) -> dict:
+        """Atomically switch the identity's default binding."""
+        return await self._post(
+            f"/api/identities/{did}/bindings/{binding_id}/default", {}
+        )
+
+    async def resolve_identity(
+        self,
+        identity_did: str,
+        runtime_hint: str | None = None,
+        daemon_id: str = "local",
+    ) -> dict:
+        """Dry-run selection: which runtime would this identity run on?"""
+        payload: dict[str, Any] = {"identity_did": identity_did, "daemon_id": daemon_id}
+        if runtime_hint is not None:
+            payload["runtime_hint"] = runtime_hint
+        return await self._post("/api/identities/resolve", payload)
 
 
 __all__ = ["ServerClient", "DEFAULT_TIMEOUT"]

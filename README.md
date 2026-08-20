@@ -302,6 +302,46 @@ Expected: both tables listed, one `identity_did` row, and indexes
 `idx_bindings_runtime`, `idx_tasks_identity`. Existing task rows are never
 modified — the new column is NULL for legacy tasks.
 
+## Phase 4 Step 2: Identity Bindings + Runtime Selection
+
+Step 1 让 identity 有了"身份"，Step 2 让身份能**映射到具体 agent**：通过
+binding 声明"这个 identity 可以在哪些 runtime 上跑"，再通过 selection 算法
+在提交时选出一个 runtime。
+
+```bash
+# 绑定 identity → runtime（claude 为默认）
+$ agt identity bind did:agt:local:reviewer --daemon local --runtime claude --default
+$ agt identity bind did:agt:local:reviewer --daemon local --runtime codex --priority 10
+
+$ agt identity bindings did:agt:local:reviewer   # 查看绑定
+$ agt identity default did:agt:local:reviewer --daemon local --runtime codex  # 切默认
+$ agt identity unbind did:agt:local:reviewer --daemon local --runtime codex    # 解绑
+```
+
+Selection 规则（`POST /api/identities/resolve` 可 dry-run 预览）：
+
+1. identity 必须存在且 `active`
+2. 指定了 `--runtime` → 只用匹配的 binding
+3. 没指定 → 优先 `is_default` 的 binding，否则 `priority` 最高者
+4. 失败分类：`identity_not_found` / `identity_not_active` / `no_bindings` / `no_binding_for_runtime`，每个错误自带解决提示
+
+**Step 2 的边界**：binding 数据与 selection 算法已就绪，但 **`agt run` / `agt chat`
+尚未接入 `--identity`**（Step 4 工作）。这一步完成时，`bindings` 命令没有运行时
+效果——它是纯粹的配置层，为 Step 4 铺路。`resolve` 端点是唯一可观察的行为验证点。
+
+## Daemon registry view
+
+查看注册到 Server 的 daemon 及其状态：
+
+```bash
+agt daemon list             # 所有已知 daemon（含离线者，显示最后心跳）
+agt daemon show <daemon_id> # 单个 daemon 详情（设备、各 provider 版本/状态/心跳）
+```
+
+由 `GET /api/daemons` 从 `runtimes` 表按 daemon 聚合得出；`online` 基于最后心跳
+TTL 判定。注意区分：`agt daemon status` 查本机 PID 文件（本地进程），
+`agt daemon list/show` 查 Server 注册表（Server 视角）。
+
 ## Architecture
 
 See [docs/spec/local-agent-runtime-flow.md](docs/spec/local-agent-runtime-flow.md) for the high-level model, and [docs/impl/python-replication-design.md](docs/impl/python-replication-design.md) for the Python implementation details. The key invariant in Phase 1:
