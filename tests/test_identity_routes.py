@@ -96,7 +96,7 @@ def test_create_returns_201_and_writes_agent_md(tmp_path, monkeypatch) -> None:
         resp = client.post("/api/identities", json=_payload())
         assert resp.status_code == 201
         body = resp.json()
-        assert body["did"] == "did:agt:d1:code-reviewer"
+        assert body["did"] == "did:agt:code-reviewer"
         assert body["status"] == "active"
 
         md = tmp_path / ".agt" / "identities" / "code-reviewer" / "AGENT.md"
@@ -142,7 +142,7 @@ def test_list_and_filters(tmp_path, monkeypatch) -> None:
     client, dispose = _build_app(tmp_path)
     try:
         client.post("/api/identities", json=_payload())
-        client.post("/api/identities", json=_payload(daemon_id="d2"))
+        client.post("/api/identities", json=_payload(daemon_id="d2", slug="reviewer-two"))
         client.post("/api/identities", json=_payload(slug="other", name="Other"))
 
         all_ids = client.get("/api/identities").json()["identities"]
@@ -153,7 +153,7 @@ def test_list_and_filters(tmp_path, monkeypatch) -> None:
         assert len(d1) == 2
 
         # Deprecate one, then filter by status.
-        client.post("/api/identities/did:agt:d1:other/deprecate")
+        client.post("/api/identities/did:agt:other/deprecate")
         active = client.get(
             "/api/identities", params={"status_filter": "active"}
         ).json()["identities"]
@@ -162,7 +162,7 @@ def test_list_and_filters(tmp_path, monkeypatch) -> None:
             "/api/identities", params={"status_filter": "deprecated"}
         ).json()["identities"]
         assert len(deprecated) == 1
-        assert deprecated[0]["did"] == "did:agt:d1:other"
+        assert deprecated[0]["did"] == "did:agt:other"
     finally:
         dispose()
 
@@ -174,11 +174,11 @@ def test_get_by_did_found_and_missing(tmp_path, monkeypatch) -> None:
     client, dispose = _build_app(tmp_path)
     try:
         client.post("/api/identities", json=_payload())
-        got = client.get("/api/identities/did:agt:d1:code-reviewer")
+        got = client.get("/api/identities/did:agt:code-reviewer")
         assert got.status_code == 200
         assert got.json()["name"] == "Code Reviewer"
 
-        missing = client.get("/api/identities/did:agt:d1:ghost")
+        missing = client.get("/api/identities/did:agt:ghost")
         assert missing.status_code == 404
     finally:
         dispose()
@@ -195,7 +195,7 @@ def test_update_partial_and_404(tmp_path, monkeypatch) -> None:
     try:
         client.post("/api/identities", json=_payload())
         resp = client.put(
-            "/api/identities/did:agt:d1:code-reviewer",
+            "/api/identities/did:agt:code-reviewer",
             json={"name": "Renamed", "add_capabilities": ["refactor"]},
         )
         assert resp.status_code == 200
@@ -204,7 +204,7 @@ def test_update_partial_and_404(tmp_path, monkeypatch) -> None:
         assert sorted(body["capabilities"]) == ["code-review", "refactor"]
 
         missing = client.put(
-            "/api/identities/did:agt:d1:ghost", json={"name": "x"}
+            "/api/identities/did:agt:ghost", json={"name": "x"}
         )
         assert missing.status_code == 404
     finally:
@@ -221,11 +221,11 @@ def test_delete_and_404(tmp_path, monkeypatch) -> None:
     client, dispose = _build_app(tmp_path)
     try:
         client.post("/api/identities", json=_payload())
-        ok = client.delete("/api/identities/did:agt:d1:code-reviewer")
+        ok = client.delete("/api/identities/did:agt:code-reviewer")
         assert ok.status_code == 204
-        assert client.get("/api/identities/did:agt:d1:code-reviewer").status_code == 404
+        assert client.get("/api/identities/did:agt:code-reviewer").status_code == 404
 
-        missing = client.delete("/api/identities/did:agt:d1:code-reviewer")
+        missing = client.delete("/api/identities/did:agt:code-reviewer")
         assert missing.status_code == 404
     finally:
         dispose()
@@ -244,13 +244,13 @@ def test_delete_conflicts_when_task_references(tmp_path, monkeypatch) -> None:
     ))
     try:
         client.post("/api/identities", json=_payload())
-        _add_task_ref(cfg_engine, "did:agt:d1:code-reviewer", "t-ref-1")
+        _add_task_ref(cfg_engine, "did:agt:code-reviewer", "t-ref-1")
 
-        resp = client.delete("/api/identities/did:agt:d1:code-reviewer")
+        resp = client.delete("/api/identities/did:agt:code-reviewer")
         assert resp.status_code == 409
         assert "t-ref-1" in resp.json()["detail"]
         # Still exists.
-        assert client.get("/api/identities/did:agt:d1:code-reviewer").status_code == 200
+        assert client.get("/api/identities/did:agt:code-reviewer").status_code == 200
     finally:
         asyncio.run(cfg_engine.dispose())
         dispose()
@@ -268,15 +268,15 @@ def test_deprecate_and_revoke(tmp_path, monkeypatch) -> None:
         client.post("/api/identities", json=_payload(slug="aa", name="A"))
         client.post("/api/identities", json=_payload(slug="bb", name="B"))
 
-        dep = client.post("/api/identities/did:agt:d1:aa/deprecate")
+        dep = client.post("/api/identities/did:agt:aa/deprecate")
         assert dep.status_code == 200
         assert dep.json()["status"] == "deprecated"
 
-        rev = client.post("/api/identities/did:agt:d1:bb/revoke")
+        rev = client.post("/api/identities/did:agt:bb/revoke")
         assert rev.status_code == 200
         assert rev.json()["status"] == "revoked"
 
-        missing = client.post("/api/identities/did:agt:d1:ghost/deprecate")
+        missing = client.post("/api/identities/did:agt:ghost/deprecate")
         assert missing.status_code == 404
     finally:
         dispose()
@@ -292,13 +292,13 @@ def test_sync_files_overwrites_manual_edits(tmp_path, monkeypatch) -> None:
         md = tmp_path / ".agt" / "identities" / "code-reviewer" / "AGENT.md"
         md.write_text("MANUAL EDITS ONLY")
 
-        resp = client.post("/api/identities/did:agt:d1:code-reviewer/sync-files")
+        resp = client.post("/api/identities/did:agt:code-reviewer/sync-files")
         assert resp.status_code == 200
         content = md.read_text()
         assert "MANUAL EDITS" not in content
         assert "Code Reviewer" in content
 
-        missing = client.post("/api/identities/did:agt:d1:ghost/sync-files")
+        missing = client.post("/api/identities/did:agt:ghost/sync-files")
         assert missing.status_code == 404
     finally:
         dispose()

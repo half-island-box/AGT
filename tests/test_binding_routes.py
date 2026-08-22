@@ -25,7 +25,7 @@ from agt.server.models import Base
 
 
 SECRET = "binding-routes-test-secret"
-DID = "did:agt:local:reviewer"
+DID = "did:agt:reviewer"
 
 
 def _build_app(tmp_path) -> tuple[TestClient, callable]:
@@ -109,7 +109,7 @@ class TestBindingRoutes:
     def test_create_for_unknown_identity_404(self, tmp_path, monkeypatch) -> None:
         client, dispose = _build_app(tmp_path)
         try:
-            resp = client.post("/api/identities/did:agt:nope:ghost/bindings", json={
+            resp = client.post("/api/identities/did:agt:nope/bindings", json={
                 "daemon_id": "local", "provider": "claude",
             })
             assert resp.status_code == 404
@@ -202,7 +202,7 @@ class TestResolve:
         client, dispose = _build_app(tmp_path)
         try:
             resp = client.post("/api/identities/resolve", json={
-                "identity_did": "did:agt:nope:ghost", "daemon_id": "local",
+                "identity_did": "did:agt:nope", "daemon_id": "local",
             })
             assert resp.status_code == 404
             assert resp.json()["detail"]["type"] == "identity_not_found"
@@ -229,7 +229,7 @@ class TestResolve:
         client, dispose = _build_app(tmp_path)
         try:
             resp = client.post("/api/identities/resolve", json={
-                "identity_did": "did:agt:any:x", "daemon_id": "local",
+                "identity_did": "did:agt:anyx", "daemon_id": "local",
             })
             # A did='resolve' route would 404 (no such identity); we expect
             # the resolve handler's own 404 (identity_not_found) or 200 —

@@ -59,7 +59,7 @@ def db(tmp_path: Path) -> _DB:
     inst.dispose()
 
 
-DID = "did:agt:local:reviewer"
+DID = "did:agt:reviewer"
 
 
 async def _mk_identity(db: _DB, tmp_path: Path) -> None:
@@ -99,7 +99,7 @@ class TestCreate:
 
     def test_unknown_identity_rejected(self, db: _DB) -> None:
         with pytest.raises(ValueError, match="not found"):
-            db.run(_create_via, db, "did:agt:nope:ghost", _payload())
+            db.run(_create_via, db, "did:agt:nope", _payload())
 
     def test_priority_and_default_forwarded(self, db: _DB, tmp_path: Path) -> None:
         db.run(_mk_identity, db, tmp_path)

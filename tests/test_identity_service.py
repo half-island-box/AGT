@@ -96,20 +96,19 @@ def _payload(**overrides) -> dict:
 
 class TestDirName:
     def test_extracts_slug_from_valid_did(self) -> None:
-        assert _dir_name("did:agt:daemon-A:code-reviewer") == "code-reviewer"
-
-    def test_same_slug_different_daemons_same_dirname(self) -> None:
-        # A valid slug maps to a directory named after itself, regardless
-        # of which daemon issued the DID.
-        assert _dir_name("did:agt:daemon-A:ab") == _dir_name("did:agt:daemon-B:ab")
+        assert _dir_name("did:agt:code-reviewer") == "code-reviewer"
 
     def test_malformed_did_falls_back_to_hash(self) -> None:
-        name = _dir_name("not-a-did")
+        # Wrong arity (3-segment DID is the only legal shape now) → hash.
+        name = _dir_name("did:agt:daemon-A:code-reviewer")
         assert name.startswith("identity-")
         assert len(name) == len("identity-") + 8
 
+        name = _dir_name("not-a-did")
+        assert name.startswith("identity-")
+
     def test_invalid_slug_falls_back_to_slug_hash(self) -> None:
-        name = _dir_name("did:agt:daemon-A:UPPER")
+        name = _dir_name("did:agt:UPPER")
         assert name.startswith("UPPER-")
         assert len(name) == len("UPPER-") + 8
 
@@ -117,11 +116,11 @@ class TestDirName:
 class TestDIDGeneration:
     def test_create_generates_expected_did(self, db: _DB, tmp_path: Path) -> None:
         did = db.run(_create_via, db, tmp_path, _payload())
-        assert did == "did:agt:daemon-A:code-reviewer"
+        assert did == "did:agt:code-reviewer"
 
     def test_slug_derived_from_name_when_missing(self, db: _DB, tmp_path: Path) -> None:
         did = db.run(_create_via, db, tmp_path, _payload(slug=None, name="Doc Translator"))
-        assert did == "did:agt:daemon-A:doc-translator"
+        assert did == "did:agt:doc-translator"
 
     def test_invalid_slug_rejected(self, db: _DB, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="Invalid slug"):
@@ -136,10 +135,12 @@ class TestDIDGeneration:
         with pytest.raises(ValueError, match="already exists"):
             db.run(_create_via, db, tmp_path, _payload())
 
-    def test_same_slug_different_daemon_allowed(self, db: _DB, tmp_path: Path) -> None:
+    def test_same_slug_different_daemon_globally_rejected(self, db: _DB, tmp_path: Path) -> None:
+        """Namespace isolation removed in 2026-08: the same slug is now a
+        global conflict regardless of which daemon created it."""
         db.run(_create_via, db, tmp_path, _payload())
-        did_b = db.run(_create_via, db, tmp_path, _payload(daemon_id="daemon-B"))
-        assert did_b == "did:agt:daemon-B:code-reviewer"
+        with pytest.raises(ValueError, match="already exists"):
+            db.run(_create_via, db, tmp_path, _payload(daemon_id="daemon-B"))
 
 
 async def _create_via(db: _DB, tmp_path: Path, payload: dict) -> str:
@@ -199,7 +200,7 @@ async def _add_task(db: _DB, task_id: str, identity_did: str) -> None:
 class TestCreateGet:
     def test_create_persists_all_fields(self, db: _DB, tmp_path: Path) -> None:
         db.run(_create_via, db, tmp_path, _payload())
-        ident = db.run(_get_via, db, "did:agt:daemon-A:code-reviewer")
+        ident = db.run(_get_via, db, "did:agt:code-reviewer")
         assert ident is not None
         assert ident["name"] == "Code Reviewer"
         assert ident["status"] == "active"
@@ -207,7 +208,7 @@ class TestCreateGet:
         assert ident["daemon_id"] == "daemon-A"
 
     def test_get_missing_returns_none(self, db: _DB) -> None:
-        assert db.run(_get_via, db, "did:agt:nope:ghost") is None
+        assert db.run(_get_via, db, "did:agt:nope") is None
 
 
 class TestList:
@@ -219,7 +220,8 @@ class TestList:
 
     def test_list_filters_by_daemon(self, db: _DB, tmp_path: Path) -> None:
         db.run(_create_via, db, tmp_path, _payload())
-        db.run(_create_via, db, tmp_path, _payload(daemon_id="daemon-B"))
+        # Namespace isolation removed 2026-08: must use a different slug now.
+        db.run(_create_via, db, tmp_path, _payload(slug="reviewer-b", daemon_id="daemon-B"))
         idents = db.run(_list_via, db, daemon_id="daemon-A")
         assert len(idents) == 1
         assert idents[0]["daemon_id"] == "daemon-A"
@@ -227,7 +229,7 @@ class TestList:
     def test_list_filters_by_status(self, db: _DB, tmp_path: Path) -> None:
         db.run(_create_via, db, tmp_path, _payload())
         db.run(_create_via, db, tmp_path, _payload(slug="other", name="Other"))
-        db.run(_deprecate_via, db, "did:agt:daemon-A:other")
+        db.run(_deprecate_via, db, "did:agt:other")
         active = db.run(_list_via, db, status="active")
         assert len(active) == 1
         assert active[0]["did"].endswith("code-reviewer")
@@ -249,7 +251,7 @@ class TestUpdate:
         assert sorted(updated["capabilities"]) == ["code-review", "refactor"]
 
     def test_update_missing_returns_none(self, db: _DB) -> None:
-        assert db.run(_update_via, db, "did:agt:nope:ghost", {"name": "x"}) is None
+        assert db.run(_update_via, db, "did:agt:nope", {"name": "x"}) is None
 
     def test_update_does_not_rewrite_agent_md(self, db: _DB, tmp_path: Path) -> None:
         did = db.run(_create_via, db, tmp_path, _payload())
@@ -275,10 +277,10 @@ class TestStatusTransitions:
         assert db.run(_revoke_via, db, did)["status"] == "revoked"
 
     def test_deprecate_missing_returns_none(self, db: _DB) -> None:
-        assert db.run(_deprecate_via, db, "did:agt:nope:ghost") is None
+        assert db.run(_deprecate_via, db, "did:agt:nope") is None
 
     def test_revoke_missing_returns_none(self, db: _DB) -> None:
-        assert db.run(_revoke_via, db, "did:agt:nope:ghost") is None
+        assert db.run(_revoke_via, db, "did:agt:nope") is None
 
 
 class TestDelete:
@@ -288,7 +290,7 @@ class TestDelete:
         assert db.run(_get_via, db, did) is None
 
     def test_delete_missing_returns_false(self, db: _DB) -> None:
-        assert db.run(_delete_via, db, "did:agt:nope:ghost") is False
+        assert db.run(_delete_via, db, "did:agt:nope") is False
 
     def test_delete_refused_when_task_references_exist(self, db: _DB, tmp_path: Path) -> None:
         did = db.run(_create_via, db, tmp_path, _payload())
@@ -308,21 +310,21 @@ class TestAgentMd:
         assert md.exists()
         content = md.read_text()
         assert "Code Reviewer" in content
-        assert "did:agt:daemon-A:code-reviewer" in content
+        assert "did:agt:code-reviewer" in content
         assert "- code-review" in content
 
     def test_write_once_does_not_overwrite(self, db: _DB, tmp_path: Path) -> None:
         db.run(_create_via, db, tmp_path, _payload())
         md = tmp_path / ".agt" / "identities" / "code-reviewer" / "AGENT.md"
         md.write_text("MANUAL EDITS ONLY")
-        ident = db.run(_get_via, db, "did:agt:daemon-A:code-reviewer")
+        ident = db.run(_get_via, db, "did:agt:code-reviewer")
         # Non-forced write must not clobber manual edits.
         write_agent_md(ident, tmp_path, force=False)
         assert md.read_text() == "MANUAL EDITS ONLY"
 
     def test_force_overwrite_via_sync(self, db: _DB, tmp_path: Path) -> None:
         db.run(_create_via, db, tmp_path, _payload())
-        did = "did:agt:daemon-A:code-reviewer"
+        did = "did:agt:code-reviewer"
         md = tmp_path / ".agt" / "identities" / "code-reviewer" / "AGENT.md"
         md.write_text("MANUAL EDITS ONLY")
         db.run(_sync_via, db, did, tmp_path)
@@ -331,13 +333,13 @@ class TestAgentMd:
         assert "Code Reviewer" in content
 
     def test_sync_missing_identity_returns_none(self, db: _DB, tmp_path: Path) -> None:
-        assert db.run(_sync_via, db, "did:agt:nope:ghost", tmp_path) is None
+        assert db.run(_sync_via, db, "did:agt:nope", tmp_path) is None
 
 
 class TestRenderAgentMd:
     def test_renders_from_dict(self) -> None:
         content = _render_agent_md({
-            "did": "did:agt:d:x",
+            "did": "did:agt:x",
             "name": "X",
             "description": "desc",
             "capabilities": json.dumps(["a", "b"]),
@@ -345,13 +347,13 @@ class TestRenderAgentMd:
             "daemon_id": "d",
         })
         assert "# X" in content
-        assert "did:agt:d:x" in content
+        assert "did:agt:x" in content
         assert "- a" in content
         assert "- b" in content
 
     def test_renders_empty_capabilities(self) -> None:
         content = _render_agent_md({
-            "did": "did:agt:d:x",
+            "did": "did:agt:x",
             "name": "X",
             "description": "",
             "capabilities": "[]",

@@ -16,7 +16,7 @@ from click.testing import CliRunner
 from agt.cli.main import cli
 
 
-DID = "did:agt:local:reviewer"
+DID = "did:agt:reviewer"
 
 
 def _binding(**overrides) -> dict:

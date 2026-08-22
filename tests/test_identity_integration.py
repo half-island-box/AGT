@@ -26,7 +26,7 @@ from agt.server.main import create_app
 
 
 SECRET = "identity-integration-secret"
-DID = "did:agt:local:code-reviewer"
+DID = "did:agt:code-reviewer"
 
 
 def _boot_server(tmp_path) -> tuple[str, object]:

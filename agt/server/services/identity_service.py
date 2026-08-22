@@ -35,9 +35,9 @@ def _utcnow_naive() -> datetime:
 def _dir_name(did: str) -> str:
     """Extract directory name from DID, with hash fallback for collisions.
 
-    The DID format is `did:agt:<daemon_id>:<slug>`. We use the slug portion
-    as the directory name. If multiple identities have the same slug (from
-    different daemons), we fallback to `<slug>-<8-char-hash>`.
+    The DID format is ``did:agt:<slug>`` (global slug — namespace isolation
+    was removed in 2026-08). We use the slug as the directory name. Hash
+    fallback is kept as a defensive guard against malformed inputs.
 
     Args:
         did: The full DID string
@@ -46,7 +46,7 @@ def _dir_name(did: str) -> str:
         Directory name for storing AGENT.md files
     """
     parts = did.split(":")
-    if len(parts) < 4 or parts[0] != "did":
+    if len(parts) != 3 or parts[0] != "did":
         # Fallback for malformed DID: use hash of entire DID
         return f"identity-{hashlib.sha256(did.encode()).hexdigest()[:8]}"
 
@@ -191,19 +191,18 @@ async def create_identity(
             f"Invalid slug '{slug}'. Must be 1-64 chars, lowercase alphanumeric with hyphens, no leading/trailing hyphens."
         )
 
-    # Generate DID
-    did = f"did:agt:{daemon_id}:{slug}"
+    # Generate DID. Slug is globally unique (namespace isolation removed
+    # 2026-08; daemon_id is recorded as ownership metadata but not part
+    # of the identifier).
+    did = f"did:agt:{slug}"
 
-    # Check for duplicate (daemon_id, slug) combination
+    # Check for duplicate globally
     existing = await db.execute(
-        select(IdentityModel).where(
-            IdentityModel.daemon_id == daemon_id,
-            IdentityModel.did == did,
-        )
+        select(IdentityModel).where(IdentityModel.did == did)
     )
     if existing.scalar_one_or_none():
         raise ValueError(
-            f"Identity with daemon_id='{daemon_id}' and slug='{slug}' already exists (DID: {did})"
+            f"Identity with slug '{slug}' already exists (DID: {did})"
         )
 
     # Parse capabilities to JSON string

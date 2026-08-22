@@ -20,7 +20,7 @@ from agt.cli.main import cli
 
 def _ident(**overrides) -> dict:
     base = {
-        "did": "did:agt:local:code-reviewer",
+        "did": "did:agt:code-reviewer",
         "daemon_id": "local",
         "name": "Code Reviewer",
         "description": "Python code review",
@@ -97,7 +97,7 @@ def test_list_renders_table() -> None:
     result = _invoke(["identity", "list"], stub)
     assert result.exit_code == 0, result.output
     assert "2 identit" in result.output
-    assert "did:agt:local:code-reviewer" in result.output
+    assert "did:agt:code-reviewer" in result.output
     assert "deprecated" in result.output
     # No filters → both None.
     assert calls["list_identities"] == [((), {"daemon_id": None, "status": None})]
@@ -124,7 +124,7 @@ def test_list_forwards_filters() -> None:
 
 def test_show_renders_details() -> None:
     result = _invoke(
-        ["identity", "show", "did:agt:local:code-reviewer"],
+        ["identity", "show", "did:agt:code-reviewer"],
         _stub({}, get_identity=lambda: _ident()),
     )
     assert result.exit_code == 0, result.output
@@ -135,7 +135,7 @@ def test_show_renders_details() -> None:
 
 def test_show_not_found_exits_2() -> None:
     result = _invoke(
-        ["identity", "show", "did:agt:local:ghost"],
+        ["identity", "show", "did:agt:ghost"],
         _stub({}, get_identity=lambda: None),
     )
     assert result.exit_code == 2
@@ -198,7 +198,7 @@ def test_create_server_error_exits_1() -> None:
 def test_update_builds_partial_payload() -> None:
     calls: dict = {}
     stub = _stub(calls, update_identity=lambda: _ident())
-    did = "did:agt:local:code-reviewer"
+    did = "did:agt:code-reviewer"
     result = _invoke(
         ["identity", "update", did, "--name", "Renamed",
          "--add-capability", "refactor", "--remove-capability", "doc-style-audit"],
@@ -217,7 +217,7 @@ def test_update_builds_partial_payload() -> None:
 
 def test_update_without_flags_exits_2() -> None:
     result = _invoke(
-        ["identity", "update", "did:agt:local:x"], _stub({})
+        ["identity", "update", "did:agt:x"], _stub({})
     )
     assert result.exit_code == 2
     assert "Nothing to update" in result.output
@@ -227,7 +227,7 @@ def test_update_without_flags_exits_2() -> None:
 
 
 def test_deprecate_revoke_sync_output() -> None:
-    did = "did:agt:local:code-reviewer"
+    did = "did:agt:code-reviewer"
     cases = (
         ("deprecate", "deprecate_identity", "Deprecated"),
         ("revoke", "revoke_identity", "Revoked"),
@@ -242,7 +242,7 @@ def test_deprecate_revoke_sync_output() -> None:
 
 
 def test_delete_success_and_not_found() -> None:
-    did = "did:agt:local:code-reviewer"
+    did = "did:agt:code-reviewer"
     ok = _invoke(["identity", "delete", did], _stub({}, delete_identity=lambda: True))
     assert ok.exit_code == 0, ok.output
     assert "Deleted identity" in ok.output
@@ -256,7 +256,7 @@ def test_delete_success_and_not_found() -> None:
 
 def test_delete_conflict_error_exits_1() -> None:
     result = _invoke(
-        ["identity", "delete", "did:agt:local:x"],
+        ["identity", "delete", "did:agt:x"],
         _stub({}, delete_identity=RuntimeError("task(s) still reference")),
     )
     assert result.exit_code == 1

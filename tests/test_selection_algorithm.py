@@ -57,7 +57,7 @@ def db(tmp_path: Path) -> _DB:
     inst.dispose()
 
 
-DID = "did:agt:local:reviewer"
+DID = "did:agt:reviewer"
 
 
 async def _mk_identity(db: _DB, tmp_path: Path, status: str | None = None) -> None:
