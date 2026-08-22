@@ -16,6 +16,7 @@ import asyncio
 import os
 import shutil
 import signal
+import subprocess
 import sys
 import time
 import uuid
@@ -943,19 +944,140 @@ def server() -> None:
     default=None,
     help="Path to the SQLite database file (default: ~/.agt/agt.db).",
 )
-def server_start(host: str, port: int, db_path: str | None) -> None:
-    """Start the FastAPI Server in the foreground (Ctrl-C to stop)."""
-    import argparse
+@click.option(
+    "-d", "--detach", is_flag=True,
+    help="Run the server in the background; this command returns immediately. "
+         "Logs go to ~/.agt/server.log (or --log-file). "
+         "Use 'agt server stop' to terminate.",
+)
+@click.option(
+    "--log-file", default=None,
+    help="Log file path (default ~/.agt/server.log). Only used when --detach is set.",
+)
+@click.option(
+    "--pid-file", default=None,
+    help="PID file path (default ~/.agt/server.pid). Only used when --detach is set.",
+)
+def server_start(
+    host: str,
+    port: int,
+    db_path: str | None,
+    detach: bool,
+    log_file: str | None,
+    pid_file: str | None,
+) -> None:
+    """Start the FastAPI Server.
 
-    from ..server.main import cli_main
+    Foreground (default): parent blocks; Ctrl-C to stop.
+    ``--detach``: fork a child running uvicorn; parent exits immediately.
+    """
+    if not detach:
+        import argparse
 
-    args = argparse.Namespace(
-        host=host,
-        port=port,
-        db_path=db_path,
-        sessions_json=None,
+        from ..server.main import cli_main
+
+        args = argparse.Namespace(
+            host=host,
+            port=port,
+            db_path=db_path,
+            sessions_json=None,
+            detach=False,
+            log_file=None,
+            pid_file=None,
+        )
+        sys.exit(cli_main(args))
+
+    # Detached: Popen a child running ``agt.server.main`` (same entry
+    # uvicorn uses when ``uvicorn agt.server.main:app`` is invoked).
+    log_path = Path(log_file) if log_file else Path.home() / ".agt" / "server.log"
+    pid_path = Path(pid_file) if pid_file else Path.home() / ".agt" / "server.pid"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_fp = open(log_path, "ab", buffering=0)
+
+    env = os.environ.copy()
+    # Record the exact pid-file path so ``agt server stop`` / ``status``
+    # (called from a different shell) can find it, even when the user
+    # passed an explicit --pid-file that differs from the default.
+    env["AGT_SERVER_PID_FILE"] = str(pid_path)
+
+    cmd = [sys.executable, "-m", "agt.server.main",
+           "--host", host, "--port", str(port),
+           "--log-file", str(log_path),
+           "--pid-file", str(pid_path),
+           "--detach"]
+    if db_path:
+        cmd += ["--db-path", db_path]
+
+    child = subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=log_fp,
+        stderr=log_fp,
+        start_new_session=True,
+        close_fds=True,
+        env=env,
     )
-    sys.exit(cli_main(args))
+    click.echo(
+        f"Server started in background (pid={child.pid}, log={log_path})"
+    )
+    sys.exit(0)
+
+
+@server.command("stop")
+@click.option(
+    "--pid-file", default=None,
+    help="PID file path. Defaults to AGT_SERVER_PID_FILE if set, "
+         "else ~/.agt/server.pid.",
+)
+def server_stop(pid_file: str | None) -> None:
+    """Signal the running server to terminate (SIGTERM)."""
+    from ..server.main import _signal_pid
+
+    path = _resolve_server_pid_file(pid_file)
+    pid = _read_pidfile_live(path)
+    if pid is None:
+        click.echo("No server running (pidfile absent or stale).")
+        return
+    try:
+        _signal_pid(pid)
+    except ProcessLookupError:
+        click.echo(f"Server pid {pid} not found.", err=True)
+        sys.exit(1)
+    click.echo(f"Sent SIGTERM to server pid {pid}")
+
+
+@server.command("status")
+@click.option(
+    "--pid-file", default=None,
+    help="PID file path. Defaults to AGT_SERVER_PID_FILE if set, "
+         "else ~/.agt/server.pid.",
+)
+def server_status(pid_file: str | None) -> None:
+    """Show whether the server is currently running."""
+    path = _resolve_server_pid_file(pid_file)
+    pid = _read_pidfile_live(path)
+    if pid is None:
+        click.echo("Server is NOT running.")
+        sys.exit(1)
+    click.echo(f"Server is running, pid={pid}, pidfile={path}")
+
+
+def _resolve_server_pid_file(explicit: str | None) -> Path:
+    """Pick the pid-file path: explicit flag wins, else AGT_SERVER_PID_FILE
+    env (set by ``agt server start --detach``), else ``~/.agt/server.pid``."""
+    if explicit:
+        return Path(explicit)
+    env_path = os.environ.get("AGT_SERVER_PID_FILE")
+    if env_path:
+        return Path(env_path)
+    return Path.home() / ".agt" / "server.pid"
+
+
+def _read_pidfile_live(path) -> int | None:
+    """Thin wrapper around ``server.main._read_pidfile`` for CLI callers."""
+    from ..server.main import _read_pidfile
+
+    return _read_pidfile(path)
 
 
 # ── task (Phase 2) ─────────────────────────────────────────────────
@@ -1755,13 +1877,58 @@ def daemon() -> None:
 
 @daemon.command("start")
 @click.option("--server-url", default=None, help="Override AGT_SERVER_URL.")
-def daemon_start(server_url: str | None) -> None:
+@click.option(
+    "-d", "--detach", is_flag=True,
+    help="Run the daemon in the background; this command returns immediately. "
+         "Logs go to ~/.agt/daemon.log (or --log-file). "
+         "Use 'agt daemon stop' to terminate.",
+)
+@click.option(
+    "--log-file", default=None,
+    help="Log file path (default ~/.agt/daemon.log). "
+         "Only used when --detach is set.",
+)
+def daemon_start(
+    server_url: str | None,
+    detach: bool,
+    log_file: str | None,
+) -> None:
     """Start the background daemon (connects to Server, registers runtimes)."""
-    import argparse
-    from ..daemon.main import cmd_start
+    if not detach:
+        # Foreground: parent blocks until Ctrl-C, as before.
+        import argparse
+        from ..daemon.main import cmd_start
 
-    args = argparse.Namespace(server_url=server_url)
-    sys.exit(cmd_start(args))
+        args = argparse.Namespace(server_url=server_url)
+        sys.exit(cmd_start(args))
+
+    # Detached: spawn a child running the existing cmd_start, parent exits.
+    log_path = Path(log_file) if log_file else Path.home() / ".agt" / "daemon.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_fp = open(log_path, "ab", buffering=0)
+
+    env = os.environ.copy()
+    # ``DaemonConfig.server_url`` is a read-only property driven by the
+    # ``AGT_SERVER_URL`` env var (the CLI's own ``--server-url`` argument
+    # to ``cmd_start`` is a long-broken attribute write — see issue
+    # outside this change's scope). Forward via env, which is the path
+    # ``from_env()`` actually reads.
+    if server_url:
+        env["AGT_SERVER_URL"] = server_url
+
+    child = subprocess.Popen(
+        [sys.executable, "-m", "agt.daemon.main", "start"],
+        stdin=subprocess.DEVNULL,
+        stdout=log_fp,
+        stderr=log_fp,
+        start_new_session=True,  # detach from parent's tty/process group
+        close_fds=True,
+        env=env,
+    )
+    click.echo(
+        f"Daemon started in background (pid={child.pid}, log={log_path})"
+    )
+    sys.exit(0)
 
 
 @daemon.command("stop")

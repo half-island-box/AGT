@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import signal
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
@@ -27,6 +29,47 @@ from .routes.tasks import router as tasks_router
 from .services.runtime_service import prune_stale_runtimes
 
 log = logging.getLogger(__name__)
+
+
+# Default pid file location. Computed lazily so ``HOME`` overrides
+# (set in tests / by users with non-default homes) take effect.
+DEFAULT_PID_FILE = Path.home() / ".agt" / "server.pid"
+# Kept as an alias for backward-compatible imports.
+PID_FILE = DEFAULT_PID_FILE
+
+
+def _default_pid_file() -> Path:
+    """Return the canonical pid file path, resolving ``HOME`` at call time."""
+    return Path.home() / ".agt" / "server.pid"
+
+
+def _read_pidfile(path: Path | None = None) -> int | None:
+    """Return the live pid stored in ``path``, or None if stale/missing.
+
+    If ``path`` is None, falls back to the canonical ``~/.agt/server.pid``,
+    computed lazily (respects runtime ``HOME``).
+    """
+    target = path if path is not None else _default_pid_file()
+    if not target.exists():
+        return None
+    try:
+        pid = int(target.read_text(encoding="utf-8").strip())
+    except (ValueError, OSError):
+        return None
+    # Probe liveness: kill(pid, 0) succeeds iff the process exists.
+    try:
+        os.kill(pid, 0)
+        return pid
+    except ProcessLookupError:
+        return None
+    except PermissionError:
+        # Different user owns the process; treat as running but don't signal.
+        return pid
+
+
+def _signal_pid(pid: int, sig: int = signal.SIGTERM) -> None:
+    """Send ``sig`` to ``pid``. Raises on ESRCH (process already gone)."""
+    os.kill(pid, sig)
 
 
 def create_app(config: ServerConfig | None = None) -> FastAPI:
@@ -63,6 +106,16 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                 )
         log.info("agt-server ready on %s:%d (db=%s)", cfg.host, cfg.port, cfg.db_path)
 
+        # Optional PID file (detached mode): write the live pid so that
+        # ``agt server stop`` / ``status`` can find and signal us. Only
+        # written when ``cfg.pid_file`` is set (foreground mode skips).
+        pid_path: Path | None = None
+        if cfg.pid_file:
+            pid_path = Path(cfg.pid_file)
+            pid_path.parent.mkdir(parents=True, exist_ok=True)
+            pid_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
+            log.info("Server pid file: %s", pid_path)
+
         # Reverse-dial daemon-link pool (Step 3.5): one task per
         # configured daemon target. Each task dials the daemon's WS
         # endpoint, holds the link, reconnects with backoff on drop,
@@ -93,6 +146,11 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         finally:
             log.info("Shutting down daemon-link pool…")
             shutdown_event.set()
+            if pid_path is not None:
+                try:
+                    pid_path.unlink()
+                except FileNotFoundError:
+                    pass
             for t in daemon_link_tasks:
                 t.cancel()
             # Give the tasks a moment to acknowledge shutdown, but don't
@@ -141,6 +199,15 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=8420)
     parser.add_argument("--db-path", default=None)
     parser.add_argument("--sessions-json", default=None)
+    parser.add_argument("--detach", action="store_true",
+                        help="Detach into the background (default pid file + "
+                             "log file under ~/.agt/). Ignored here when "
+                             "called directly — the CLI handles forking.")
+    parser.add_argument("--log-file", default=None,
+                        help="Log file path (detached mode).")
+    parser.add_argument("--pid-file", default=None,
+                        help="PID file path (detached mode, default "
+                             "~/.agt/server.pid).")
     args = parser.parse_args()
     return cli_main(args)
 
@@ -148,8 +215,9 @@ def main() -> int:
 def cli_main(args) -> int:
     """Callable entry for the CLI — accepts a pre-built namespace.
 
-    The CLI's ``server start`` command builds an argparse-style namespace
-    and hands it here, so both paths share the same server-startup logic.
+    Both ``agt server start`` (foreground and ``--detach``) and the
+    detached child (``python -m agt.server.main``) build a namespace
+    and hand it here, so all paths share the same server-startup logic.
     """
     cfg = ServerConfig.from_env()
     if args.host:
@@ -161,7 +229,25 @@ def cli_main(args) -> int:
     if getattr(args, "sessions_json", None):
         cfg.sessions_json = args.sessions_json
 
+    pid_file = getattr(args, "pid_file", None) or None
+    log_file = getattr(args, "log_file", None) or None
+    # Pid file is only meaningful when we actually forked off (detached
+    # mode). Foreground runs leave it None so the lifespan skips writing.
+    if pid_file:
+        cfg.pid_file = str(pid_file)
+
     server_app = create_app(cfg)
+
+    # uvicorn routes its loggers (uvicorn / uvicorn.access / uvicorn.error)
+    # through handlers declared in ``log_config``. Detached mode swaps the
+    # default StreamHandlers for FileHandlers pointing at the chosen log
+    # file so nothing escapes to the parent's tty.
+    uvicorn_kwargs: dict = {}
+    if log_file:
+        log_path = Path(log_file)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        uvicorn_kwargs["log_config"] = _file_log_config(str(log_path))
+
     uvicorn.run(
         server_app,
         host=cfg.host,
@@ -169,8 +255,29 @@ def cli_main(args) -> int:
         log_level="info",
         ws_ping_interval=20,
         ws_ping_timeout=20,
+        **uvicorn_kwargs,
     )
     return 0
+
+
+def _file_log_config(log_path: str) -> dict:
+    """Build a uvicorn ``log_config`` dict that writes both the access
+    and default handlers to ``log_path`` instead of stdout/stderr.
+
+    ``disable_existing_loggers=False`` keeps the app's own loggers
+    (``agt.server.*``, etc.) flowing into our FileHandler.
+    """
+    import copy
+
+    import uvicorn.config as uvicorn_config
+
+    config = copy.deepcopy(uvicorn_config.LOGGING_CONFIG)
+    for handler_name in ("default", "access"):
+        handler = config["handlers"][handler_name]
+        handler["class"] = "logging.FileHandler"
+        handler["filename"] = log_path
+        handler.pop("stream", None)
+    return config
 
 
 if __name__ == "__main__":
@@ -180,4 +287,4 @@ if __name__ == "__main__":
     sys.exit(main())
 
 
-__all__ = ["app", "create_app", "main", "cli_main"]
+__all__ = ["app", "create_app", "main", "cli_main", "PID_FILE", "_read_pidfile", "_signal_pid"]

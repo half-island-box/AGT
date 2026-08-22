@@ -71,6 +71,12 @@ class ServerConfig:
     )
     secret: str = ""  # HMAC signing secret for task-scoped tokens.
 
+    # PID file written by the lifespan when set; ``agt server stop`` reads it
+    # back to send SIGTERM. ``None`` (the default) means no pid file is
+    # written — the foreground CLI path leaves no trace, while the detached
+    # CLI path sets this to ~/.agt/server.pid.
+    pid_file: str | None = None
+
     # Reverse-dial daemon list (Step 3.5). ``daemons_path`` is read once
     # at construction; ``daemons`` carries the parsed targets.
     daemons_path: str = field(
