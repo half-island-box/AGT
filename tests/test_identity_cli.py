@@ -206,7 +206,7 @@ def test_update_builds_partial_payload() -> None:
     )
     assert result.exit_code == 0, result.output
     assert "Updated identity" in result.output
-    assert "sync-files" in result.output  # hint that AGENT.md is unchanged
+    assert "sync-files" in result.output  # hint that AGENTS.md is unchanged
     payload = calls["update_identity"][0][0][1]
     assert payload == {
         "name": "Renamed",

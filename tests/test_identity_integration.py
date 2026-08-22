@@ -4,10 +4,10 @@ Boots a REAL agt-server (uvicorn on an ephemeral port, in a daemon
 thread), then drives the REAL ``agt identity`` CLI commands against it
 over actual HTTP:
 
-    create → AGENT.md on disk → list shows it → show details →
-    update leaves AGENT.md untouched → sync-files rewrites it
+    create → AGENTS.md on disk → list shows it → show details →
+    update leaves AGENTS.md untouched → sync-files rewrites it
 
-AGENT.md writes are redirected to tmp_path by monkeypatching
+AGENTS.md writes are redirected to tmp_path by monkeypatching
 ``routes.identities._root_dir`` (the routes run inside the server
 thread, but the module attribute is patched process-wide).
 """
@@ -67,9 +67,9 @@ def test_cli_create_to_agent_md_end_to_end(tmp_path, monkeypatch) -> None:
 
     base_url, server = _boot_server(tmp_path)
     runner = CliRunner()
-    md = tmp_path / ".agt" / "identities" / "code-reviewer" / "AGENT.md"
+    md = tmp_path / ".agt" / "identities" / "code-reviewer" / "AGENTS.md"
     try:
-        # 1. create → 201 over real HTTP, AGENT.md written.
+        # 1. create → 201 over real HTTP, AGENTS.md written.
         created = runner.invoke(cli, [
             "identity", "create",
             "--name", "Code Reviewer",
@@ -97,7 +97,7 @@ def test_cli_create_to_agent_md_end_to_end(tmp_path, monkeypatch) -> None:
         assert "Code Reviewer" in shown.output
         assert "doc-style-audit" in shown.output
 
-        # 4. update does NOT touch AGENT.md (manual edits preserved).
+        # 4. update does NOT touch AGENTS.md (manual edits preserved).
         md.write_text("MANUAL EDITS ONLY")
         updated = runner.invoke(cli, [
             "identity", "update", DID, "--name", "Renamed",
@@ -114,5 +114,12 @@ def test_cli_create_to_agent_md_end_to_end(tmp_path, monkeypatch) -> None:
         regenerated = md.read_text()
         assert "MANUAL EDITS" not in regenerated
         assert "# Renamed" in regenerated
+
+        # 6. delete removes the identity AND its ~/.agt/identities dir.
+        deleted = runner.invoke(cli, [
+            "identity", "delete", DID, "--server-url", base_url,
+        ])
+        assert deleted.exit_code == 0, deleted.output
+        assert not (tmp_path / ".agt" / "identities" / "code-reviewer").exists()
     finally:
         _stop(server)

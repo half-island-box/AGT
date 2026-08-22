@@ -336,7 +336,7 @@ class ServerClient:
         return False
 
     async def sync_identity_files(self, did: str) -> dict:
-        """Force regenerate AGENT.md from current database state."""
+        """Force regenerate AGENTS.md from current database state."""
         return await self._post(f"/api/identities/{did}/sync-files", {})
 
     # ── Identity bindings + selection (Phase 4 Step 2) ─────────────

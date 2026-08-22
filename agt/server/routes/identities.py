@@ -1,8 +1,8 @@
 """Identity CRUD routes (Phase 4 Step 1).
 
 Endpoints for creating, reading, updating, deprecating, revoking, and
-deleting identities. AGENT.md files are written to
-``~/.agt/identities/<did>/AGENT.md`` on creation and are NOT automatically
+deleting identities. AGENTS.md files are written to
+``~/.agt/identities/<did>/AGENTS.md`` on creation and are NOT automatically
 overwritten on updates (use sync-files for forced regeneration).
 """
 
@@ -47,7 +47,7 @@ router = APIRouter(prefix="/api/identities", tags=["identities"])
 
 
 def _root_dir() -> Path:
-    """Home directory root for AGENT.md files (~/.agt/identities/...)."""
+    """Home directory root for AGENTS.md files (~/.agt/identities/...)."""
     return Path.home()
 
 
@@ -78,7 +78,7 @@ async def create_identity_route(
     payload: IdentityCreate,
     db: AsyncSession = Depends(get_db),
 ) -> IdentityOut:
-    """Create a new identity with DID generation and AGENT.md write."""
+    """Create a new identity with DID generation and AGENTS.md write."""
     try:
         did = await create_identity(
             payload.model_dump(),
@@ -163,7 +163,7 @@ async def update_identity_route(
     payload: IdentityUpdate,
     db: AsyncSession = Depends(get_db),
 ) -> IdentityOut:
-    """Update an identity (partial update; AGENT.md not overwritten)."""
+    """Update an identity (partial update; AGENTS.md not overwritten)."""
     identity = await update_identity(did, payload.model_dump(), db)
     if identity is None:
         raise HTTPException(
@@ -178,9 +178,10 @@ async def delete_identity_route(
     did: str,
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    """Delete an identity, refusing if any task references it."""
+    """Delete an identity (and its ~/.agt/identities/<slug>/ dir), refusing
+    if any task references it."""
     try:
-        deleted = await delete_identity(did, db)
+        deleted = await delete_identity(did, db, _root_dir())
     except ValueError as exc:
         # Task reference exists — conflict
         raise HTTPException(
@@ -228,7 +229,7 @@ async def sync_identity_files_route(
     did: str,
     db: AsyncSession = Depends(get_db),
 ) -> IdentityOut:
-    """Force regenerate the AGENT.md file from current database state."""
+    """Force regenerate the AGENTS.md file from current database state."""
     identity = await sync_agent_md(did, db, _root_dir())
     if identity is None:
         raise HTTPException(

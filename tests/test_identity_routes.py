@@ -2,14 +2,14 @@
 
 Verifies the HTTP surface over the identity service:
 
-- POST /api/identities: 201 + AGENT.md written under the identities root;
+- POST /api/identities: 201 + AGENTS.md written under the identities root;
   409 on duplicate DID; 400 on invalid slug.
 - GET /api/identities (+daemon_id/status_filter) and /{did} (200/404).
-- PUT /{did}: partial update without touching AGENT.md.
+- PUT /{did}: partial update without touching AGENTS.md.
 - DELETE /{did}: 204; 404 unknown; 409 when a task references the identity.
 - POST /{did}/deprecate, /{did}/revoke, /{did}/sync-files.
 
-AGENT.md writes are redirected to tmp_path by monkeypatching
+AGENTS.md writes are redirected to tmp_path by monkeypatching
 ``routes.identities._root_dir`` so tests never touch the real ~/.agt.
 """
 
@@ -99,7 +99,7 @@ def test_create_returns_201_and_writes_agent_md(tmp_path, monkeypatch) -> None:
         assert body["did"] == "did:agt:code-reviewer"
         assert body["status"] == "active"
 
-        md = tmp_path / ".agt" / "identities" / "code-reviewer" / "AGENT.md"
+        md = tmp_path / ".agt" / "identities" / "code-reviewer" / "AGENTS.md"
         assert md.exists()
         assert "Code Reviewer" in md.read_text()
     finally:
@@ -221,9 +221,13 @@ def test_delete_and_404(tmp_path, monkeypatch) -> None:
     client, dispose = _build_app(tmp_path)
     try:
         client.post("/api/identities", json=_payload())
+        ident_dir = tmp_path / ".agt" / "identities" / "code-reviewer"
+        assert (ident_dir / "AGENTS.md").exists()  # created on create
+
         ok = client.delete("/api/identities/did:agt:code-reviewer")
         assert ok.status_code == 204
         assert client.get("/api/identities/did:agt:code-reviewer").status_code == 404
+        assert not ident_dir.exists()  # filesystem dir removed with identity
 
         missing = client.delete("/api/identities/did:agt:code-reviewer")
         assert missing.status_code == 404
@@ -289,7 +293,7 @@ def test_sync_files_overwrites_manual_edits(tmp_path, monkeypatch) -> None:
     client, dispose = _build_app(tmp_path)
     try:
         client.post("/api/identities", json=_payload())
-        md = tmp_path / ".agt" / "identities" / "code-reviewer" / "AGENT.md"
+        md = tmp_path / ".agt" / "identities" / "code-reviewer" / "AGENTS.md"
         md.write_text("MANUAL EDITS ONLY")
 
         resp = client.post("/api/identities/did:agt:code-reviewer/sync-files")

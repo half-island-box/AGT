@@ -7,7 +7,7 @@ Verifies the HTTP surface added in Step 2:
 - POST /api/identities/resolve (200/400/404, no side-effects,
   not swallowed by the {did} route)
 
-AGENT.md writes are redirected to tmp_path via monkeypatching
+AGENTS.md writes are redirected to tmp_path via monkeypatching
 ``routes.identities._root_dir`` (identity create writes the file).
 """
 

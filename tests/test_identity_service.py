@@ -4,7 +4,7 @@ Covers:
 - CRUD: create / get / list / update / deprecate / revoke / delete
 - DID generation: slug validation, derivation from name, duplicates
 - Status transitions: active → deprecated → revoked
-- AGENT.md: write-once idempotency, force overwrite via sync, content
+- AGENTS.md: write-once idempotency, force overwrite via sync, content
 - _dir_name: slug extraction + hash fallback for malformed DIDs
 
 Follows the repo's existing async test convention: sync test functions
@@ -174,9 +174,9 @@ async def _revoke_via(db: _DB, did: str):
         return await revoke_identity(did, session)
 
 
-async def _delete_via(db: _DB, did: str):
+async def _delete_via(db: _DB, did: str, root_dir: Path | None = None):
     async with db.session() as session:
-        return await delete_identity(did, session)
+        return await delete_identity(did, session, root_dir=root_dir)
 
 
 async def _sync_via(db: _DB, did: str, tmp_path: Path):
@@ -255,7 +255,7 @@ class TestUpdate:
 
     def test_update_does_not_rewrite_agent_md(self, db: _DB, tmp_path: Path) -> None:
         did = db.run(_create_via, db, tmp_path, _payload())
-        md_path = tmp_path / ".agt" / "identities" / "code-reviewer" / "AGENT.md"
+        md_path = tmp_path / ".agt" / "identities" / "code-reviewer" / "AGENTS.md"
         original = md_path.read_text()
         md_path.write_text(original + "\n<!-- manual note -->")
         db.run(_update_via, db, did, {"name": "Renamed"})
@@ -286,7 +286,7 @@ class TestStatusTransitions:
 class TestDelete:
     def test_delete_unused_identity(self, db: _DB, tmp_path: Path) -> None:
         did = db.run(_create_via, db, tmp_path, _payload())
-        assert db.run(_delete_via, db, did) is True
+        assert db.run(_delete_via, db, did, tmp_path) is True
         assert db.run(_get_via, db, did) is None
 
     def test_delete_missing_returns_false(self, db: _DB) -> None:
@@ -296,17 +296,41 @@ class TestDelete:
         did = db.run(_create_via, db, tmp_path, _payload())
         db.run(_add_task, db, "t-1", did)
         with pytest.raises(ValueError, match="task"):
-            db.run(_delete_via, db, did)
+            db.run(_delete_via, db, did, tmp_path)
         assert db.run(_get_via, db, did) is not None
 
+    def test_delete_removes_identity_directory(self, db: _DB, tmp_path: Path) -> None:
+        """Deleting an identity must rmtree its ~/.agt/identities/<slug>/ dir."""
+        did = db.run(_create_via, db, tmp_path, _payload())
+        ident_dir = tmp_path / ".agt" / "identities" / "code-reviewer"
+        assert (ident_dir / "AGENTS.md").exists()  # created on identity create
 
-# ── AGENT.md files ──────────────────────────────────────────────────
+        assert db.run(_delete_via, db, did, tmp_path) is True
+
+        assert not ident_dir.exists()
+        assert not (tmp_path / ".agt" / "identities").exists() or not any(
+            (tmp_path / ".agt" / "identities").iterdir()
+        )  # identities root left empty or removed
+
+    def test_delete_no_root_skips_filesystem(self, db: _DB, tmp_path: Path) -> None:
+        """root_dir=None (defensive default) removes DB row but not the dir."""
+        did = db.run(_create_via, db, tmp_path, _payload())
+        ident_dir = tmp_path / ".agt" / "identities" / "code-reviewer"
+        assert ident_dir.exists()
+
+        assert db.run(_delete_via, db, did) is True  # root_dir=None
+
+        assert ident_dir.exists()  # file dir untouched
+        assert db.run(_get_via, db, did) is None
+
+
+# ── AGENTS.md files ──────────────────────────────────────────────────
 
 
 class TestAgentMd:
     def test_created_on_identity_create(self, db: _DB, tmp_path: Path) -> None:
         db.run(_create_via, db, tmp_path, _payload())
-        md = tmp_path / ".agt" / "identities" / "code-reviewer" / "AGENT.md"
+        md = tmp_path / ".agt" / "identities" / "code-reviewer" / "AGENTS.md"
         assert md.exists()
         content = md.read_text()
         assert "Code Reviewer" in content
@@ -315,7 +339,7 @@ class TestAgentMd:
 
     def test_write_once_does_not_overwrite(self, db: _DB, tmp_path: Path) -> None:
         db.run(_create_via, db, tmp_path, _payload())
-        md = tmp_path / ".agt" / "identities" / "code-reviewer" / "AGENT.md"
+        md = tmp_path / ".agt" / "identities" / "code-reviewer" / "AGENTS.md"
         md.write_text("MANUAL EDITS ONLY")
         ident = db.run(_get_via, db, "did:agt:code-reviewer")
         # Non-forced write must not clobber manual edits.
@@ -325,7 +349,7 @@ class TestAgentMd:
     def test_force_overwrite_via_sync(self, db: _DB, tmp_path: Path) -> None:
         db.run(_create_via, db, tmp_path, _payload())
         did = "did:agt:code-reviewer"
-        md = tmp_path / ".agt" / "identities" / "code-reviewer" / "AGENT.md"
+        md = tmp_path / ".agt" / "identities" / "code-reviewer" / "AGENTS.md"
         md.write_text("MANUAL EDITS ONLY")
         db.run(_sync_via, db, did, tmp_path)
         content = md.read_text()

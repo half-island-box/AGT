@@ -1,8 +1,8 @@
-"""Identity service layer for CRUD operations and AGENT.md file management.
+"""Identity service layer for CRUD operations and AGENTS.md file management.
 
 Phase 4 Step 1: Identities can be created, read, updated, deprecated, revoked,
 and deleted. Each identity has a DID (did:agt:<daemon_id>:<slug>) and optionally
-an AGENT.md file written to ~/.agt/identities/<did>/AGENT.md.
+an AGENTS.md file written to ~/.agt/identities/<did>/AGENTS.md.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ import hashlib
 import json
 import logging
 import re
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -43,7 +44,7 @@ def _dir_name(did: str) -> str:
         did: The full DID string
 
     Returns:
-        Directory name for storing AGENT.md files
+        Directory name for storing AGENTS.md files
     """
     parts = did.split(":")
     if len(parts) != 3 or parts[0] != "did":
@@ -62,13 +63,13 @@ def _dir_name(did: str) -> str:
 
 
 def _render_agent_md(identity: IdentityModel | dict[str, Any]) -> str:
-    """Render identity metadata into AGENT.md markdown format.
+    """Render identity metadata into AGENTS.md markdown format.
 
     Args:
         identity: Identity model or dict containing did, name, description, capabilities, status, daemon_id
 
     Returns:
-        Complete markdown content for AGENT.md file
+        Complete markdown content for AGENTS.md file
     """
     if isinstance(identity, dict):
         did = identity.get("did", "")
@@ -120,7 +121,7 @@ def write_agent_md(
     root: Path,
     force: bool = False,
 ) -> Path:
-    """Write AGENT.md file for an identity, idempotent by default.
+    """Write AGENTS.md file for an identity, idempotent by default.
 
     Args:
         identity: Identity model or dict containing did and other metadata
@@ -128,7 +129,7 @@ def write_agent_md(
         force: If True, overwrite existing file; if False, skip if exists
 
     Returns:
-        Path to the AGENT.md file (whether created or skipped)
+        Path to the AGENTS.md file (whether created or skipped)
     """
     if isinstance(identity, dict):
         did = identity.get("did", "")
@@ -136,20 +137,20 @@ def write_agent_md(
         did = identity.did
 
     dir_name = _dir_name(did)
-    target = root / ".agt" / "identities" / dir_name / "AGENT.md"
+    target = root / ".agt" / "identities" / dir_name / "AGENTS.md"
 
     # Create directory if it doesn't exist
     target.parent.mkdir(parents=True, exist_ok=True)
 
     # Skip if file exists and not forcing
     if target.exists() and not force:
-        log.debug(f"AGENT.md already exists at {target}, skipping (use force=True to overwrite)")
+        log.debug(f"AGENTS.md already exists at {target}, skipping (use force=True to overwrite)")
         return target
 
     # Render and write
     content = _render_agent_md(identity)
     target.write_text(content, encoding="utf-8")
-    log.info(f"Wrote AGENT.md to {target}")
+    log.info(f"Wrote AGENTS.md to {target}")
     return target
 
 
@@ -158,12 +159,12 @@ async def create_identity(
     db: AsyncSession,
     root_dir: Path,
 ) -> str:
-    """Create a new identity with DID generation and AGENT.md file write.
+    """Create a new identity with DID generation and AGENTS.md file write.
 
     Args:
         payload: IdentityCreate payload with daemon_id, name, slug, description, capabilities, etc.
         db: Database session
-        root_dir: Root directory for AGENT.md files (typically ~/.agt)
+        root_dir: Root directory for AGENTS.md files (typically ~/.agt)
 
     Returns:
         The generated DID
@@ -231,7 +232,7 @@ async def create_identity(
     await db.commit()
     await db.refresh(identity)
 
-    # Write AGENT.md file
+    # Write AGENTS.md file
     write_agent_md(identity, root_dir, force=False)
 
     log.info(f"Created identity: {did}")
@@ -294,7 +295,7 @@ async def update_identity(
     payload: dict[str, Any],
     db: AsyncSession,
 ) -> dict[str, Any] | None:
-    """Update an identity (partial update). Does NOT overwrite AGENT.md file.
+    """Update an identity (partial update). Does NOT overwrite AGENTS.md file.
 
     Args:
         did: DID of the identity to update
@@ -336,8 +337,8 @@ async def update_identity(
     await db.commit()
     await db.refresh(identity)
 
-    # Note: We do NOT overwrite AGENT.md file on update to preserve user edits
-    log.info(f"Updated identity: {did} (AGENT.md file not overwritten)")
+    # Note: We do NOT overwrite AGENTS.md file on update to preserve user edits
+    log.info(f"Updated identity: {did} (AGENTS.md file not overwritten)")
 
     return _identity_to_dict(identity)
 
@@ -399,12 +400,20 @@ async def revoke_identity(
 async def delete_identity(
     did: str,
     db: AsyncSession,
+    root_dir: Path | None = None,
 ) -> bool:
     """Physically delete an identity, but only if no tasks reference it.
+
+    Also removes the identity's filesystem directory
+    (``<root_dir>/.agt/identities/<slug>/``) so no AGENTS.md or other
+    identity files are left behind.
 
     Args:
         did: DID of the identity to delete
         db: Database session
+        root_dir: Root directory for AGENTS.md files (typically ~/.agt).
+            When None, the file removal is skipped (defensive; callers
+            should pass the same root they used at create time).
 
     Returns:
         True if deleted, False if reference exists (or not found)
@@ -436,6 +445,16 @@ async def delete_identity(
     await db.delete(identity)
     await db.commit()
 
+    # Remove the identity's filesystem directory (AGENTS.md + anything
+    # else under ~/.agt/identities/<slug>/). Tolerant of a missing dir —
+    # identity may have been created with a different root or the file
+    # was never written.
+    if root_dir is not None:
+        ident_dir = root_dir / ".agt" / "identities" / _dir_name(did)
+        if ident_dir.exists():
+            shutil.rmtree(ident_dir)
+            log.info("Removed identity files: %s", ident_dir)
+
     log.info(f"Deleted identity: {did}")
     return True
 
@@ -445,12 +464,12 @@ async def sync_agent_md(
     db: AsyncSession,
     root_dir: Path,
 ) -> dict[str, Any] | None:
-    """Force regenerate AGENT.md file from current database state.
+    """Force regenerate AGENTS.md file from current database state.
 
     Args:
         did: DID of the identity
         db: Database session
-        root_dir: Root directory for AGENT.md files (typically ~/.agt)
+        root_dir: Root directory for AGENTS.md files (typically ~/.agt)
 
     Returns:
         Updated identity dict or None if not found
@@ -460,10 +479,10 @@ async def sync_agent_md(
     if not identity:
         return None
 
-    # Force overwrite AGENT.md
+    # Force overwrite AGENTS.md
     write_agent_md(identity, root_dir, force=True)
 
-    log.info(f"Synced AGENT.md for identity: {did}")
+    log.info(f"Synced AGENTS.md for identity: {did}")
     return _identity_to_dict(identity)
 
 

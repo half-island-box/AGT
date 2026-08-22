@@ -84,7 +84,7 @@ def test_fresh_db_creates_all_objects(tmp_path: Path) -> None:
     assert "idx_bindings_runtime" in indexes
     assert "idx_tasks_identity" in indexes
 
-    # AGENT.md root directory created.
+    # AGENTS.md root directory created.
     assert (root / ".agt" / "identities").is_dir()
 
 

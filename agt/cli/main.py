@@ -1485,7 +1485,7 @@ def identity_create(
     visibility: str,
     server_url: str,
 ) -> None:
-    """Create a new identity (also writes AGENT.md to ~/.agt/identities/)."""
+    """Create a new identity (also writes AGENTS.md to ~/.agt/identities/)."""
 
     payload = {
         "daemon_id": daemon_id or "local",
@@ -1510,7 +1510,7 @@ def identity_create(
         sys.exit(1)
 
     click.echo(f"✅ Created identity: {ident['did']}")
-    click.echo(f"  AGENT.md: ~/.agt/identities/<slug>/AGENT.md (opt-in consumption)")
+    click.echo(f"  AGENTS.md: ~/.agt/identities/<slug>/AGENTS.md (opt-in consumption)")
 
 
 @identity.command("update")
@@ -1535,7 +1535,7 @@ def identity_update(
     remove_capabilities: tuple[str, ...],
     server_url: str,
 ) -> None:
-    """Update an identity (AGENT.md is NOT overwritten; use sync-files)."""
+    """Update an identity (AGENTS.md is NOT overwritten; use sync-files)."""
 
     payload: dict = {}
     if name is not None:
@@ -1566,7 +1566,7 @@ def identity_update(
         sys.exit(1)
 
     click.echo(f"✅ Updated identity: {did}")
-    click.echo("  (AGENT.md unchanged; run `agt identity sync-files "
+    click.echo("  (AGENTS.md unchanged; run `agt identity sync-files "
                f"{did}` to regenerate)")
 
 
@@ -1664,7 +1664,7 @@ def identity_delete(did: str, server_url: str) -> None:
     envvar="AGT_SERVER_URL",
 )
 def identity_sync_files(did: str, server_url: str) -> None:
-    """Force-regenerate the AGENT.md file from database state."""
+    """Force-regenerate the AGENTS.md file from database state."""
 
     async def _run() -> dict:
         async with ServerClient(
@@ -1679,7 +1679,7 @@ def identity_sync_files(did: str, server_url: str) -> None:
         click.echo(f"Error: {exc}", err=True)
         sys.exit(1)
 
-    click.echo(f"🔄 Synced AGENT.md for identity: {did}")
+    click.echo(f"🔄 Synced AGENTS.md for identity: {did}")
     click.echo("  (overwrites manual edits with database truth)")
 
 

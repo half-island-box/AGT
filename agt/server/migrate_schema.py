@@ -61,7 +61,7 @@ def migrate_identities_and_sessions(conn: Connection, root_dir: Path | None = No
 
     Args:
         conn: SQLAlchemy connection
-        root_dir: Optional root directory for AGENT.md files (typically ~/.agt)
+        root_dir: Optional root directory for AGENTS.md files (typically ~/.agt)
     """
     root_dir = root_dir or Path.home()
 
@@ -125,7 +125,7 @@ def migrate_identities_and_sessions(conn: Connection, root_dir: Path | None = No
         "CREATE INDEX IF NOT EXISTS idx_tasks_identity ON tasks(identity_did)"
     )
 
-    # 4. Ensure ~/.agt/identities directory exists (for AGENT.md files)
+    # 4. Ensure ~/.agt/identities directory exists (for AGENTS.md files)
     identities_dir = root_dir / ".agt" / "identities"
     identities_dir.mkdir(parents=True, exist_ok=True)
     log.info(f"Idempotent: ensured identities directory exists at {identities_dir}")
