@@ -1340,13 +1340,14 @@ def _local_daemon_id() -> str | None:
     env = os.environ.get("AGT_DAEMON_ID")
     if env:
         return env
-    from ..daemon.config import AGT_DAEMON_NAMESPACE, _find_self_daemon
+    from ..daemon.config import _find_self_daemon
+    from ..ids import daemon_id_from_url
 
     ws_port = int(os.environ.get("AGT_DAEMON_WS_PORT", "8422"))
     entry = _find_self_daemon(ws_port)
     if entry is None:
         return None
-    return str(uuid.uuid5(AGT_DAEMON_NAMESPACE, entry[1]))
+    return daemon_id_from_url(entry[1])
 
 
 # ── task (Phase 2) ─────────────────────────────────────────────────

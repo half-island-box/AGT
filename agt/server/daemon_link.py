@@ -50,9 +50,11 @@ class DaemonLink:
         url: str,
         secret: str,
         session_factory: Any,
+        name: str | None = None,
     ) -> None:
         self.daemon_id = daemon_id
         self.url = url
+        self.name = name
         self._secret = secret
         self._session_factory = session_factory
 
@@ -194,6 +196,7 @@ class DaemonLink:
                 db,
                 daemon_id=self.daemon_id,
                 runtimes=runtimes,
+                daemon_name=self.name,
             )
         return {"registered": count}
 

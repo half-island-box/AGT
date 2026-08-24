@@ -18,7 +18,7 @@ from agt.daemon.config import (
     _find_self_daemon,
     _load_daemon_id,
 )
-from agt.server.config import ServerConfig
+from agt.server.config import ServerConfig, _parse_daemons_file
 from agt.server.database import make_engine, make_session_factory
 from agt.server.main import create_app
 from agt.server.migrate_schema import ensure_schema, migrate_identities_and_sessions
@@ -215,6 +215,35 @@ class TestEnsureLocalDaemonsEntry:
         )
         assert _ensure_local_daemons_entry(8422) is False
         target.chmod(0o644)  # restore for tmp cleanup
+
+
+# ── server-side daemons file parsing (name + derived id) ───────────
+
+
+class TestServerParseDaemonsFile:
+    def test_name_and_derived_id(self, home: Path) -> None:
+        (home / ".agt" / "daemons").write_text(
+            "daemon-cloud-01 ws://203.0.113.10:8422\n", encoding="utf-8"
+        )
+        targets = _parse_daemons_file(str(home / ".agt" / "daemons"))
+        assert len(targets) == 1
+        t = targets[0]
+        # First column is the human name, NOT the id.
+        assert t.name == "daemon-cloud-01"
+        assert t.url == "ws://203.0.113.10:8422"
+        # The id is derived from the URL (uuid5, shared namespace) — same
+        # form the local machine produces for its own URL.
+        assert t.daemon_id == str(uuid.uuid5(AGT_DAEMON_NAMESPACE, t.url))
+
+    def test_malformed_line_skipped(self, home: Path) -> None:
+        (home / ".agt" / "daemons").write_text(
+            "# comment\n"
+            "daemon-cloud-01 ws://203.0.113.10:8422\n"
+            "not-enough-columns\n",
+            encoding="utf-8",
+        )
+        targets = _parse_daemons_file(str(home / ".agt" / "daemons"))
+        assert [t.name for t in targets] == ["daemon-cloud-01"]
 
 
 # ── server persistence of daemon_name ──────────────────────────────

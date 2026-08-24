@@ -156,7 +156,8 @@ def test_reverse_dial_runtimes_register() -> None:
 
             shutdown = asyncio.Event()
             link = DaemonLink(
-                daemon_id="daemon-cloud-01",
+                daemon_id="d-uuid5-form",
+                name="daemon-cloud-01",
                 url=f"ws://127.0.0.1:{port}",
                 secret=SECRET,
                 session_factory=factory,
@@ -188,13 +189,15 @@ def test_reverse_dial_runtimes_register() -> None:
                 assert result["registered"] == 2
 
                 # Server's runtimes table now has the rows, keyed by the
-                # configured daemon_id.
+                # configured daemon_id, and carries the human name from
+                # the DaemonLink target (not the body, not the id).
                 async with session_scope(factory) as db:
                     rows = (await db.execute(
-                        select(RuntimeModel).where(RuntimeModel.daemon_id == "daemon-cloud-01")
+                        select(RuntimeModel).where(RuntimeModel.daemon_id == "d-uuid5-form")
                     )).scalars().all()
                     assert {r.provider for r in rows} == {"claude", "codex"}
                     assert all(r.device_name == "ws-x" for r in rows)
+                    assert all(r.daemon_name == "daemon-cloud-01" for r in rows)
             finally:
                 shutdown.set()
                 link_task.cancel()

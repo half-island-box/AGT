@@ -6,23 +6,35 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..ids import daemon_id_from_url
+
 
 @dataclass
 class DaemonTarget:
-    """One configured remote daemon (reverse-dial target)."""
+    """One configured remote daemon (reverse-dial target).
+
+    ``daemon_id`` is derived from ``url`` (uuid5 in the shared
+    namespace — same derivation the daemon itself uses), so the file
+    only needs ``name url``; the id is never stored in it.
+    """
 
     daemon_id: str
+    name: str
     url: str  # ws://host:port (or wss://)
 
 
 def _parse_daemons_file(path: str | None) -> list[DaemonTarget]:
-    """Parse ``~/.agt/daemons`` — one ``daemon_id URL`` per line.
+    """Parse ``~/.agt/daemons`` — one ``name url`` per line.
 
     Format (intentionally minimal — no extra dependency):
 
         # Comments start with hash
         daemon-cloud-01 ws://1.2.3.4:8422
         daemon-cloud-02 ws://5.6.7.8:8422
+
+    The id is never read from the file — it is derived from the URL via
+    :func:`daemon_id_from_url` (uuid5, shared namespace), matching what
+    the daemon itself computes for its own URL.
 
     Empty lines are skipped. Missing file → empty list. Malformed lines
     are logged and skipped (we don't want a typo to take the server
@@ -45,17 +57,17 @@ def _parse_daemons_file(path: str | None) -> list[DaemonTarget]:
         if len(parts) != 2:
             log.warning("daemons: ignoring malformed line: %r", raw)
             continue
-        daemon_id, url = parts[0].strip(), parts[1].strip()
-        if not daemon_id or not url:
+        name, url = parts[0].strip(), parts[1].strip()
+        if not name or not url:
             log.warning("daemons: ignoring empty field: %r", raw)
             continue
         if not (url.startswith(("ws://", "wss://"))):
             log.warning(
                 "daemons: ignoring %s — URL must start with ws:// or wss://: %r",
-                daemon_id, url,
+                name, url,
             )
             continue
-        out.append(DaemonTarget(daemon_id=daemon_id, url=url))
+        out.append(DaemonTarget(daemon_id=daemon_id_from_url(url), name=name, url=url))
     return out
 
 

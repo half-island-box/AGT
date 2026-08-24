@@ -130,6 +130,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                 url=target.url,
                 secret=cfg.secret,
                 session_factory=session_factory,
+                name=target.name,
             )
             daemon_link_tasks.append(
                 asyncio.create_task(link.run(shutdown_event), name=f"daemon-link:{target.daemon_id}")

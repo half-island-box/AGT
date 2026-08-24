@@ -9,10 +9,11 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# Fixed namespace so ``uuid5(NS, url)`` is deterministic across machines and
-# restarts: the same daemon_url always yields the same daemon_id. Changing
-# this value would change every daemon's identity — do not change casually.
-AGT_DAEMON_NAMESPACE = uuid.UUID("6f9c2a41-0b7e-4d3c-9f1a-2c3d4e5f6a7b")
+from ..ids import AGT_DAEMON_NAMESPACE, daemon_id_from_url
+
+# Re-exported for backward compatibility (CLI and tests import it from
+# here); the canonical definition lives in ``agt.ids``.
+_ = (AGT_DAEMON_NAMESPACE, daemon_id_from_url)
 
 
 def _read_daemons_file() -> list[tuple[str, str]]:
@@ -168,7 +169,7 @@ def _load_daemon_id(url: str | None) -> str:
     if env:
         return env
     if url:
-        return str(uuid.uuid5(AGT_DAEMON_NAMESPACE, url))
+        return daemon_id_from_url(url)
     return str(uuid.uuid4())[:8]
 
 
