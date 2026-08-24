@@ -366,3 +366,40 @@ def test_bare_chat_no_mkdir_when_work_dir_none(
     assert not (agent_cwd / ".agt").exists(), (
         "executor must not create .agt/ under agent_cwd"
     )
+
+
+def test_ensure_work_dir_creates_agent_cwd_when_missing(tmp_path: Path) -> None:
+    """``agent_cwd`` may name a directory the daemon hasn't created yet
+    (e.g. ``--dir /root/project`` on a fresh machine). The executor
+    creates it on demand so the subprocess spawn + identity injection
+    have a real cwd instead of failing."""
+    agent_cwd = tmp_path / "does" / "not" / "exist" / "yet"
+    task = Task(
+        prompt="hi", provider="claude", task_id="t-mkdir",
+        agent_cwd=agent_cwd,
+    )
+    executor = TaskExecutor(runtime=_runtime(), config=_config())
+    cwd = executor._ensure_work_dir(task)
+    assert cwd == agent_cwd
+    assert agent_cwd.is_dir()
+
+
+def test_ensure_work_dir_permission_error_propagates(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """If the daemon can't create ``agent_cwd`` (permission denied), the
+    OSError propagates so the task fails loudly instead of silently
+    landing in the daemon's home dir."""
+    agent_cwd = tmp_path / "no" / "perm"
+
+    def _deny(self, *args, **kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "mkdir", _deny)
+    task = Task(
+        prompt="hi", provider="claude", task_id="t-perm",
+        agent_cwd=agent_cwd,
+    )
+    executor = TaskExecutor(runtime=_runtime(), config=_config())
+    with pytest.raises(PermissionError):
+        executor._ensure_work_dir(task)

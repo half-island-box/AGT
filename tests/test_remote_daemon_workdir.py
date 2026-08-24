@@ -1,14 +1,15 @@
-"""Phase 4 workdir: daemon's ``_execute_one`` resolves submitted paths.
+"""Phase 4 workdir supplement: daemon's ``_execute_one`` forwards ``agent_cwd``.
 
-When the Server hands a task with a ``work_dir`` to the daemon, the
-daemon must:
+The Server's claim payload carries the submitter's ``agent_cwd`` — the
+directory the agent subprocess should run in on the daemon machine. The
+daemon passes it verbatim to ``Daemon.run``; the daemon (not the CLI) then
+enforces the allowlist and creates the directory if it's missing. There is
+no more ``work_dir``-stripping step here — the legacy ``work_dir`` field is
+no longer part of the claim payload (the claim service always sends
+``work_dir=None`` and ``agent_cwd=<path-or-None>``).
 
-- recover the agent cwd by stripping ``.agt/tasks/<id>`` from the path;
-- fall back to the legacy layout when the cwd doesn't exist locally;
-- still work for legacy tasks (no ``work_dir`` → daemon fallback).
-
-We exercise the path-resolution branch without actually spawning an
-agent subprocess — the agent binary is stubbed via ``Daemon.run``.
+We exercise the forwarding branch without actually spawning an agent
+subprocess — the agent binary is stubbed via ``Daemon.run``.
 """
 
 from __future__ import annotations
@@ -34,11 +35,7 @@ class _StubClient:
         return True
 
 
-def _build_meta_path(cwd: Path, task_id: str) -> str:
-    return str(cwd / ".agt" / "tasks" / task_id)
-
-
-async def _claim_then_execute(meta_path: str | None, *, cwd_root: Path | None) -> dict:
+async def _claim_then_execute(agent_cwd: str | None) -> dict:
     """Run ``_execute_one`` with a controlled payload. Returns the
     kwargs the executor's ``Daemon.run`` was invoked with."""
     captured: dict = {}
@@ -46,7 +43,6 @@ async def _claim_then_execute(meta_path: str | None, *, cwd_root: Path | None) -
     class _CaptureDaemon:
         async def run(self, **kwargs):  # noqa: ANN003
             captured.update(kwargs)
-            captured["work_dir_set"] = kwargs.get("agt_meta_dir") is not None
             return TaskResult(
                 task_id="abc12345",
                 provider="claude",
@@ -63,8 +59,8 @@ async def _claim_then_execute(meta_path: str | None, *, cwd_root: Path | None) -
         "prompt": "hi",
         "resume_session_id": None,
     }
-    if meta_path is not None:
-        payload["work_dir"] = meta_path
+    if agent_cwd is not None:
+        payload["agent_cwd"] = agent_cwd
 
     await _execute_one(
         client=_StubClient(),  # type: ignore[arg-type]
@@ -76,45 +72,19 @@ async def _claim_then_execute(meta_path: str | None, *, cwd_root: Path | None) -
     return captured
 
 
-def test_cwd_recovered_from_meta_dir(tmp_path: Path) -> None:
-    """``<cwd>/.agt/tasks/<id>`` ⇒ agent_cwd = ``<cwd>``."""
-    cwd = tmp_path / "project"
-    cwd.mkdir()
-    meta = _build_meta_path(cwd, "abc12345")
+def test_agent_cwd_forwarded_to_daemon_run() -> None:
+    """Payload ``agent_cwd`` is passed verbatim as ``Daemon.run(agent_cwd=…)``;
+    the meta dir is always ``None`` (no per-task bookkeeping dir)."""
+    captured = asyncio.run(_claim_then_execute("/srv/proj"))
 
-    captured = asyncio.run(_claim_then_execute(meta, cwd_root=cwd))
-    assert captured["work_dir_set"] is True
-    assert captured["agent_cwd"] == cwd
-    assert captured["agt_meta_dir"] == Path(meta)
-
-
-def test_falls_back_when_cwd_missing(tmp_path: Path) -> None:
-    """The submitter's ``<cwd>`` doesn't exist on this daemon — agent_cwd
-    is reset to ``None`` so the daemon uses the legacy fallback."""
-    nonexistent = tmp_path / "elsewhere" / "user"
-    meta = _build_meta_path(nonexistent, "abc12345")
-
-    captured = asyncio.run(_claim_then_execute(meta, cwd_root=nonexistent))
-    # Both reset → daemon fallback (work_dir=None passed through)
-    assert captured["agent_cwd"] is None
+    assert captured["agent_cwd"] == Path("/srv/proj")
     assert captured["agt_meta_dir"] is None
 
 
-def test_legacy_task_no_work_dir_field() -> None:
-    """No ``work_dir`` on the payload → daemon sees ``agent_cwd=None``
-    and ``agt_meta_dir=None`` and applies its own fallback path."""
-    captured = asyncio.run(_claim_then_execute(None, cwd_root=None))
+def test_legacy_task_no_agent_cwd_field() -> None:
+    """No ``agent_cwd`` on the payload → daemon sees ``agent_cwd=None``
+    and ``agt_meta_dir=None`` and applies its own fallback layout."""
+    captured = asyncio.run(_claim_then_execute(None))
+
     assert captured["agent_cwd"] is None
     assert captured["agt_meta_dir"] is None
-
-
-def test_custom_work_dir_treated_as_meta(tmp_path: Path) -> None:
-    """A non-standard path (``--work-dir`` override) doesn't fit the
-    ``.agt/tasks/<id>`` shape; we conservatively use it as the meta dir
-    and the same path as the agent cwd."""
-    cwd = tmp_path / "elsewhere"
-    cwd.mkdir()
-    captured = asyncio.run(_claim_then_execute(str(cwd), cwd_root=cwd))
-    assert captured["agt_meta_dir"] == cwd
-    # agent_cwd falls back to meta_dir when shape doesn't match
-    assert captured["agent_cwd"] == cwd

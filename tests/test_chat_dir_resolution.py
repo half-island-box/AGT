@@ -134,32 +134,6 @@ class TestChatTurnRemoteAgentCwd:
         assert captured["kw"].get("agent_cwd") is None
 
 
-# ── CLI-level validation of --dir ──────────────────────────────────
-
-
-class TestExplicitDirValidation:
-    def test_dir_must_exist(self, tmp_path, monkeypatch) -> None:
-        home = tmp_path / "home"
-        (home / ".agt").mkdir(parents=True, exist_ok=True)
-        monkeypatch.setattr("pathlib.Path.home", lambda: home)
-        monkeypatch.chdir(tmp_path)
-        result = _invoke("chat", "--daemon", "any", "--provider", "claude",
-                         "--dir", str(tmp_path / "no-such-dir"))
-        assert result.exit_code == 2
-        assert "no-such-dir" in result.output
-
-    def test_dir_rejects_file(self, tmp_path, monkeypatch) -> None:
-        f = tmp_path / "afile"
-        f.write_text("x")
-        home = tmp_path / "home"
-        (home / ".agt").mkdir(parents=True, exist_ok=True)
-        monkeypatch.setattr("pathlib.Path.home", lambda: home)
-        monkeypatch.chdir(tmp_path)
-        result = _invoke("chat", "--daemon", "any", "--provider", "claude",
-                         "--dir", str(f))
-        assert result.exit_code == 2
-
-
 # ── chat() local-daemon resolution (链A pid + 链B daemons-file id) ──
 
 
@@ -291,6 +265,39 @@ class TestChatCmdResolution:
         )
         assert result.exit_code in (0, 1), result.output
         assert calls["submit"]["agent_cwd"] == str(target.resolve())
+
+    def test_dir_nonexistent_forwarded_verbatim(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """``--dir`` names a path on the REMOTE daemon, so it must NOT be
+        existence-checked locally. A path absent from this machine is
+        forwarded verbatim as agent_cwd; the daemon creates it if missing."""
+        _seed(monkeypatch, tmp_path, daemons_lines=None, pid_alive=False)
+        target = tmp_path / "no-such-dir"  # deliberately NOT created
+        monkeypatch.chdir(tmp_path)
+        result, calls = self._run_chat(
+            ["chat", "--daemon", "anything", "--provider", "claude",
+             "--dir", str(target)],
+            monkeypatch, tmp_path,
+        )
+        assert result.exit_code in (0, 1), result.output
+        assert calls["submit"]["agent_cwd"] == str(target)
+
+    def test_dir_file_path_not_rejected(self, tmp_path, monkeypatch) -> None:
+        """No local file/dir check either — the path is interpreted on the
+        daemon. A path that happens to be a file locally is still
+        forwarded (the daemon validates/creates it on its side)."""
+        f = tmp_path / "afile"
+        f.write_text("x")
+        _seed(monkeypatch, tmp_path, daemons_lines=None, pid_alive=False)
+        monkeypatch.chdir(tmp_path)
+        result, calls = self._run_chat(
+            ["chat", "--daemon", "anything", "--provider", "claude",
+             "--dir", str(f)],
+            monkeypatch, tmp_path,
+        )
+        assert result.exit_code in (0, 1), result.output
+        assert calls["submit"]["agent_cwd"] == str(f)
 
     def test_no_dir_no_daemon_flag_ok(self, tmp_path, monkeypatch) -> None:
         """No --daemon and no --dir → local-controller path; no exit error."""

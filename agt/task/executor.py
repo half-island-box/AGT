@@ -420,6 +420,12 @@ class TaskExecutor:
         # meta dir; we never write bookkeeping files there.
         if task.work_dir is not None:
             task.work_dir.mkdir(parents=True, exist_ok=True)
+        # cwd injection: ``agent_cwd`` may name a directory on the daemon
+        # that doesn't exist yet (e.g. ``agt chat --dir /root/project``
+        # where the daemon hasn't created it). Create it on demand; a
+        # permission error propagates (surfaced as the task's stderr).
+        if task.agent_cwd is not None:
+            task.agent_cwd.mkdir(parents=True, exist_ok=True)
         return task.agent_cwd or task.work_dir or Path.cwd()
 
 

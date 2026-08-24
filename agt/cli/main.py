@@ -692,14 +692,12 @@ def _chat_turn_remote(
     "--dir",
     "agent_cwd_override",
     default=None,
-    type=click.Path(
-        exists=True, file_okay=False, dir_okay=True,
-        resolve_path=True, path_type=Path,
-    ),
-    help="Agent subprocess cwd (also where IDENTITY.md / AGENTS.md are "
-         "injected). Auto-detected to your cwd when --daemon points at "
-         "this machine's local daemon; otherwise you must pass an "
-         "absolute path the remote daemon can reach.",
+    type=click.Path(path_type=Path),
+    help="Agent subprocess cwd on the daemon machine (also where "
+         "IDENTITY.md / AGENTS.md are injected). Interpreted on the "
+         "daemon, so existence is NOT checked locally — the daemon "
+         "creates it if missing. Auto-detected to your cwd when --daemon "
+         "points at this machine's local daemon.",
 )
 def chat(
     provider: str | None,
