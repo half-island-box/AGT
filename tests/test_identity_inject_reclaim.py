@@ -1,0 +1,253 @@
+"""Phase 4 Step 4 — identity inject + reclaim helpers.
+
+Tests ``agt/daemon/identity_inject.py``: inject stacks IDENTITY.md +
+a marker block into the agent cwd; reclaim undoes it. Verifies
+non-destructive behavior (user AGENTS.md preserved), idempotency,
+and crash-leftover self-healing.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from agt.daemon.identity_inject import _inject_identity, _reclaim_identity
+
+
+@pytest.fixture
+def identity_source(tmp_path, monkeypatch) -> Path:
+    """Create a real identity source file under HOME/.agt/identities/<slug>/."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    src_dir = tmp_path / ".agt" / "identities" / "reviewer"
+    src_dir.mkdir(parents=True)
+    (src_dir / "AGENTS.md").write_text(
+        "# Reviewer\n\nPython code review.\n", encoding="utf-8"
+    )
+    return src_dir / "AGENTS.md"
+
+
+DID = "did:agt:reviewer"
+
+
+def _agents_content(cwd: Path) -> str:
+    return (cwd / "AGENTS.md").read_text(encoding="utf-8")
+
+
+# ── inject ─────────────────────────────────────────────────────────
+
+
+class TestInject:
+    def test_creates_identity_md_and_marker_block(self, tmp_path, identity_source) -> None:
+        cwd = tmp_path / "project"
+        cwd.mkdir()
+        _inject_identity(cwd, DID)
+
+        # IDENTITY.md is a copy of the source AGENTS.md
+        assert (cwd / "IDENTITY.md").read_text() == identity_source.read_text()
+        # AGENTS.md created with marker block
+        content = _agents_content(cwd)
+        assert "AGT-IDENTITY-START: did:agt:reviewer" in content
+        assert "AGT-IDENTITY-END" in content
+        assert "IDENTITY.md" in content  # pointer
+        # sidecar marks the AGENTS.md as ours
+        assert (cwd / ".agt" / ".agt-identity-managed-AGENTS.md").exists()
+
+    def test_user_agents_md_preserved(self, tmp_path, identity_source) -> None:
+        cwd = tmp_path / "project"
+        cwd.mkdir()
+        (cwd / "AGENTS.md").write_text("# User project\nKeep me.\n", encoding="utf-8")
+
+        _inject_identity(cwd, DID)
+
+        content = _agents_content(cwd)
+        assert "# User project\nKeep me.\n" in content  # user content intact
+        assert "AGT-IDENTITY-START" in content  # appended
+
+    def test_skips_when_source_missing(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+        cwd = tmp_path / "project"
+        cwd.mkdir()
+        (cwd / "AGENTS.md").write_text("# only mine\n", encoding="utf-8")
+
+        _inject_identity(cwd, "did:agt:no-source")
+
+        # untouched
+        assert (cwd / "AGENTS.md").read_text() == "# only mine\n"
+        assert not (cwd / "IDENTITY.md").exists()
+
+
+# ── reclaim ────────────────────────────────────────────────────────
+
+
+class TestReclaim:
+    def test_removes_marker_and_identity_md(self, tmp_path, identity_source) -> None:
+        cwd = tmp_path / "project"
+        cwd.mkdir()
+        _inject_identity(cwd, DID)
+
+        _reclaim_identity(cwd)
+
+        assert not (cwd / "IDENTITY.md").exists()
+        assert not (cwd / "AGENTS.md").exists()  # was ours-and-empty → deleted
+        assert not (cwd / ".agt" / ".agt-identity-managed-AGENTS.md").exists()
+
+    def test_user_agents_md_restored(self, tmp_path, identity_source) -> None:
+        cwd = tmp_path / "project"
+        cwd.mkdir()
+        (cwd / "AGENTS.md").write_text("# User project\nKeep me.\n", encoding="utf-8")
+        _inject_identity(cwd, DID)
+        assert "AGT-IDENTITY-START" in _agents_content(cwd)
+
+        _reclaim_identity(cwd)
+
+        assert _agents_content(cwd) == "# User project\nKeep me.\n"  # user content back
+        assert not (cwd / "IDENTITY.md").exists()
+
+    def test_reclaim_is_idempotent(self, tmp_path, identity_source) -> None:
+        cwd = tmp_path / "project"
+        cwd.mkdir()
+        _inject_identity(cwd, DID)
+        _reclaim_identity(cwd)
+        # Second reclaim must be a no-op (no raise).
+        _reclaim_identity(cwd)
+        assert not (cwd / "IDENTITY.md").exists()
+
+    def test_reclaim_cleans_crash_leftovers(self, tmp_path, identity_source) -> None:
+        """A stale marker/IDENTITY.md from a killed daemon is cleaned up
+        by the next inject (idempotent reclaim-first)."""
+        cwd = tmp_path / "project"
+        cwd.mkdir()
+        # Simulate a crash leftover: old identity files present.
+        (cwd / "AGENTS.md").write_text(
+            "# Old\n<!-- AGT-IDENTITY-START: did:agt:old -->\nold block\n"
+            "<!-- AGT-IDENTITY-END -->\n",
+            encoding="utf-8",
+        )
+        (cwd / "IDENTITY.md").write_text("old", encoding="utf-8")
+
+        _inject_identity(cwd, DID)
+
+        content = _agents_content(cwd)
+        assert "AGT-IDENTITY-START: did:agt:old" not in content  # stale block removed
+        assert "AGT-IDENTITY-START: did:agt:reviewer" in content  # new block present
+        assert (cwd / "IDENTITY.md").exists()  # new copy in place
+
+    def test_reclaim_no_files_is_noop(self, tmp_path) -> None:
+        cwd = tmp_path / "empty"
+        cwd.mkdir()
+        _reclaim_identity(cwd)  # nothing to reclaim — must not raise
+
+
+# ── provider-aware marker file (claude → CLAUDE.md) ───────────────
+
+
+class TestProviderMarkerFile:
+    """Claude Code reads ``CLAUDE.md`` natively (not ``AGENTS.md``), so
+    the marker block must land there for claude runs; every other
+    provider keeps the AGENTS.md convention."""
+
+    def test_claude_marker_goes_to_claude_md(self, tmp_path, identity_source) -> None:
+        cwd = tmp_path / "project"
+        cwd.mkdir()
+        _inject_identity(cwd, DID, provider="claude")
+
+        assert (cwd / "CLAUDE.md").exists()
+        content = (cwd / "CLAUDE.md").read_text(encoding="utf-8")
+        assert "AGT-IDENTITY-START: did:agt:reviewer" in content
+        assert not (cwd / "AGENTS.md").exists()
+        assert (cwd / ".agt" / ".agt-identity-managed-CLAUDE.md").exists()
+
+    def test_non_claude_providers_use_agents_md(self, tmp_path, identity_source) -> None:
+        cwd = tmp_path / "project"
+        cwd.mkdir()
+        _inject_identity(cwd, DID, provider="codex")
+
+        assert (cwd / "AGENTS.md").exists()
+        assert not (cwd / "CLAUDE.md").exists()
+
+    def test_default_provider_is_agents_md(self, tmp_path, identity_source) -> None:
+        cwd = tmp_path / "project"
+        cwd.mkdir()
+        _inject_identity(cwd, DID)  # no provider — legacy behavior
+
+        assert (cwd / "AGENTS.md").exists()
+
+    def test_claude_user_claude_md_preserved(self, tmp_path, identity_source) -> None:
+        cwd = tmp_path / "project"
+        cwd.mkdir()
+        (cwd / "CLAUDE.md").write_text(
+            "# User project\nKeep me.\n", encoding="utf-8"
+        )
+
+        _inject_identity(cwd, DID, provider="claude")
+
+        content = (cwd / "CLAUDE.md").read_text(encoding="utf-8")
+        assert "# User project\nKeep me.\n" in content  # user content intact
+        assert "AGT-IDENTITY-START" in content  # appended
+
+    def test_claude_reclaim_restores_user_claude_md(self, tmp_path, identity_source) -> None:
+        cwd = tmp_path / "project"
+        cwd.mkdir()
+        (cwd / "CLAUDE.md").write_text("# User project\nKeep me.\n", encoding="utf-8")
+        _inject_identity(cwd, DID, provider="claude")
+        assert "AGT-IDENTITY-START" in (cwd / "CLAUDE.md").read_text(encoding="utf-8")
+
+        _reclaim_identity(cwd)
+
+        assert (cwd / "CLAUDE.md").read_text(encoding="utf-8") == "# User project\nKeep me.\n"
+        assert not (cwd / "IDENTITY.md").exists()
+
+    def test_claude_ours_empty_claude_md_deleted_on_reclaim(self, tmp_path, identity_source) -> None:
+        cwd = tmp_path / "project"
+        cwd.mkdir()
+        _inject_identity(cwd, DID, provider="claude")
+        assert (cwd / "CLAUDE.md").exists()
+
+        _reclaim_identity(cwd)
+
+        assert not (cwd / "CLAUDE.md").exists()  # ours-and-empty → deleted
+
+    def test_cross_provider_crash_leftover_healed(self, tmp_path, identity_source) -> None:
+        """A claude run crashed mid-inject (marker in CLAUDE.md); a later
+        codex inject must clean the CLAUDE.md leftover before writing
+        its own AGENTS.md marker."""
+        cwd = tmp_path / "project"
+        cwd.mkdir()
+        # Simulate the crash leftover from the claude run: it created
+        # CLAUDE.md (marker-only) + its sidecar, then died before reclaim.
+        (cwd / "CLAUDE.md").write_text(
+            "<!-- AGT-IDENTITY-START: did:agt:reviewer -->\n"
+            "你当前以身份 `reviewer` (DID: did:agt:reviewer) 运行。\n"
+            "<!-- AGT-IDENTITY-END -->\n",
+            encoding="utf-8",
+        )
+        (cwd / ".agt").mkdir()
+        (cwd / ".agt" / ".agt-identity-managed-CLAUDE.md").write_text("", encoding="utf-8")
+        (cwd / "IDENTITY.md").write_text("stale", encoding="utf-8")
+
+        # A codex run injects (reclaim-first heals both files).
+        _inject_identity(cwd, DID, provider="codex")
+
+        assert not (cwd / "CLAUDE.md").exists()  # leftover deleted (ours+empty)
+        assert "AGT-IDENTITY-START" in (cwd / "AGENTS.md").read_text(encoding="utf-8")
+        assert (cwd / "IDENTITY.md").read_text(encoding="utf-8") == identity_source.read_text()
+
+    def test_legacy_bare_sidecar_still_authorizes_agents_delete(self, tmp_path, identity_source) -> None:
+        """Older builds wrote a bare ``.agt-identity-managed`` sidecar for
+        AGENTS.md; reclaim must still honor it (back-compat for crash
+        leftovers from before per-file sidecars)."""
+        cwd = tmp_path / "project"
+        cwd.mkdir()
+        (cwd / "AGENTS.md").write_text(
+            "<!-- AGT-IDENTITY-START: did:agt:reviewer -->\nblock\n"
+            "<!-- AGT-IDENTITY-END -->\n",
+            encoding="utf-8",
+        )
+        (cwd / ".agt").mkdir()
+        (cwd / ".agt" / ".agt-identity-managed").write_text("", encoding="utf-8")
+
+        _reclaim_identity(cwd)
+
+        assert not (cwd / "AGENTS.md").exists()  # empty-after-strip + legacy sidecar → deleted
+        assert not (cwd / ".agt" / ".agt-identity-managed").exists()

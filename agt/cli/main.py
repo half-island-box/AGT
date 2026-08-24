@@ -231,6 +231,7 @@ async def _submit_and_wait(
     task_id: str,
     target_daemon_id: str,
     work_dir_str: str | None,
+    identity_did: str | None = None,
 ) -> dict | None:
     """Submit a task to the Server and poll until terminal. Returns the
     final task dict, or ``None`` if the daemon never responded."""
@@ -241,6 +242,7 @@ async def _submit_and_wait(
             task_id=task_id,
             target_daemon_id=target_daemon_id,
             work_dir=work_dir_str,
+            identity_did=identity_did,
         )
         try:
             return await client.wait_task(assigned)
@@ -437,6 +439,13 @@ def _pick_provider(
     help="Use the legacy daemon-local layout (~/.agt/workspaces/<provider>/<id>/) "
          "for both agent cwd and AGT metadata.",
 )
+@click.option(
+    "--identity", "identity_did", default=None,
+    help="Identity for this task. Server-side: select_runtime resolves the "
+         "runtime (using --provider as runtime_hint) and rejects if the "
+         "identity isn't bound to the chosen runtime. Local-only mode "
+         "(no --daemon) is rejected: binding lives on the Server.",
+)
 def run(
     prompt: str,
     provider: str | None,
@@ -444,7 +453,17 @@ def run(
     server_url: str,
     work_dir: str | None,
     no_work_dir: bool,
+    identity_did: str | None,
 ) -> None:
+    if identity_did is not None and target_daemon_id is None:
+        # Identity resolution requires the Server's binding DB; refuse
+        # the local fast-path rather than silently doing nothing useful.
+        click.echo(
+            "Error: --identity requires --daemon "
+            "(binding records live on the Server; local execution can't validate).",
+            err=True,
+        )
+        sys.exit(2)
     """Spawn the agent once with the given prompt and stream its output.
 
     With ``--daemon`` the task is submitted to the Server, pinned to that
@@ -479,6 +498,7 @@ def run(
             task_id=task_id,
             target_daemon_id=target_daemon_id,
             work_dir_str=work_dir_str,
+            identity_did=identity_did,
         ))
     except Exception as exc:
         click.echo(f"Error: {exc}", err=True)
@@ -533,8 +553,25 @@ def _chat_turn_remote(
     target_daemon_id: str,
     server_url: str,
     work_dir_str: str | None,
+    cwd: Path,
+    first_prompt: str | None,
+    turn_index: int,
+    resume_session_id: str | None = None,
+    identity_did: str | None = None,
+    agent_cwd: Path | None = None,
 ) -> None:
-    """Run one chat turn pinned to a remote daemon via the Server."""
+    """Run one chat turn pinned to a remote daemon via the Server.
+
+    The session the daemon reports back is recorded into the LOCAL cwd
+    store (``<cwd>/.agt/sessions.json``) so ``agt chat --list`` sees
+    remote-daemon chats too. Without this, bare ``--daemon`` chats landed
+    only in the daemon's workspace dir (no work_dir forwarded) and the
+    cwd index stayed empty.
+
+    ``agent_cwd`` is the agent subprocess's working directory on the
+    daemon machine (also the IDENTITY.md / AGENTS.md injection point).
+    Forwarded via ``submit_task(agent_cwd=...)`` when not None.
+    """
     async def _remote() -> dict | None:
         async with ServerClient(base_url=server_url, daemon_id="cli-direct") as client:
             await client.submit_task(
@@ -543,6 +580,8 @@ def _chat_turn_remote(
                 task_id=task_id,
                 target_daemon_id=target_daemon_id,
                 work_dir=work_dir_str,
+                identity_did=identity_did,
+                agent_cwd=str(agent_cwd) if agent_cwd is not None else None,
             )
             try:
                 return await client.wait_task(task_id)
@@ -564,6 +603,24 @@ def _chat_turn_remote(
     stdout = data.get("stdout") or ""
     if stdout:
         click.echo(stdout, nl=not stdout.endswith("\n"))
+
+    # Record the daemon-reported session locally — mirrors the local
+    # daemon's ``_record_session_outcome`` (rejected resume deletes the
+    # broken sid; otherwise record/update the reported one).
+    store = CwdSessionStore.load_or_create(cwd, provider=provider)
+    if data.get("resume_rejected"):
+        if resume_session_id:
+            store.delete(resume_session_id)
+        return
+    session_id = data.get("session_id")
+    if session_id:
+        store.record(
+            session_id=session_id,
+            task_id=task_id,
+            first_prompt=first_prompt or prompt,
+            turn_count=turn_index,
+            identity_did=identity_did,
+        )
 
 
 # ── chat ───────────────────────────────────────────────────────────
@@ -606,6 +663,11 @@ def _chat_turn_remote(
          "for both agent cwd and AGT metadata.",
 )
 @click.option(
+    "--identity", "identity_did", default=None,
+    help="Identity for each chat turn (Phase 4). Server resolves runtime "
+         "via select_runtime and rejects if not bound. Requires --daemon.",
+)
+@click.option(
     "--list",
     "list_mode",
     is_flag=True,
@@ -626,6 +688,19 @@ def _chat_turn_remote(
     is_flag=True,
     help="With --resume: skip printing the history; just resume.",
 )
+@click.option(
+    "--dir",
+    "agent_cwd_override",
+    default=None,
+    type=click.Path(
+        exists=True, file_okay=False, dir_okay=True,
+        resolve_path=True, path_type=Path,
+    ),
+    help="Agent subprocess cwd (also where IDENTITY.md / AGENTS.md are "
+         "injected). Auto-detected to your cwd when --daemon points at "
+         "this machine's local daemon; otherwise you must pass an "
+         "absolute path the remote daemon can reach.",
+)
 def chat(
     provider: str | None,
     target_daemon_id: str | None,
@@ -635,7 +710,16 @@ def chat(
     list_mode: bool,
     resume_session_id: str | None,
     no_history: bool,
+    identity_did: str | None,
+    agent_cwd_override: Path | None,
 ) -> None:
+    if identity_did is not None and target_daemon_id is None:
+        click.echo(
+            "Error: --identity requires --daemon "
+            "(binding records live on the Server; local execution can't validate).",
+            err=True,
+        )
+        sys.exit(2)
     """Interactive chat mode with session continuity.
 
     With ``--daemon`` each turn is submitted to the Server, pinned to that
@@ -669,7 +753,76 @@ def chat(
     if resume_session_id is not None and not no_history:
         _print_resumed_history(cwd, resume_session_id, target_daemon_id)
 
+    # Resolve agent_cwd: explicit --dir wins; otherwise auto-detect for the
+    # local-daemon case (daemon process alive on this machine AND its id
+    # matches --daemon); otherwise refuse — a remote daemon can't see
+    # your local cwd.
+    agent_cwd: Path | None = None
+    if agent_cwd_override is not None:
+        agent_cwd = agent_cwd_override
+    elif target_daemon_id is not None:
+        # 链A: pid-file liveness (same evidence `agt daemon status` uses).
+        pid = _local_daemon_alive()
+        # 链B: identity from ~/.agt/daemons (only meaningful when alive).
+        local_id = _local_daemon_id() if pid is not None else None
+        if local_id == target_daemon_id:
+            agent_cwd = cwd
+        else:
+            if pid is None:
+                state = "offline"
+            elif local_id is None:
+                state = "running, but no local entry in ~/.agt/daemons"
+            else:
+                state = f"running, id={local_id}"
+            click.echo(
+                f"Error: --daemon={target_daemon_id} is not this machine's "
+                f"local daemon (local daemon {state}).\n"
+                f"Remote daemons can't see your local cwd. Pass "
+                f"`--dir <absolute path the daemon can reach>`,\n"
+                f"or start this machine's daemon (`agt daemon start`).",
+                err=True,
+            )
+            sys.exit(2)
+    # else: target_daemon_id is None → local-controller path; the
+    # local daemon already gets user cwd through its own channels.
+
     controller = DaemonController() if target_daemon_id is None else None
+
+    # --resume resolution: pull provider + identity from sessions.json
+    # in a single lookup (the file is tiny; cost is the file read, not
+    # the scan). Both fields were recorded when the session was first
+    # created; subsequent updates preserve the originals.
+    if resume_session_id is not None:
+        _resume_entry = CwdSessionStore.load_or_create(cwd).get(
+            resume_session_id
+        )
+        if _resume_entry is None:
+            click.echo(
+                f"⚠️  --resume {resume_session_id[:8]}… not found in "
+                f"{cwd}/.agt/sessions.json; auto-picking provider and "
+                f"no identity.",
+                err=True,
+            )
+        else:
+            if provider is None:
+                provider = _resume_entry.provider
+            # Identity mismatch is a hard error — silently swapping the
+            # agent's identity mid-session would break context and is
+            # almost always a user mistake. A previously-unrecorded
+            # identity (None) accepts the new value as a first-time
+            # assignment; a recorded value must match exactly.
+            if _resume_entry.identity_did:
+                if identity_did is None:
+                    identity_did = _resume_entry.identity_did
+                elif identity_did != _resume_entry.identity_did:
+                    click.echo(
+                        f"Error: --resume {resume_session_id[:8]}… was "
+                        f"started with identity '{_resume_entry.identity_did}'; "
+                        f"refusing to resume with '{identity_did}'.",
+                        err=True,
+                    )
+                    sys.exit(2)
+
     provider = _pick_provider(
         provider, target_daemon_id, server_url, local_controller=controller,
     )
@@ -700,6 +853,8 @@ def chat(
         mode += f", daemon={target_daemon_id}"
     if resume_session_id:
         mode += f", resume={resume_session_id[:8]}…"
+    if agent_cwd is not None:
+        mode += f", dir={agent_cwd}"
     click.echo(
         f"🚀 agt chat mode ({mode}, task={task_id}). "
         f"Type 'exit' or 'quit' to leave.\n"
@@ -715,6 +870,8 @@ def chat(
         target_daemon_id=target_daemon_id,
         server_url=server_url,
         initial_resume=initial_resume,
+        identity_did=identity_did,
+        agent_cwd=agent_cwd,
     )
 
 
@@ -729,6 +886,8 @@ def _chat_loop(
     target_daemon_id: str | None,
     server_url: str,
     initial_resume: str | None,
+    identity_did: str | None,
+    agent_cwd: Path | None,
 ) -> None:
     """Read-eval-print loop. Only the first turn carries the explicit
     ``resume_session_id``; subsequent turns let the agent subprocess
@@ -764,6 +923,8 @@ def _chat_loop(
             initial_resume=initial_resume,
             first_prompt=first_prompt,
             turn_index=turn_index,
+            identity_did=identity_did,
+            agent_cwd=agent_cwd,
         )
 
 
@@ -789,7 +950,9 @@ def _run_chat_turn(
     is_first: bool,
     initial_resume: str | None,
     first_prompt: str | None,
+    agent_cwd: Path | None,
     turn_index: int,
+    identity_did: str | None,
 ) -> None:
     """Dispatch one chat turn to the local daemon or the remote Server."""
     resume_for_turn = initial_resume if is_first else None
@@ -805,6 +968,12 @@ def _run_chat_turn(
             provider, line, task_id,
             target_daemon_id,  # type: ignore[arg-type]
             server_url, work_dir_str,
+            cwd=cwd,
+            first_prompt=first_prompt if is_first else None,
+            turn_index=turn_index,
+            resume_session_id=resume_for_turn,
+            identity_did=identity_did,
+            agent_cwd=agent_cwd,
         )
 
 
@@ -925,6 +1094,38 @@ def server() -> None:
     """Server-related subcommands."""
 
 
+def _stop_if_running(pid: int, label: str, timeout: float = 10.0) -> None:
+    """SIGTERM a running server/daemon and wait for it to actually exit.
+
+    Used by ``server start --detach`` / ``daemon start --detach`` so a
+    stale process (e.g. one still serving an older build) is replaced
+    rather than keeping the port / pidfile held by the old instance.
+    Waits on ``os.kill(pid, 0)`` raising ProcessLookupError — that is the
+    moment the process is truly gone (and any listening socket closed),
+    which is later than the pidfile unlink the old process does on its
+    own shutdown path.
+    """
+    click.echo(f"Stopping existing {label} (pid {pid})…")
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        click.echo(f"{label} already gone.")
+        return
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            click.echo(f"Stopped {label} (pid {pid}).")
+            return
+        time.sleep(0.2)
+    click.echo(
+        f"⚠️  {label} (pid {pid}) did not exit within {timeout:.0f}s; "
+        "proceeding anyway.",
+        err=True,
+    )
+
+
 @server.command("start")
 @click.option(
     "--host",
@@ -956,7 +1157,8 @@ def server() -> None:
 )
 @click.option(
     "--pid-file", default=None,
-    help="PID file path (default ~/.agt/server.pid). Only used when --detach is set.",
+    help="PID file path (default ~/.agt/server.pid). Written in --detach mode; "
+         "also read at startup to detect and replace a running server.",
 )
 def server_start(
     host: str,
@@ -971,6 +1173,15 @@ def server_start(
     Foreground (default): parent blocks; Ctrl-C to stop.
     ``--detach``: fork a child running uvicorn; parent exits immediately.
     """
+    # Replace any already-running server first (both modes). Foreground
+    # would otherwise fail to bind the port ("address already in use");
+    # detached would leave a stale process still serving older code.
+    pid_path = Path(pid_file) if pid_file else Path.home() / ".agt" / "server.pid"
+    from ..server.main import _read_pidfile as _server_read_pidfile
+    existing = _server_read_pidfile(pid_path)
+    if existing is not None:
+        _stop_if_running(existing, "server")
+
     if not detach:
         import argparse
 
@@ -990,7 +1201,6 @@ def server_start(
     # Detached: Popen a child running ``agt.server.main`` (same entry
     # uvicorn uses when ``uvicorn agt.server.main:app`` is invoked).
     log_path = Path(log_file) if log_file else Path.home() / ".agt" / "server.log"
-    pid_path = Path(pid_file) if pid_file else Path.home() / ".agt" / "server.pid"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_fp = open(log_path, "ab", buffering=0)
 
@@ -1078,6 +1288,65 @@ def _read_pidfile_live(path) -> int | None:
     from ..server.main import _read_pidfile
 
     return _read_pidfile(path)
+
+
+def _pid_is_agt_daemon(pid: int) -> bool:
+    """Best-effort guard against pid reuse: the process behind ``pid``
+    should look like an agt daemon (``/proc/<pid>/cmdline`` mentions
+    both agt and daemon). Non-Linux / unreadable proc → True (trust the
+    ``os.kill`` liveness probe alone).
+    """
+    try:
+        cmdline = Path(f"/proc/{pid}/cmdline").read_text(errors="replace")
+        return "agt" in cmdline and "daemon" in cmdline
+    except OSError:
+        return True
+
+
+def _local_daemon_alive() -> int | None:
+    """Return the local daemon's pid if it is alive, else None.
+
+    Same evidence ``agt daemon status`` uses: ``~/.agt/daemon.pid``
+    (written unconditionally by the daemon on startup) plus
+    ``os.kill(pid, 0)`` liveness and a cmdline sanity check.
+    """
+    pid_path = Path.home() / ".agt" / "daemon.pid"
+    if not pid_path.exists():
+        return None
+    try:
+        pid = int(pid_path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return None
+    if not _pid_is_agt_daemon(pid):
+        return None
+    return pid
+
+
+def _local_daemon_id() -> str | None:
+    """Return the daemon id this machine's daemon registers under.
+
+    Mirrors ``DaemonConfig.from_env``'s derivation so CLI and daemon
+    agree without any side-channel file: ``AGT_DAEMON_ID`` env wins;
+    otherwise find the self entry in ``~/.agt/daemons`` (port match +
+    local host, see ``_find_self_daemon``) and derive
+    ``uuid5(AGT_DAEMON_NAMESPACE, url)``. None when no self entry
+    exists (daemon not started via ``agt daemon start``, or the
+    daemons file lacks a local entry).
+    """
+    env = os.environ.get("AGT_DAEMON_ID")
+    if env:
+        return env
+    from ..daemon.config import AGT_DAEMON_NAMESPACE, _find_self_daemon
+
+    ws_port = int(os.environ.get("AGT_DAEMON_WS_PORT", "8422"))
+    entry = _find_self_daemon(ws_port)
+    if entry is None:
+        return None
+    return str(uuid.uuid5(AGT_DAEMON_NAMESPACE, entry[1]))
 
 
 # ── task (Phase 2) ─────────────────────────────────────────────────
@@ -1352,14 +1621,15 @@ def runtime_list(server_url: str) -> None:
         f"📡 {len(runtimes)} runtime(s) registered on the Server\n"
     )
     click.echo(
-        f"  {'daemon_id':<12} {'provider':<12} {'version':<12} "
+        f"  {'daemon_id':<38} {'name':<14} {'provider':<12} {'version':<12} "
         f"{'device':<24} {'status':<8}"
     )
-    click.echo("  " + "─" * 72)
+    click.echo("  " + "─" * 108)
     for r in runtimes:
+        name = r.get("daemon_name") or "—"
         click.echo(
-            f"  {r['daemon_id']:<12} {r['type']:<12} {r['version']:<12} "
-            f"{r['device_name']:<24} {r['status']:<8}"
+            f"  {r['daemon_id']:<38} {name[:14]:<14} {r['type']:<12} "
+            f"{r['version']:<12} {r['device_name']:<24} {r['status']:<8}"
         )
 
 
@@ -1815,12 +2085,12 @@ def identity_bindings(did: str, daemon_id: str | None, server_url: str) -> None:
 
     click.echo(f"🔗 {len(bindings)} binding(s) for {did}\n")
     click.echo(
-        f"  {'ID':<6} {'DAEMON':<16} {'RUNTIME':<12} {'PRIORITY':<10} {'DEFAULT':<8}"
+        f"  {'DAEMON':<16} {'RUNTIME':<12} {'PRIORITY':<10} {'DEFAULT':<8}"
     )
-    click.echo("  " + "─" * 56)
+    click.echo("  " + "─" * 50)
     for b in bindings:
         click.echo(
-            f"  {b['id']:<6} {b['daemon_id'][:16]:<16} {b['provider'][:12]:<12} "
+            f"  {b['daemon_id'][:16]:<16} {b['provider'][:12]:<12} "
             f"{b['priority']:<10} {'yes' if b['is_default'] else '—':<8}"
         )
 
@@ -1894,6 +2164,13 @@ def daemon_start(
     log_file: str | None,
 ) -> None:
     """Start the background daemon (connects to Server, registers runtimes)."""
+    # Replace any already-running daemon first (both modes) — otherwise the
+    # child's pidfile guard (``run_background``) refuses to start.
+    from ..daemon.main import _read_pidfile as _daemon_read_pidfile
+    existing = _daemon_read_pidfile()
+    if existing is not None:
+        _stop_if_running(existing, "daemon")
+
     if not detach:
         # Foreground: parent blocks until Ctrl-C, as before.
         import argparse
@@ -1984,15 +2261,17 @@ def daemon_list(server_url: str) -> None:
 
     click.echo(f"🖥️  {len(daemons)} daemon(s) registered on the Server\n")
     click.echo(
-        f"  {'DAEMON_ID':<16} {'DEVICE':<20} {'RUNTIME':<8} "
+        f"  {'NAME':<18} {'DAEMON_ID':<16} {'DEVICE':<20} {'RUNTIME':<8} "
         f"{'PROVIDERS':<20} {'ONLINE':<8} {'LAST SEEN':<20}"
     )
-    click.echo("  " + "─" * 96)
+    click.echo("  " + "─" * 112)
     for d in daemons:
         providers = ",".join(p["provider"] for p in d["providers"]) or "—"
+        name = d.get("daemon_name") or "—"
         click.echo(
-            f"  {d['daemon_id'][:16]:<16} {d['device_name'][:20]:<20} "
-            f"{d['runtime_count']:<8} {providers[:20]:<20} "
+            f"  {name[:18]:<18} {d['daemon_id'][:16]:<16} "
+            f"{d['device_name'][:20]:<20} {d['runtime_count']:<8} "
+            f"{providers[:20]:<20} "
             f"{'yes' if d['online'] else 'no':<8} {d['last_seen']:<20}"
         )
 
@@ -2026,6 +2305,7 @@ def daemon_show(daemon_id: str, server_url: str) -> None:
         sys.exit(2)
 
     click.echo(f"daemon_id    : {daemon['daemon_id']}")
+    click.echo(f"daemon_name  : {daemon.get('daemon_name') or '—'}")
     click.echo(f"device_name  : {daemon['device_name']}")
     click.echo(f"online       : {'yes' if daemon['online'] else 'no'}")
     click.echo(f"last_seen    : {daemon['last_seen']}")
@@ -2036,6 +2316,51 @@ def daemon_show(daemon_id: str, server_url: str) -> None:
         click.echo(
             f"  {p['provider'][:12]:<12} {p['version'][:12]:<12} "
             f"{p['status'][:10]:<10} {p['last_seen']:<20}"
+        )
+
+
+@daemon.command("bindings")
+@click.argument("daemon_id")
+@click.option(
+    "--server-url",
+    default="http://127.0.0.1:8420",
+    show_default=True,
+    envvar="AGT_SERVER_URL",
+)
+def daemon_bindings(daemon_id: str, server_url: str) -> None:
+    """List every identity binding on a daemon (across all identities).
+
+    Inverse view of ``agt identity bindings <did>``: instead of "which
+    runtimes is this identity bound to", answers "which identities are
+    bound to this daemon".
+    """
+
+    async def _run() -> list[dict]:
+        async with ServerClient(
+            base_url=server_url,
+            daemon_id="cli-direct",
+        ) as client:
+            return await client.list_daemon_bindings(daemon_id)
+
+    try:
+        bindings = asyncio.run(_run())
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    if not bindings:
+        click.echo(f"No bindings on daemon '{daemon_id}'.")
+        return
+
+    click.echo(f"🔗 {len(bindings)} binding(s) on daemon {daemon_id}\n")
+    click.echo(
+        f"  {'IDENTITY':<40} {'RUNTIME':<12} {'PRIORITY':<10} {'DEFAULT':<8}"
+    )
+    click.echo("  " + "─" * 72)
+    for b in bindings:
+        click.echo(
+            f"  {b['identity_did'][:40]:<40} {b['provider'][:12]:<12} "
+            f"{b['priority']:<10} {'yes' if b['is_default'] else '—':<8}"
         )
 
 

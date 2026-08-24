@@ -126,6 +126,28 @@ async def list_bindings(
     return [_binding_to_dict(b) for b in result.scalars().all()]
 
 
+async def list_bindings_by_daemon(
+    daemon_id: str,
+    db: AsyncSession,
+) -> list[dict[str, Any]]:
+    """List every binding on a daemon, across all identities.
+
+    The inverse view of :func:`list_bindings`: instead of "which runtimes
+    is identity X bound to", answer "which identities are bound to daemon
+    Y". Ordered by identity_did then provider for a stable read.
+    """
+    stmt = (
+        select(IdentityBindingModel)
+        .where(IdentityBindingModel.daemon_id == daemon_id)
+        .order_by(
+            IdentityBindingModel.identity_did.asc(),
+            IdentityBindingModel.provider.asc(),
+        )
+    )
+    result = await db.execute(stmt)
+    return [_binding_to_dict(b) for b in result.scalars().all()]
+
+
 async def delete_binding(
     did: str,
     binding_id: int,
@@ -193,6 +215,7 @@ async def set_default_binding(
 __all__ = [
     "create_binding",
     "list_bindings",
+    "list_bindings_by_daemon",
     "delete_binding",
     "set_default_binding",
 ]

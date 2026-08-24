@@ -24,11 +24,13 @@ class ServerClient:
         self,
         base_url: str,
         daemon_id: str,
+        daemon_name: str | None = None,
         token: str | None = None,
         timeout: float = DEFAULT_TIMEOUT,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._daemon_id = daemon_id
+        self._daemon_name = daemon_name
         self._token = token
         self._timeout = timeout
         self._client: httpx.AsyncClient | None = None
@@ -82,8 +84,7 @@ class ServerClient:
 
     async def register_runtimes(self, runtimes: list[Runtime]) -> int:
         """Wipe the daemon's prior runtimes and re-register the given list."""
-        """Wipe the daemon's prior runtimes and re-register the given list."""
-        payload = {
+        payload: dict[str, Any] = {
             "daemon_id": self._daemon_id,
             "runtimes": [
                 {
@@ -96,6 +97,8 @@ class ServerClient:
                 for rt in runtimes
             ],
         }
+        if self._daemon_name:
+            payload["daemon_name"] = self._daemon_name
         resp = await self._post("/api/runtimes/register", payload)
         return int(resp.get("registered", 0))
 
@@ -124,6 +127,11 @@ class ServerClient:
                 return None
             raise
 
+    async def list_daemon_bindings(self, daemon_id: str) -> list[dict]:
+        """List every identity binding on a daemon (across all identities)."""
+        resp = await self._get(f"/api/daemons/{daemon_id}/bindings")
+        return resp.get("bindings", [])
+
     # ── Tasks ─────────────────────────────────────────────────────
 
     async def submit_task(
@@ -133,6 +141,8 @@ class ServerClient:
         task_id: str | None = None,
         target_daemon_id: str | None = None,
         work_dir: str | None = None,
+        identity_did: str | None = None,
+        agent_cwd: str | None = None,
     ) -> str:
         """Submit a task and return the assigned task_id.
 
@@ -141,6 +151,18 @@ class ServerClient:
         (NULL for remote targets so it doesn't leak the submitter's
         filesystem layout). The CLI submit paths set ``None`` when the
         user passed ``--no-work-dir`` (legacy daemon-local layout).
+
+        ``identity_did`` (Phase 4 Step 4): when set, the server resolves
+        the actual (provider, target_daemon_id) via ``select_runtime``
+        using ``provider`` as the runtime_hint; the result overrides the
+        submitted values. Selection failures raise ``RPCRejected``.
+
+        ``agent_cwd`` (cwd injection): the agent subprocess's working
+        directory on the daemon machine — also where IDENTITY.md /
+        AGENTS.md are injected for identity-aware tasks. Forwarded to
+        the daemon via TaskPayload so it can override the daemon-side
+        fallback (``work_dir_root / provider / task_id``). NULL means
+        "daemon, use your default".
         """
         payload: dict[str, Any] = {"prompt": prompt, "provider": provider}
         if task_id is not None:
@@ -149,6 +171,10 @@ class ServerClient:
             payload["target_daemon_id"] = target_daemon_id
         if work_dir is not None:
             payload["work_dir"] = work_dir
+        if identity_did is not None:
+            payload["identity_did"] = identity_did
+        if agent_cwd is not None:
+            payload["agent_cwd"] = agent_cwd
         resp = await self._post("/api/tasks/submit", payload)
         return resp["task_id"]
 
@@ -260,6 +286,11 @@ class ServerClient:
         daemon in the same call (avoids a separate ``register_runtimes``
         POST). ``None`` preserves backward compatibility with old
         server builds that don't know about the field.
+
+        ``daemon_name`` rides along when the client was built with one —
+        the server's upsert replaces the daemon's rows on every
+        heartbeat, so without it the label set at register time would
+        be wiped 30s later.
         """
         payload: dict[str, Any] = {
             "daemon_id": self._daemon_id,
@@ -267,6 +298,8 @@ class ServerClient:
         }
         if runtimes is not None:
             payload["runtimes"] = list(runtimes)
+        if self._daemon_name:
+            payload["daemon_name"] = self._daemon_name
         return await self._post("/api/heartbeat", payload)
 
     # ── Health ────────────────────────────────────────────────────

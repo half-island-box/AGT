@@ -26,6 +26,9 @@ class RuntimeModel(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     daemon_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    # Phase 4: human-readable daemon label (from ~/.agt/daemons name or device
+    # name). NULL for legacy rows / daemons that don't send it.
+    daemon_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     provider: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     version: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -50,6 +53,10 @@ class TaskModel(Base):
     # daemon may claim); non-NULL = pinned to that daemon only.
     target_daemon_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     session_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Set True on a report where the agent refused to resume a prior
+    # session. Exposed on the status response so the CLI can drop a stale
+    # cwd-store entry (mirrors the local daemon's resume_rejected handling).
+    resume_rejected: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
     stdout: Mapped[str | None] = mapped_column(Text, nullable=True)
     stderr: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -64,6 +71,12 @@ class TaskModel(Base):
     # back to work_dir_root) and for remote-daemon tasks (daemon uses its
     # own fallback).
     work_dir: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # cwd injection (Phase 4 workdir supplement): the agent subprocess's
+    # working directory on the daemon machine. Forwarded via submit_task
+    # when the user passed --dir (or auto-detected on a local daemon).
+    # NULL = daemon uses its own fallback (``work_dir_root / provider /
+    # task_id`` legacy). Distinct from ``work_dir`` (AGT metadata dir).
+    agent_cwd: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     # Phase 4 identity: Optional identity DID that this task was executed with.
     # NULL for legacy tasks or when no --identity flag was provided.
     identity_did: Mapped[str | None] = mapped_column(

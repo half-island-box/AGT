@@ -37,6 +37,7 @@ async def heartbeat(
         db,
         daemon_id=payload.daemon_id,
         runtimes=[rt.model_dump() for rt in payload.runtimes],
+        daemon_name=payload.daemon_name,
     )
     return HeartbeatResponse(ok=True, server_time=now)
 

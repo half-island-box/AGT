@@ -5,7 +5,10 @@ Implements the algorithm from phase4-design.md §5.1:
 1. Validate the identity (exists, status == active).
 2. Load its bindings.
 3. If the caller named a runtime (``runtime_hint``), filter to it.
-4. Otherwise prefer ``is_default``, then highest ``priority``, with a
+4. Prefer bindings whose daemon has a **live runtime** (``last_seen``
+   within the liveness TTL) — a stale binding must never shadow a
+   healthy one just because it was created earlier.
+5. Otherwise prefer ``is_default``, then highest ``priority``, with a
    stable id-ascending tie-break.
 
 The caller (Step 4's submit_task) decides whether to call this at all:
@@ -22,7 +25,9 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from agt.server.models import IdentityBindingModel, IdentityModel
+from agt.server.models import IdentityBindingModel, IdentityModel, RuntimeModel
+
+from .runtime_service import is_stale
 
 log = logging.getLogger(__name__)
 
@@ -49,6 +54,58 @@ class SelectionError(ValueError):
         self.err_type = err_type
         self.context = context
         super().__init__(message)
+
+
+async def _live_runtime_pairs(
+    db: AsyncSession,
+    pool: list[IdentityBindingModel],
+) -> set[tuple[str, str]]:
+    """Return the live ``(daemon_id, provider)`` pairs covering ``pool``.
+
+    A pair is live when the daemon has a runtime row for that provider
+    whose ``last_seen`` is within the liveness TTL. Daemons with no rows
+    (never registered / pruned) are not live.
+    """
+    daemon_ids = {b.daemon_id for b in pool}
+    if not daemon_ids:
+        return set()
+    rows = (
+        await db.execute(
+            select(RuntimeModel).where(RuntimeModel.daemon_id.in_(daemon_ids))
+        )
+    ).scalars().all()
+    return {
+        (row.daemon_id, row.provider) for row in rows if not is_stale(row.last_seen)
+    }
+
+
+def _pick_binding(
+    pool: list[IdentityBindingModel],
+    live_pairs: set[tuple[str, str]],
+    *,
+    provider: str | None,
+) -> IdentityBindingModel:
+    """Pick the best binding from a non-empty, id-ascending pool.
+
+    Preference order:
+    1. Live daemons — the binding's ``(daemon_id, provider)`` has a
+       fresh runtime row. With a hint, the provider is the hint itself;
+       without one, each binding's own provider. Falls back to the whole
+       pool when nothing is live (the submit-time live-runtime check
+       then rejects with a clear 400).
+    2. ``is_default`` first.
+    3. Highest ``priority`` (``max`` keeps the first max in id order —
+       stable tie-break).
+    """
+    def _is_live(b: IdentityBindingModel) -> bool:
+        prov = provider if provider is not None else b.provider
+        return (b.daemon_id, prov) in live_pairs
+
+    live_pool = [b for b in pool if _is_live(b)] or pool
+    defaults = [b for b in live_pool if b.is_default]
+    if defaults:
+        return defaults[0]
+    return max(live_pool, key=lambda b: b.priority)
 
 
 async def select_runtime(
@@ -118,19 +175,20 @@ async def select_runtime(
                 runtime=runtime_hint,
                 available=available,
             )
-        best = matching[0]
+        best = _pick_binding(
+            matching, await _live_runtime_pairs(db, matching), provider=runtime_hint,
+        )
         return SelectionResult(
             daemon_id=best.daemon_id,
             provider=best.provider,
             identity_did=identity_did,
         )
 
-    # Step 4: no hint — default flag first, then priority, then id order.
-    defaults = [b for b in bindings if b.is_default]
-    if defaults:
-        best = defaults[0]
-    else:
-        best = max(bindings, key=lambda b: b.priority)
+    # Step 4: no hint — live first, then default flag, then priority,
+    # then id order.
+    best = _pick_binding(
+        bindings, await _live_runtime_pairs(db, bindings), provider=None,
+    )
     return SelectionResult(
         daemon_id=best.daemon_id,
         provider=best.provider,

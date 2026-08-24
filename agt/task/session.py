@@ -64,6 +64,11 @@ class SessionEntry:
     turn_count: int
     first_prompt: str = ""
     provider: str = "claude"
+    # The identity DID (if any) this session was started with. ``None`` =
+    # no identity (legacy / identity-less chat). Stamped at first record;
+    # subsequent updates preserve the original (a session's identity must
+    # not silently change across resumes).
+    identity_did: str | None = None
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -113,14 +118,18 @@ class CwdSessionStore:
         task_id: str,
         first_prompt: str,
         turn_count: int,
+        identity_did: str | None = None,
     ) -> None:
         """Add a new entry or update an existing one matched by
         ``session_id``. Bumps ``last_seen_at`` and ``turn_count``;
-        preserves ``first_seen_at``, the original ``first_prompt``, and
-        the entry's ``provider`` (a session's provider never changes).
+        preserves ``first_seen_at``, the original ``first_prompt``, the
+        entry's ``provider`` and ``identity_did`` (a session's identity
+        must not silently change across resumes — the CLI enforces
+        consistency at resume time instead).
 
-        New entries are stamped with the store's ``provider`` — the
-        provider this store was opened for (see ``load_or_create``).
+        New entries are stamped with the store's ``provider`` and the
+        caller's ``identity_did`` (``None`` is fine — a record-only
+        chat).
         """
         now = time.time()
         existing = self._find(session_id)
@@ -139,6 +148,7 @@ class CwdSessionStore:
                     turn_count=turn_count,
                     first_prompt=first_prompt,
                     provider=self.provider,
+                    identity_did=identity_did,
                 )
             )
         self._sort_in_place()
@@ -323,6 +333,7 @@ def _entry_from_dict(d: dict, *, default_provider: str = "claude") -> SessionEnt
         task_id=str(d.get("task_id", "")),
         turn_count=int(d.get("turn_count", 0) or 0),
         first_prompt=str(d.get("first_prompt", "") or ""),
+        identity_did=d.get("identity_did"),
     )
 
 

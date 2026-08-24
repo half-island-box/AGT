@@ -126,19 +126,28 @@ async def resolve_identity_route(
             db,
         )
     except SelectionError as exc:
-        code = (
-            status.HTTP_404_NOT_FOUND
-            if exc.err_type == "identity_not_found"
-            else status.HTTP_400_BAD_REQUEST
-        )
-        raise HTTPException(
-            status_code=code,
-            detail={"type": exc.err_type, "message": str(exc), **exc.context},
-        )
+        raise _selection_error_to_http(exc)
     return ResolveResponse(
         daemon_id=result.daemon_id,
         provider=result.provider,
         identity_did=result.identity_did,
+    )
+
+
+def _selection_error_to_http(exc: SelectionError) -> HTTPException:
+    """Map a SelectionError to an HTTPException with structured detail.
+
+    Shared by the resolve endpoint and the submit-task endpoint so the
+    HTTP shape is consistent across the two callers.
+    """
+    code = (
+        status.HTTP_404_NOT_FOUND
+        if exc.err_type == "identity_not_found"
+        else status.HTTP_400_BAD_REQUEST
+    )
+    return HTTPException(
+        status_code=code,
+        detail={"type": exc.err_type, "message": str(exc), **exc.context},
     )
 
 

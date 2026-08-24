@@ -46,6 +46,19 @@ class TestLifespanWritesPidFile:
         # lifespan exit block ran on TestClient context exit.
         assert not (tmp_path / "server.pid").exists()
 
+    def test_shutdown_does_not_clobber_foreign_pid_file(self, tmp_path) -> None:
+        """If another process overwrote our pid file, shutdown must leave it
+        alone — unlinking unconditionally would hide a live server."""
+        client = _build_app(tmp_path)
+        pid_path = tmp_path / "server.pid"
+        with client:
+            assert pid_path.exists()
+            # Simulate a second server racing us to the same pid file.
+            pid_path.write_text("424242\n")
+        # Foreign pid must survive our shutdown.
+        assert pid_path.exists()
+        assert pid_path.read_text().strip() == "424242"
+
     def test_no_pid_file_when_unset(self, tmp_path) -> None:
         """Default cfg has pid_file=None — no file written, no removal needed."""
         cfg = ServerConfig(

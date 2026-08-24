@@ -43,6 +43,7 @@ class TestForeground:
 
     def test_foreground_calls_cmd_start(self, monkeypatch) -> None:
         from agt.daemon import main as daemon_main
+        monkeypatch.setattr(daemon_main, "_read_pidfile", lambda: None)
         called: dict = {}
 
         def _fake_cmd_start(args):
@@ -71,7 +72,9 @@ class TestDetached:
             opened.append((path, mode, fp))
             return fp
 
-        with patch("subprocess.Popen", _FakePopen), patch("builtins.open", _open, create=True):
+        with patch("subprocess.Popen", _FakePopen), \
+             patch("builtins.open", _open, create=True), \
+             patch("agt.daemon.main._read_pidfile", return_value=None):
             result = _invoke(args)
         return result, _FakePopen.instances[-1], opened[-1] if opened else None
 
@@ -151,3 +154,65 @@ class TestDetached:
         with patch("subprocess.Popen", _FakePopen):
             result = _invoke(["--detach"])
         assert "pid=99999" in result.output
+
+
+class TestStopIfRunning:
+    """``daemon start --detach`` must replace an already-running daemon."""
+
+    def test_stops_existing_daemon(self, monkeypatch) -> None:
+        from agt.cli import main as cli_mod
+        from agt.daemon import main as daemon_main
+
+        monkeypatch.setattr(daemon_main, "_read_pidfile", lambda: 424242)
+
+        captured: dict = {}
+
+        def _fake_stop(pid, label, timeout=10.0):
+            captured["pid"] = pid
+            captured["label"] = label
+
+        monkeypatch.setattr(cli_mod, "_stop_if_running", _fake_stop)
+
+        _FakePopen.instances.clear()
+        with patch("subprocess.Popen", _FakePopen):
+            result = _invoke(["--detach"])
+        assert result.exit_code == 0, result.output
+        assert captured == {"pid": 424242, "label": "daemon"}
+
+    def test_no_stop_when_not_running(self, monkeypatch) -> None:
+        from agt.cli import main as cli_mod
+        from agt.daemon import main as daemon_main
+
+        monkeypatch.setattr(daemon_main, "_read_pidfile", lambda: None)
+        captured: dict = {}
+
+        def _fake_stop(pid, label, timeout=10.0):
+            captured["pid"] = pid
+
+        monkeypatch.setattr(cli_mod, "_stop_if_running", _fake_stop)
+
+        _FakePopen.instances.clear()
+        with patch("subprocess.Popen", _FakePopen):
+            result = _invoke(["--detach"])
+        assert result.exit_code == 0, result.output
+        assert captured == {}
+
+    def test_stops_existing_foreground(self, monkeypatch) -> None:
+        from agt.cli import main as cli_mod
+        from agt.daemon import main as daemon_main
+
+        monkeypatch.setattr(daemon_main, "_read_pidfile", lambda: 424242)
+        # Foreground delegates to cmd_start; stub it so the loop doesn't run.
+        monkeypatch.setattr(daemon_main, "cmd_start", lambda _args: 0)
+
+        captured: dict = {}
+
+        def _fake_stop(pid, label, timeout=10.0):
+            captured["pid"] = pid
+            captured["label"] = label
+
+        monkeypatch.setattr(cli_mod, "_stop_if_running", _fake_stop)
+
+        result = _invoke([])  # foreground, no --detach
+        assert result.exit_code == 0, result.output
+        assert captured == {"pid": 424242, "label": "daemon"}

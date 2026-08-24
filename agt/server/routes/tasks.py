@@ -23,6 +23,8 @@ from ..schemas import (
 from ..services.claim_service import claim_tasks_for_daemon
 from ..services.report_service import record_task_result_for_daemon
 from ..services.runtime_service import is_stale
+from ..services.selection_service import SelectionError, select_runtime
+from .identities import _selection_error_to_http
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
@@ -42,7 +44,32 @@ async def submit_task(
     timeout), it is reopened as a fresh pending turn so the same task_id
     can drive session continuity across turns. An *active* (pending/
     running) task_id is rejected with 409.
+
+    Phase 4 Step 4: when ``payload.identity_did`` is set, the server
+    resolves the actual (provider, target_daemon_id) via
+    ``select_runtime`` — ``payload.provider`` becomes the runtime_hint;
+    the result overrides the user-provided values. Errors map to 404
+    (not_found) / 400 (other) via ``_selection_error_to_http``.
     """
+    effective_provider = payload.provider
+    effective_target = payload.target_daemon_id
+
+    # Phase 4 Step 4: identity resolves the runtime + validates binding.
+    # MUST run before the target_daemon live-runtime check, because the
+    # selection result determines which daemon we check against.
+    if payload.identity_did:
+        try:
+            result = await select_runtime(
+                payload.identity_did,
+                payload.provider,
+                "local",  # placeholder; select_runtime derives daemon from bindings
+                db,
+            )
+        except SelectionError as exc:
+            raise _selection_error_to_http(exc)
+        effective_provider = result.provider
+        effective_target = result.daemon_id
+
     # Step 3.6: when a target daemon is named, require that daemon to have
     # registered the requested provider — otherwise the task would sit
     # pending forever (the target can never claim it). Free tasks skip this.
@@ -50,12 +77,12 @@ async def submit_task(
     # We also exclude rows whose ``last_seen`` is past the liveness TTL:
     # such rows belong to a daemon that's no longer reachable, so the
     # task would never be claimed.
-    if payload.target_daemon_id:
+    if effective_target:
         provider_rows = (
             await db.execute(
                 select(RuntimeModel).where(
-                    RuntimeModel.daemon_id == payload.target_daemon_id,
-                    RuntimeModel.provider == payload.provider,
+                    RuntimeModel.daemon_id == effective_target,
+                    RuntimeModel.provider == effective_provider,
                 )
             )
         ).scalars().all()
@@ -64,8 +91,8 @@ async def submit_task(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=(
-                    f"daemon '{payload.target_daemon_id}' has no live runtime "
-                    f"for provider '{payload.provider}'"
+                    f"daemon '{effective_target}' has no live runtime "
+                    f"for provider '{effective_provider}'"
                 ),
             )
 
@@ -82,10 +109,10 @@ async def submit_task(
         # Terminal task → reopen for a resume turn. Reset execution fields
         # but keep the session pointer (SessionModel) so the next claim
         # resumes the same agent session.
-        existing.provider = payload.provider
+        existing.provider = effective_provider
         existing.prompt = payload.prompt
         existing.status = "pending"
-        existing.target_daemon_id = payload.target_daemon_id
+        existing.target_daemon_id = effective_target
         existing.daemon_id = None
         existing.exit_code = None
         existing.stdout = None
@@ -94,6 +121,10 @@ async def submit_task(
         # Phase 4 workdir: refresh work_dir the same way as a fresh submit
         # (NULL for remote targets, persisted for local/free).
         existing.work_dir = _server_work_dir(payload)
+        # cwd injection: forward the user-supplied agent_cwd verbatim —
+        # it's a path the *daemon* will resolve, not the server.
+        existing.agent_cwd = payload.agent_cwd
+        existing.identity_did = payload.identity_did
         existing.updated_at = now
         await db.commit()
         return SubmitTaskResponse(task_id=task_id, status="pending")
@@ -101,11 +132,13 @@ async def submit_task(
     db.add(
         TaskModel(
             task_id=task_id,
-            provider=payload.provider,
+            provider=effective_provider,
             prompt=payload.prompt,
             status="pending",
-            target_daemon_id=payload.target_daemon_id,
+            target_daemon_id=effective_target,
             work_dir=_server_work_dir(payload),
+            agent_cwd=payload.agent_cwd,
+            identity_did=payload.identity_did,
             created_at=now,
             updated_at=now,
         )
@@ -222,6 +255,7 @@ async def list_tasks(
             provider=t.provider,
             status=t.status,
             session_id=t.session_id,
+            resume_rejected=t.resume_rejected,
             exit_code=t.exit_code,
             stdout=t.stdout,
             stderr=t.stderr,
@@ -231,6 +265,7 @@ async def list_tasks(
             daemon_id=t.daemon_id,
             target_daemon_id=t.target_daemon_id,
             work_dir=t.work_dir,
+            agent_cwd=t.agent_cwd,
         )
         for t in rows
     ]
@@ -249,15 +284,18 @@ async def task_status(
         provider=task.provider,
         status=task.status,
         session_id=task.session_id,
+        resume_rejected=task.resume_rejected,
         exit_code=task.exit_code,
         stdout=task.stdout,
         stderr=task.stderr,
+        identity_did=task.identity_did,
         duration=task.duration,
         created_at=task.created_at,
         updated_at=task.updated_at,
         daemon_id=task.daemon_id,
         target_daemon_id=task.target_daemon_id,
         work_dir=task.work_dir,
+        agent_cwd=task.agent_cwd,
     )
 
 

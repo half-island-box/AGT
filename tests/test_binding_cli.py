@@ -59,6 +59,9 @@ def _stub(calls: dict, **returns):
         async def set_default_binding(self, did, binding_id):
             return await self._call("set_default_binding", did, binding_id)
 
+        async def list_daemon_bindings(self, daemon_id):
+            return await self._call("list_daemon_bindings", daemon_id)
+
     return _StubClient
 
 
@@ -164,7 +167,9 @@ class TestBindings:
         )
         assert result.exit_code == 0, result.output
         assert "2 binding(s)" in result.output
-        assert "ID" in result.output and "DAEMON" in result.output
+        assert "DAEMON" in result.output and "RUNTIME" in result.output
+        # ID column was removed — the binding id must not leak into the table
+        assert "ID" not in result.output
         assert "claude" in result.output and "codex" in result.output
         assert "yes" in result.output  # default marker
 
@@ -184,6 +189,43 @@ class TestBindings:
         )
         assert result.exit_code == 0, result.output
         assert calls["list_bindings"] == [((DID,), {"daemon_id": "local"})]
+
+
+# ── daemon bindings (inverse view) ──────────────────────────────────
+
+
+class TestDaemonBindings:
+    def test_daemon_bindings_renders_table(self) -> None:
+        bindings = [
+            _binding(id=3, identity_did="did:agt:reviewer", provider="claude",
+                     is_default=True),
+            _binding(id=5, identity_did="did:agt:code-reviewer", provider="codex",
+                     priority=10),
+        ]
+        result = _invoke(
+            ["daemon", "bindings", "local"],
+            _stub({}, list_daemon_bindings=lambda: bindings),
+        )
+        assert result.exit_code == 0, result.output
+        assert "2 binding(s) on daemon local" in result.output
+        assert "IDENTITY" in result.output and "RUNTIME" in result.output
+        assert "did:agt:reviewer" in result.output
+        assert "did:agt:code-reviewer" in result.output
+        assert "yes" in result.output  # default marker
+
+    def test_daemon_bindings_forwards_daemon_id(self) -> None:
+        calls: dict = {}
+        stub = _stub(calls, list_daemon_bindings=lambda: [_binding()])
+        result = _invoke(["daemon", "bindings", "d1"], stub)
+        assert result.exit_code == 0, result.output
+        assert calls["list_daemon_bindings"] == [(("d1",), {})]
+
+    def test_daemon_bindings_empty_friendly(self) -> None:
+        result = _invoke(
+            ["daemon", "bindings", "d1"], _stub({}, list_daemon_bindings=lambda: [])
+        )
+        assert result.exit_code == 0
+        assert "No bindings" in result.output
 
 
 # ── default ────────────────────────────────────────────────────────

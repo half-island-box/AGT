@@ -78,6 +78,12 @@ $ agt chat --resume abc-1234…
 
 🚀 agt chat mode (provider=claude, task=chat-…, resume=abc-1234…). ...
 agt>
+
+# Pin the agent's cwd (also where IDENTITY.md / AGENTS.md are injected
+# when --identity is set). Auto-detected to your cwd when --daemon points
+# at this machine's local daemon; required explicitly for remote daemons.
+$ agt chat --dir ~/proj --identity=did:agt:reviewer --daemon=remote-1
+$ agt chat --identity=did:agt:reviewer           # local daemon → auto cwd
 ```
 
 ## Phase 2: Server + background Daemon
@@ -249,31 +255,40 @@ mv -r ~/.agt/workspaces/*/identity/* ~/.agt/identities/
 ## Phase 4 Step 1: Identity (agent personas)
 
 Phase 4 Step 1 adds **identities**: persistent agent personas with a DID
-(`did:agt:<daemon_id>:<slug>`), name, description, and capability tags.
+(`did:agt:<slug>` — globally unique, namespace isolation removed in 2026-08),
+name, description, and capability tags.
 Full reference in [`docs/cli/commands.md`](docs/cli/commands.md) §`agt identity`.
 
 ```bash
-# Create — generates the DID and writes ~/.agt/identities/<slug>/AGENT.md
+# Create — generates the DID and writes ~/.agt/identities/<slug>/AGENTS.md
 $ agt identity create --name "Code Reviewer" --capability code-review
-✅ Created identity: did:agt:local:code-reviewer
+✅ Created identity: did:agt:code-reviewer
 
 $ agt identity list
-$ agt identity show did:agt:local:code-reviewer
-$ agt identity update did:agt:local:code-reviewer --add-capability refactor
-$ agt identity deprecate did:agt:local:code-reviewer   # soft (status=deprecated)
-$ agt identity revoke did:agt:local:code-reviewer      # hard  (status=revoked)
-$ agt identity sync-files did:agt:local:code-reviewer   # force-regen AGENT.md
+$ agt identity show did:agt:code-reviewer
+$ agt identity update did:agt:code-reviewer --add-capability refactor
+$ agt identity deprecate did:agt:code-reviewer   # soft (status=deprecated)
+$ agt identity revoke did:agt:code-reviewer      # hard  (status=revoked)
+$ agt identity sync-files did:agt:code-reviewer   # force-regen AGENTS.md
 ```
 
 Semantics worth knowing:
 
-- **AGENT.md is write-once**: created with the identity, never overwritten by
+- **AGENTS.md is write-once**: created with the identity, never overwritten by
   `update` (manual edits are preserved). Only `sync-files` regenerates it from
   database state.
-- **Consumption is opt-in**: `agt run` / `agt chat` do not read AGENT.md yet —
-  identity injection arrives in Step 2.
+- **Consumption is opt-in + inject/reclaim (Step 4)**: when you run
+  `agt run --identity <did> --daemon`, the daemon stacks the identity onto the
+  agent's working directory (copies AGENTS.md → `IDENTITY.md`, appends a marker
+  block to the cwd's AGENTS.md) for the duration of the spawn, then reclaims it.
+  The agent's own AGENTS.md is never overwritten.
+- **`--identity` is a binding selector**: Server resolves the runtime (via
+  `--provider` or default/priority) and rejects the task if the identity isn't
+  bound to that `(daemon, provider)`. Requires `--daemon` (binding lives on the
+  Server).
 - **Delete is protected**: `agt identity delete` refuses (HTTP 409) while any
-  task row still references the identity via `tasks.identity_did`.
+  task row still references the identity via `tasks.identity_did`, and removes
+  the identity's `~/.agt/identities/<slug>/` directory.
 - **Backward compatible**: everything works without touching identities;
   `agt run` / `agt chat` behave exactly as before.
 

@@ -147,8 +147,13 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             log.info("Shutting down daemon-link pool…")
             shutdown_event.set()
             if pid_path is not None:
+                # Only remove the pid file if it still names *this* process.
+                # A second server may have since overwritten it (e.g. after a
+                # restart race); deleting it unconditionally would clobber the
+                # other instance's pid file and leave it un-stoppable.
                 try:
-                    pid_path.unlink()
+                    if pid_path.read_text(encoding="utf-8").strip() == str(os.getpid()):
+                        pid_path.unlink()
                 except FileNotFoundError:
                     pass
             for t in daemon_link_tasks:

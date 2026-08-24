@@ -160,6 +160,10 @@ def _make_daemon(tmp_path: Path) -> Daemon:
     cfg.server_base_url = "http://127.0.0.1:8420"
     cfg.server_secret = SECRET
     cfg.work_dir_root = tmp_path
+    # agent_cwd defaults to /home/<user>; tests below use tmp_path as
+    # cwd (which lives under /tmp), so widen the allowlist to tmp_path's
+    # root so the cwd-injection allowlist check doesn't block them.
+    cfg.agent_cwd_allowlist = [tmp_path]
     controller = Daemon(config=cfg)
     controller._started = True
     controller._runtimes["claude"] = _runtime()

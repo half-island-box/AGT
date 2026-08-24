@@ -9,6 +9,168 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# Fixed namespace so ``uuid5(NS, url)`` is deterministic across machines and
+# restarts: the same daemon_url always yields the same daemon_id. Changing
+# this value would change every daemon's identity — do not change casually.
+AGT_DAEMON_NAMESPACE = uuid.UUID("6f9c2a41-0b7e-4d3c-9f1a-2c3d4e5f6a7b")
+
+
+def _read_daemons_file() -> list[tuple[str, str]]:
+    """Parse ``~/.agt/daemons`` — one ``name url`` per line.
+
+    Mirrors the Server's ``_parse_daemons_file`` shape; here we only need
+    (name, url) pairs. Missing file / malformed lines are skipped.
+    """
+    path = Path.home() / ".agt" / "daemons"
+    if not path.exists():
+        return []
+    out: list[tuple[str, str]] = []
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        name, url = parts[0].strip(), parts[1].strip()
+        if name and url:
+            out.append((name, url))
+    return out
+
+
+def _port_of_url(url: str) -> str | None:
+    """Extract the port from a ``ws://host:port`` / ``http://host:port`` URL."""
+    try:
+        after_scheme = url.split("://", 1)[1]
+        host_part = after_scheme.split("/", 1)[0]
+        if ":" in host_part:
+            return host_part.rsplit(":", 1)[1]
+    except (IndexError, ValueError):
+        pass
+    return None
+
+
+def _host_of_url(url: str) -> str:
+    """Extract the host from a ``ws://host:port`` / ``http://host:port`` URL."""
+    try:
+        after_scheme = url.split("://", 1)[1]
+        host_part = after_scheme.split("/", 1)[0]
+        if ":" in host_part:
+            return host_part.rsplit(":", 1)[0].strip("[]")
+        return host_part
+    except (IndexError, ValueError):
+        return ""
+
+
+def _is_local_host(host: str) -> bool:
+    """True if ``host`` refers to this machine.
+
+    Literal wildcard/loopback names always count. Otherwise the host is
+    compared against the addresses this machine's hostname resolves to
+    (local resolver — no external DNS, so this stays fast and never
+    matches a public IP bound elsewhere).
+    """
+    if host in ("0.0.0.0", "127.0.0.1", "::", "localhost"):
+        return True
+    try:
+        infos = socket.getaddrinfo(
+            socket.gethostname(), None, socket.AF_UNSPEC, socket.SOCK_STREAM
+        )
+        local_ips = {a[4][0] for a in infos}
+    except OSError:
+        local_ips = set()
+    return host.strip("[]") in local_ips
+
+
+def _find_self_daemon(ws_listen_port: int) -> tuple[str, str] | None:
+    """Return ``(name, url)`` for this daemon from ``~/.agt/daemons``.
+
+    Rules (always require BOTH a port match and a local host):
+    - any entry whose URL port equals ``ws_listen_port`` AND whose host
+      is this machine → that entry
+    - otherwise → None
+
+    A single-entry file is NOT assumed to be this machine — that's the
+    foot-gun that made a host with only a cloud registration (in
+    ``~/.agt/daemons``) appear to be the cloud machine itself, with
+    uuid5(NS, cloud_url) as its own daemon_id. The dual check also
+    disambiguates a cloud entry and the auto-registered local entry
+    when both use port 8422: ``agt daemon start`` appends
+    ``local ws://0.0.0.0:<port>`` at startup, and only that entry has
+    a local host.
+    """
+    for name, url in _read_daemons_file():
+        if _port_of_url(url) == str(ws_listen_port) and _is_local_host(
+            _host_of_url(url)
+        ):
+            return (name, url)
+    return None
+
+
+def _parse_allowlist(raw: str | None) -> list[Path]:
+    """Parse ``AGT_AGENT_CWD_ALLOWLIST`` into a list of absolute Path roots.
+
+    Format: colon-separated absolute paths. Empty / unset → ``[Path.home()]``
+    (the safe default). A single ``/`` is allowed and means "anywhere" —
+    same semantics as giving the daemon full filesystem access; only set
+    this when you trust every submitter.
+    """
+    if not raw or not raw.strip():
+        return [Path.home()]
+    out: list[Path] = []
+    for part in raw.split(":"):
+        part = part.strip()
+        if not part:
+            continue
+        out.append(Path(part))
+    return out or [Path.home()]
+
+
+def _is_path_under(child: Path, parent: Path) -> bool:
+    """Return True if ``child`` is the same as or inside ``parent``.
+
+    Both are resolved (``Path.resolve``) first to defeat symlink tricks
+    and relative paths. Used by the agent_cwd allowlist check.
+    """
+    try:
+        child_r = child.resolve()
+        parent_r = parent.resolve()
+    except (OSError, RuntimeError):
+        return False
+    if child_r == parent_r:
+        return True
+    try:
+        child_r.relative_to(parent_r)
+        return True
+    except ValueError:
+        return False
+
+
+def _load_daemon_id(url: str | None) -> str:
+    """Stable daemon identity.
+
+    Priority:
+    1. ``AGT_DAEMON_ID`` env (explicit override, highest).
+    2. ``uuid5(AGT_DAEMON_NAMESPACE, url)`` — deterministic, stable across
+       restarts; a changed URL (address moved) legitimately changes the id.
+    3. Fresh uuid4 — transient, NOT persisted. Only hit when the daemon
+       starts with no env override and no self entry in ``~/.agt/daemons``
+       (i.e. started outside ``agt daemon start`` on a bare machine);
+       the id will not survive a restart in that case.
+
+    The old ``~/.agt/daemon_id`` persistent-file fallback was removed:
+    it was almost never written (the env and url branches return before
+    reaching it) while the CLI's local-daemon detection depended on it —
+    which therefore never worked. Local detection now goes through
+    ``~/.agt/daemons`` (see ``_ensure_local_daemons_entry``).
+    """
+    env = os.environ.get("AGT_DAEMON_ID")
+    if env:
+        return env
+    if url:
+        return str(uuid.uuid5(AGT_DAEMON_NAMESPACE, url))
+    return str(uuid.uuid4())[:8]
+
 
 @dataclass
 class DaemonConfig:
@@ -21,7 +183,12 @@ class DaemonConfig:
     server_secret: str = ""
 
     # Local identity.
+    # ``daemon_id`` is the stable machine/identity key (uuid5 of the daemon's
+    # URL when available); ``daemon_name`` is the human-readable label (from
+    # ``~/.agt/daemons`` name, or the device name). name may change without
+    # affecting id; changing the URL changes the id (address moved).
     daemon_id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    daemon_name: str = field(default_factory=socket.gethostname)
     device_name: str = field(default_factory=socket.gethostname)
     runtime_name: str = ""
 
@@ -31,6 +198,13 @@ class DaemonConfig:
     work_dir_root: Path = field(
         default_factory=lambda: Path.home() / ".agt" / "workspaces"
     )
+    # cwd injection (Phase 4 workdir supplement): list of root directories
+    # that ``agent_cwd`` from a claim payload is allowed to land under.
+    # Default: ``[Path.home()]``. Override via ``AGT_AGENT_CWD_ALLOWLIST``
+    # (colon-separated absolute paths; ``/`` = allow anywhere). May be
+    # ``None`` for older ``DaemonConfig(...)`` callers — the daemon falls
+    # back to ``[Path.home()]`` at use time (see ``Daemon.run``).
+    agent_cwd_allowlist: list[Path] | None = None
 
     # Local resource server (Phase 2). Port 0 = disabled.
     daemon_port: int = 8421
@@ -60,10 +234,23 @@ class DaemonConfig:
     def from_env(cls) -> "DaemonConfig":
         """Build a DaemonConfig from AGT_* environment variables."""
         default = cls()
+        listen_mode = os.environ.get("AGT_LISTEN_MODE", "0").strip() in ("1", "true", "yes")
+        ws_listen_port = int(os.environ.get("AGT_DAEMON_WS_PORT", str(default.ws_listen_port)))
+        self_entry = _find_self_daemon(ws_listen_port)
+        daemon_url = self_entry[1] if self_entry else None
+        # Human-readable label: explicit env, daemons-file name, else "local"
+        # (local daemons not registered in ~/.agt/daemons default to "local").
+        daemon_name = (
+            os.environ.get("AGT_DAEMON_NAME")
+            or (self_entry[0] if self_entry else None)
+            or "local"
+        )
+        daemon_id = _load_daemon_id(daemon_url)
         return cls(
             server_base_url=os.environ.get("AGT_SERVER_URL"),
             server_secret=os.environ.get("AGT_SERVER_SECRET", ""),
-            daemon_id=os.environ.get("AGT_DAEMON_ID") or default.daemon_id,
+            daemon_id=daemon_id,
+            daemon_name=daemon_name,
             device_name=os.environ.get("AGT_DEVICE_NAME") or default.device_name,
             runtime_name=os.environ.get("AGT_RUNTIME_NAME", ""),
             max_concurrent_tasks=int(os.environ.get("AGT_MAX_CONCURRENT", str(default.max_concurrent_tasks))),
@@ -71,11 +258,23 @@ class DaemonConfig:
             work_dir_root=Path(
                 os.environ.get("AGT_WORK_DIR", str(default.work_dir_root))
             ),
+            agent_cwd_allowlist=_parse_allowlist(
+                os.environ.get("AGT_AGENT_CWD_ALLOWLIST"),
+            ),
             daemon_port=int(os.environ.get("AGT_DAEMON_PORT", str(default.daemon_port))),
             local_token=os.environ.get("AGT_DAEMON_LOCAL_TOKEN") or secrets.token_urlsafe(32),
-            listen_mode=os.environ.get("AGT_LISTEN_MODE", "0").strip() in ("1", "true", "yes"),
-            ws_listen_port=int(os.environ.get("AGT_DAEMON_WS_PORT", str(default.ws_listen_port))),
+            listen_mode=listen_mode,
+            ws_listen_port=ws_listen_port,
         )
 
 
-__all__ = ["DaemonConfig"]
+__all__ = [
+    "DaemonConfig",
+    "AGT_DAEMON_NAMESPACE",
+    "_load_daemon_id",
+    "_find_self_daemon",
+    "_host_of_url",
+    "_is_local_host",
+    "_parse_allowlist",
+    "_is_path_under",
+]

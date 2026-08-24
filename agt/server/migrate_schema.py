@@ -48,6 +48,33 @@ def ensure_schema(conn: Connection) -> None:
         )
         log.info("Migrated tasks table: added work_dir column")
 
+    # Remote chat parity: whether the agent refused to resume a prior
+    # session on its last report. Exposed via task status so the CLI can
+    # drop a stale cwd-store session entry.
+    if "resume_rejected" not in _column_names(conn, "tasks"):
+        conn.exec_driver_sql(
+            "ALTER TABLE tasks ADD COLUMN resume_rejected BOOLEAN"
+        )
+        log.info("Migrated tasks table: added resume_rejected column")
+
+    # cwd injection (Phase 4 workdir supplement): the agent subprocess's
+    # working directory on the daemon machine. Distinct from ``work_dir``
+    # (which is AGT metadata). NULL = daemon-side default fallback.
+    if "agent_cwd" not in _column_names(conn, "tasks"):
+        conn.exec_driver_sql(
+            "ALTER TABLE tasks ADD COLUMN agent_cwd VARCHAR(1024)"
+        )
+        log.info("Migrated tasks table: added agent_cwd column")
+
+    # Phase 4 daemon identity: human-readable label for a daemon, stored
+    # on each runtime row alongside the stable ``daemon_id`` (uuid5 of the
+    # daemon URL). NULL for legacy rows / daemons that don't send it.
+    if "daemon_name" not in _column_names(conn, "runtimes"):
+        conn.exec_driver_sql(
+            "ALTER TABLE runtimes ADD COLUMN daemon_name VARCHAR(128)"
+        )
+        log.info("Migrated runtimes table: added daemon_name column")
+
 
 def migrate_identities_and_sessions(conn: Connection, root_dir: Path | None = None) -> None:
     """Apply Phase 4 identity + session schema migrations. Idempotent.

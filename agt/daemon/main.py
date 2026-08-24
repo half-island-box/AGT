@@ -94,10 +94,67 @@ def _write_pidfile() -> None:
 
 
 def _clear_pidfile() -> None:
+    # Only remove the pid file if it still names *this* process — a restart
+    # race can overwrite it, and an unconditional unlink would clobber the
+    # other daemon's pid file, leaving it un-stoppable.
     try:
-        PID_FILE.unlink()
+        if PID_FILE.read_text(encoding="utf-8").strip() == str(os.getpid()):
+            PID_FILE.unlink()
     except FileNotFoundError:
         pass
+
+
+def _ensure_local_daemons_entry(ws_port: int) -> bool:
+    """Append a local-machine entry to ``~/.agt/daemons`` if none exists.
+
+    The entry anchors this machine's daemon identity: ``_find_self_daemon``
+    matches it (port + local host) and ``_load_daemon_id`` derives a stable
+    uuid5 id from its URL. Written as ``local ws://0.0.0.0:<port>``.
+
+    Idempotent — an existing entry with a local host and the same port is
+    reused, never duplicated. Best-effort: a read-only / root-owned
+    ``daemons`` file is logged and skipped (the daemon still starts; it
+    just won't be detectable as "local" by the CLI until the file is
+    writable).
+
+    Returns True if a local entry exists on return (pre-existing or just
+    appended), False when the append was refused.
+    """
+    from .config import _host_of_url, _is_local_host, _port_of_url
+
+    path = Path.home() / ".agt" / "daemons"
+    lines: list[str] = []
+    if path.exists():
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            log.warning("Could not read %s: %s", path, exc)
+            return False
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        url = parts[1].strip()
+        if _port_of_url(url) == str(ws_port) and _is_local_host(
+            _host_of_url(url)
+        ):
+            return True  # local entry already present
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fp:
+            fp.write(f"local ws://0.0.0.0:{ws_port}\n")
+    except OSError as exc:
+        log.warning(
+            "Could not append local entry to %s (%s). Fix the file's "
+            "ownership/permissions, otherwise `agt chat` cannot detect "
+            "this machine's daemon as local.", path, exc,
+        )
+        return False
+    log.info("Registered local daemon entry: local ws://0.0.0.0:%d", ws_port)
+    return True
 
 
 async def _claim_loop(
@@ -298,6 +355,7 @@ async def _execute_one(
                 resume_session_id=task_payload.get("resume_session_id"),
                 agent_cwd=agent_cwd,
                 agt_meta_dir=agt_meta_dir,
+                identity_did=task_payload.get("identity_did"),
             )
         except Exception as exc:
             log.exception("task %s execution failed", task_id)
@@ -535,7 +593,9 @@ async def run_background(config: DaemonConfig) -> None:
         )
 
     async with ServerClient(
-        base_url=config.server_url, daemon_id=config.daemon_id
+        base_url=config.server_url,
+        daemon_id=config.daemon_id,
+        daemon_name=config.daemon_name,
     ) as client:
         # In reverse-dial mode the daemon→server HTTP direction is
         # generally futile (the server is in NAT). Demote register /
@@ -586,6 +646,11 @@ async def run_background(config: DaemonConfig) -> None:
 
 def cmd_start(args: argparse.Namespace) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s: %(message)s")
+    # Register this machine in ~/.agt/daemons BEFORE from_env — the
+    # identity derivation reads the file to find this daemon's entry.
+    _ensure_local_daemons_entry(
+        int(os.environ.get("AGT_DAEMON_WS_PORT", str(DaemonConfig().ws_listen_port)))
+    )
     config = DaemonConfig.from_env()
     if args.server_url:
         config.server_url = args.server_url

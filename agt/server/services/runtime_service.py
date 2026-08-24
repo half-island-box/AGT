@@ -85,14 +85,32 @@ async def upsert_daemon_runtimes(
     *,
     daemon_id: str,
     runtimes: list[dict],
+    daemon_name: str | None = None,
 ) -> int:
     """Replace ``daemon_id``'s rows with ``runtimes``; return the count.
 
     ``runtimes`` may be empty → the daemon's rows are removed (a daemon
     that uninstalled all its agents). Every inserted row gets a fresh
     ``last_seen`` so the registry doubles as the liveness signal.
+
+    ``daemon_name`` (Phase 4): the daemon's human-readable label, stored
+    on each runtime row alongside the stable ``daemon_id``. ``None`` keeps
+    backward compatibility (legacy daemons that don't send it).
     """
     now = datetime.now(timezone.utc).strftime(TS_FMT)
+    # Preserve the daemon's stored label when this upsert doesn't carry
+    # one (legacy heartbeat path): the delete+reinsert below would
+    # otherwise NULL it out on every 30s beat, wiping what register
+    # wrote. A non-None ``daemon_name`` always wins (rename flow).
+    effective_name = daemon_name
+    if effective_name is None:
+        effective_name = (
+            await db.execute(
+                select(RuntimeModel.daemon_name)
+                .where(RuntimeModel.daemon_id == daemon_id)
+                .limit(1)
+            )
+        ).scalar_one_or_none()
     await db.execute(
         delete(RuntimeModel).where(RuntimeModel.daemon_id == daemon_id)
     )
@@ -100,6 +118,7 @@ async def upsert_daemon_runtimes(
         db.add(
             RuntimeModel(
                 daemon_id=daemon_id,
+                daemon_name=effective_name,
                 provider=rt["type"],
                 name=rt["name"],
                 version=rt["version"],

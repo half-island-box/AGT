@@ -42,6 +42,7 @@ def _daemon_to_dict(rows: list[RuntimeModel]) -> dict[str, Any]:
     providers = [_provider_to_dict(r) for r in rows]
     return {
         "daemon_id": latest.daemon_id,
+        "daemon_name": latest.daemon_name,
         "device_name": latest.device_name,
         "providers": providers,
         "runtime_count": len(rows),

@@ -39,6 +39,7 @@ def _invoke(args, popen_cls=_FakePopen):
 class TestForeground:
     def test_foreground_calls_cli_main(self, monkeypatch) -> None:
         from agt.server import main as server_main
+        monkeypatch.setattr(server_main, "_read_pidfile", lambda _p: None)
         called: dict = {}
 
         def _fake_cli_main(args):
@@ -51,7 +52,9 @@ class TestForeground:
         assert result.exit_code == 0, result.output
         assert called == {"host": "0.0.0.0", "port": 9999}
 
-    def test_foreground_does_not_spawn_popen(self) -> None:
+    def test_foreground_does_not_spawn_popen(self, monkeypatch) -> None:
+        from agt.server import main as server_main
+        monkeypatch.setattr(server_main, "_read_pidfile", lambda _p: None)
         with patch("subprocess.Popen", _FakePopen):
             _invoke(["start"])
         assert _FakePopen.instances == []
@@ -72,7 +75,9 @@ class TestDetachedSpawn:
             opened.append((path, mode, fp))
             return fp
 
-        with patch("subprocess.Popen", popen_cls), patch("builtins.open", _open, create=True):
+        with patch("subprocess.Popen", popen_cls), \
+             patch("builtins.open", _open, create=True), \
+             patch("agt.server.main._read_pidfile", return_value=None):
             result = _invoke(["start", *args])
         return result, _FakePopen.instances[-1], opened[-1] if opened else None
 
@@ -148,6 +153,75 @@ class TestDetachedSpawn:
         assert "pid=" in result.output
         assert str(popen.pid) in result.output
         assert "log=" in result.output
+
+
+# ── stop-if-running (start --detach replaces a stale process) ───────
+
+
+class TestStopIfRunning:
+    def test_stops_existing_server(self, monkeypatch, tmp_path) -> None:
+        from agt.cli import main as cli_mod
+        from agt.server import main as server_main
+
+        pid_path = tmp_path / "server.pid"
+        pid_path.write_text("424242\n")
+        monkeypatch.setattr(server_main, "_read_pidfile", lambda _p: 424242)
+
+        captured: dict = {}
+
+        def _fake_stop(pid, label, timeout=10.0):
+            captured["pid"] = pid
+            captured["label"] = label
+
+        monkeypatch.setattr(cli_mod, "_stop_if_running", _fake_stop)
+
+        _FakePopen.instances.clear()
+        with patch("subprocess.Popen", _FakePopen):
+            result = _invoke(["start", "-d", "--pid-file", str(pid_path)])
+        assert result.exit_code == 0, result.output
+        assert captured == {"pid": 424242, "label": "server"}
+
+    def test_no_stop_when_not_running(self, monkeypatch) -> None:
+        from agt.cli import main as cli_mod
+        from agt.server import main as server_main
+
+        monkeypatch.setattr(server_main, "_read_pidfile", lambda _p: None)
+        captured: dict = {}
+
+        def _fake_stop(pid, label, timeout=10.0):
+            captured["pid"] = pid
+
+        monkeypatch.setattr(cli_mod, "_stop_if_running", _fake_stop)
+
+        _FakePopen.instances.clear()
+        with patch("subprocess.Popen", _FakePopen):
+            result = _invoke(["start", "-d"])
+        assert result.exit_code == 0, result.output
+        assert captured == {}
+
+    def test_stops_existing_foreground(self, monkeypatch, tmp_path) -> None:
+        """Foreground ``server start`` must also replace a running server —
+        otherwise it fails to bind the port ("address already in use")."""
+        from agt.cli import main as cli_mod
+        from agt.server import main as server_main
+
+        pid_path = tmp_path / "server.pid"
+        pid_path.write_text("424242\n")
+        monkeypatch.setattr(server_main, "_read_pidfile", lambda _p: 424242)
+        # Foreground delegates to cli_main; stub it so uvicorn doesn't run.
+        monkeypatch.setattr(server_main, "cli_main", lambda _args: 0)
+
+        captured: dict = {}
+
+        def _fake_stop(pid, label, timeout=10.0):
+            captured["pid"] = pid
+            captured["label"] = label
+
+        monkeypatch.setattr(cli_mod, "_stop_if_running", _fake_stop)
+
+        result = _invoke(["start", "--pid-file", str(pid_path)])
+        assert result.exit_code == 0, result.output
+        assert captured == {"pid": 424242, "label": "server"}
 
 
 # ── stop / status ──────────────────────────────────────────────────

@@ -83,6 +83,33 @@ async def _select(db: _DB, hint: str | None):
         return await select_runtime(DID, hint, "local", session)
 
 
+async def _seed_runtime(
+    db: _DB, daemon_id: str, provider: str, *, stale: bool = False
+) -> None:
+    """Insert a runtime row for (daemon_id, provider).
+
+    ``stale=True`` backdates ``last_seen`` beyond the liveness TTL so
+    the row looks like a daemon that stopped heartbeating.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from agt.server.models import RuntimeModel
+    from agt.server.services.runtime_service import TS_FMT
+
+    ts = datetime.now(timezone.utc).replace(tzinfo=None)
+    if stale:
+        ts -= timedelta(seconds=3600)
+    async with db.session() as session:
+        session.add(
+            RuntimeModel(
+                daemon_id=daemon_id, provider=provider, name=provider,
+                version="1.0", status="online", device_name="dev",
+                last_seen=ts.strftime(TS_FMT),
+            )
+        )
+        await session.commit()
+
+
 # ── happy paths ────────────────────────────────────────────────────
 
 
@@ -122,6 +149,71 @@ class TestHappyPaths:
         first = db.run(_select, db, None)
         second = db.run(_select, db, None)
         assert first.provider == second.provider == "claude"
+
+
+# ── liveness-aware preference ───────────────────────────────────────
+
+
+class TestLivenessPreference:
+    """A stale binding must never shadow a healthy one just because it
+    was created earlier (the foot-gun behind the "daemon … has no live
+    runtime" 400)."""
+
+    def test_hint_prefers_live_over_earlier_dead(self, db: _DB, tmp_path) -> None:
+        # The user's exact bug: older binding on a dead daemon, newer
+        # binding on a live daemon, same provider.
+        db.run(_mk_identity, db, tmp_path)
+        db.run(_bind, db, provider="codex", daemon_id="dead-daemon")    # id 1
+        db.run(_bind, db, provider="codex", daemon_id="live-daemon")   # id 2
+        db.run(_seed_runtime, db, "live-daemon", "codex")
+
+        result = db.run(_select, db, "codex")
+        assert result.daemon_id == "live-daemon"
+
+    def test_hint_treats_stale_row_as_dead(self, db: _DB, tmp_path) -> None:
+        # A runtime row older than the liveness TTL is no proof of life.
+        db.run(_mk_identity, db, tmp_path)
+        db.run(_bind, db, provider="codex", daemon_id="gone-daemon")   # id 1
+        db.run(_bind, db, provider="codex", daemon_id="live-daemon")   # id 2
+        db.run(_seed_runtime, db, "gone-daemon", "codex", stale=True)
+        db.run(_seed_runtime, db, "live-daemon", "codex")
+
+        result = db.run(_select, db, "codex")
+        assert result.daemon_id == "live-daemon"
+
+    def test_hint_default_flag_wins_among_live(self, db: _DB, tmp_path) -> None:
+        # Both live; the is_default binding wins even with the larger id
+        # (previously the hint path always took matching[0]).
+        db.run(_mk_identity, db, tmp_path)
+        db.run(_bind, db, provider="codex", daemon_id="live-a")        # id 1
+        db.run(_bind, db, provider="codex", daemon_id="live-b", is_default=True)
+        db.run(_seed_runtime, db, "live-a", "codex")
+        db.run(_seed_runtime, db, "live-b", "codex")
+
+        result = db.run(_select, db, "codex")
+        assert result.daemon_id == "live-b"
+
+    def test_hint_all_dead_falls_back_to_default(self, db: _DB, tmp_path) -> None:
+        # Nothing live → fall back to the pre-liveness ordering (default
+        # flag first). The submit-time live-runtime check then rejects.
+        db.run(_mk_identity, db, tmp_path)
+        db.run(_bind, db, provider="codex", daemon_id="dead-a")        # id 1
+        db.run(_bind, db, provider="codex", daemon_id="dead-b", is_default=True)
+
+        result = db.run(_select, db, "codex")
+        assert result.daemon_id == "dead-b"
+
+    def test_no_hint_prefers_live(self, db: _DB, tmp_path) -> None:
+        # Without a hint: the dead daemon's binding has higher priority
+        # and a smaller id, but liveness still wins.
+        db.run(_mk_identity, db, tmp_path)
+        db.run(_bind, db, provider="claude", daemon_id="dead-daemon", priority=100)
+        db.run(_bind, db, provider="codex", daemon_id="live-daemon", priority=0)
+        db.run(_seed_runtime, db, "live-daemon", "codex")
+
+        result = db.run(_select, db, None)
+        assert result.daemon_id == "live-daemon"
+        assert result.provider == "codex"
 
 
 # ── error paths ────────────────────────────────────────────────────

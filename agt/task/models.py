@@ -39,6 +39,13 @@ class Task:
     # Phase 2 simply persists it.
     parent_task_id: str | None = None
 
+    # ── Phase 4 Step 4: identity-driven inject+reclaim ─────────
+    # When set, ``TaskExecutor`` injects the identity's AGENTS.md into
+    # ``work_dir`` as ``IDENTITY.md`` + a marker block in AGENTS.md
+    # before spawn, and reclaims it in ``finally`` after the spawn
+    # completes. ``None`` means no identity — legacy behavior.
+    identity_did: str | None = None
+
 
 @dataclass
 class TaskResult:

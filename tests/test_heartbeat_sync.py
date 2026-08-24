@@ -203,6 +203,70 @@ def test_heartbeat_does_not_disturb_other_daemons() -> None:
         dispose()
 
 
+# ── daemon_name survives the row-replacing upsert ─────────────────
+
+
+def test_heartbeat_preserves_daemon_name_when_omitted() -> None:
+    """Legacy heartbeats (no daemon_name) must not NULL the label that
+    register wrote — the upsert replaces rows every 30s, so without
+    preservation the name lasted exactly one heartbeat."""
+    client, dispose = _build_app()
+    try:
+        resp = client.post("/api/runtimes/register", json={
+            "daemon_id": "daemon-A", "daemon_name": "box-1",
+            "runtimes": [
+                {"name": "claude", "type": "claude", "version": "1.0.0",
+                 "status": "online", "device_name": "ws-a"},
+            ],
+        })
+        assert resp.status_code == 201
+        client.post("/api/heartbeat", json={
+            "daemon_id": "daemon-A", "active_task_count": 0,
+            "runtimes": [
+                {"name": "claude", "type": "claude", "version": "1.0.0",
+                 "status": "online", "device_name": "ws-a"},
+            ],
+            # no daemon_name key — legacy client
+        })
+        rows = _daemon_rows(client, "daemon-A")
+        assert rows and all(r["daemon_name"] == "box-1" for r in rows)
+    finally:
+        dispose()
+
+
+def test_heartbeat_updates_daemon_name_when_sent() -> None:
+    """A heartbeat carrying daemon_name refreshes it (rename flow)."""
+    client, dispose = _build_app()
+    try:
+        client.post("/api/runtimes/register", json={
+            "daemon_id": "daemon-A", "daemon_name": "old-name",
+            "runtimes": [
+                {"name": "claude", "type": "claude", "version": "1.0.0",
+                 "status": "online", "device_name": "ws-a"},
+            ],
+        })
+        client.post("/api/heartbeat", json={
+            "daemon_id": "daemon-A", "active_task_count": 0,
+            "daemon_name": "new-name",
+            "runtimes": [
+                {"name": "claude", "type": "claude", "version": "1.0.0",
+                 "status": "online", "device_name": "ws-a"},
+            ],
+        })
+        rows = _daemon_rows(client, "daemon-A")
+        assert rows and all(r["daemon_name"] == "new-name" for r in rows)
+    finally:
+        dispose()
+
+
+# NOTE (known edge, accepted): preservation reads the name off the
+# daemon's existing rows. An empty snapshot (runtimes=[]) deletes them,
+# so a *legacy* daemon that then reports runtimes again without a name
+# gets NULL — the label is only remembered while some row exists.
+# Current clients send ``daemon_name`` on every beat, so this only
+# bites old daemons that also uninstalled every agent.
+
+
 # ── last_seen still updates even with empty runtimes ─────────────
 
 

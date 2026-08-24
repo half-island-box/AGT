@@ -89,6 +89,8 @@ async def claim_tasks_for_daemon(
                 prompt=candidate.prompt,
                 resume_session_id=resume_session_id,
                 work_dir=None,
+                identity_did=candidate.identity_did,
+                agent_cwd=candidate.agent_cwd,
             )
             await db.commit()
             return [payload]

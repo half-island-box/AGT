@@ -151,6 +151,39 @@ class TestBindingRoutes:
             dispose()
 
 
+# ── daemon-scoped bindings (inverse view) ───────────────────────────
+
+
+class TestDaemonBindingsRoute:
+    def test_list_bindings_by_daemon(self, tmp_path, monkeypatch) -> None:
+        client, dispose = _build_app(tmp_path)
+        try:
+            _mk_identity(client, tmp_path, monkeypatch)
+            _mk_binding(client, provider="claude")
+            _mk_binding(client, provider="codex", daemon_id="remote")
+
+            # Only the 'local' daemon's bindings come back.
+            local = client.get("/api/daemons/local/bindings").json()["bindings"]
+            assert len(local) == 1
+            assert local[0]["identity_did"] == DID
+            assert local[0]["provider"] == "claude"
+
+            remote = client.get("/api/daemons/remote/bindings").json()["bindings"]
+            assert len(remote) == 1
+            assert remote[0]["provider"] == "codex"
+        finally:
+            dispose()
+
+    def test_list_bindings_by_daemon_empty(self, tmp_path, monkeypatch) -> None:
+        client, dispose = _build_app(tmp_path)
+        try:
+            _mk_identity(client, tmp_path, monkeypatch)
+            resp = client.get("/api/daemons/nobody/bindings").json()["bindings"]
+            assert resp == []
+        finally:
+            dispose()
+
+
 # ── resolve ────────────────────────────────────────────────────────
 
 

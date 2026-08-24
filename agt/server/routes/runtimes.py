@@ -28,6 +28,7 @@ async def register_runtimes(
     count = await upsert_daemon_runtimes(
         db,
         daemon_id=payload.daemon_id,
+        daemon_name=payload.daemon_name,
         runtimes=[rt.model_dump() for rt in payload.runtimes],
     )
     return RegisterResponse(registered=count)
@@ -61,6 +62,7 @@ async def list_runtimes(
                 status=row.status,
                 device_name=row.device_name,
                 daemon_id=row.daemon_id,
+                daemon_name=row.daemon_name,
             )
             for row in live
         ]

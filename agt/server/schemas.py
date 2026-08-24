@@ -20,6 +20,9 @@ class RuntimeInfo(BaseModel):
 
 class RegisterRequest(BaseModel):
     daemon_id: str
+    # Phase 4: human-readable daemon label. Optional (legacy daemons don't
+    # send it); stored on each runtime row alongside daemon_id.
+    daemon_name: str | None = None
     runtimes: list[RuntimeInfo]
 
 
@@ -29,6 +32,7 @@ class RegisterResponse(BaseModel):
 
 class RuntimeOut(RuntimeInfo):
     daemon_id: str
+    daemon_name: str | None = None
 
 
 class ListRuntimesResponse(BaseModel):
@@ -48,6 +52,15 @@ class SubmitTaskRequest(BaseModel):
     # Server persists it ONLY for local daemons; remote daemons supply
     # their own fallback path on the receiving side.
     work_dir: str | None = None
+    # Phase 4 Step 4: identity for this task. When set, the server runs
+    # ``select_runtime`` to resolve the actual (provider, daemon_id) and
+    # rejects the submit if the identity isn't bound to that runtime.
+    identity_did: str | None = None
+    # cwd injection (Phase 4 workdir supplement): the agent subprocess's
+    # working directory on the daemon machine. Also where IDENTITY.md /
+    # AGENTS.md are injected when an identity is set. NULL means "let
+    # the daemon pick" (legacy: ``work_dir_root / provider / task_id``).
+    agent_cwd: str | None = None
 
 
 class SubmitTaskResponse(BaseModel):
@@ -77,6 +90,15 @@ class TaskPayload(BaseModel):
     prompt: str
     resume_session_id: str | None = None
     work_dir: str | None = None
+    # Phase 4 Step 4: identity for this task. When set, daemon uses it to
+    # inject the identity's AGENTS.md into the agent's working directory
+    # (see identity-inject-reclaim spec). None means identity-less task
+    # (legacy behavior).
+    identity_did: str | None = None
+    # cwd injection (Phase 4 workdir supplement): agent subprocess cwd
+    # on the daemon. NULL = daemon picks (``work_dir_root / provider /
+    # task_id`` legacy fallback).
+    agent_cwd: str | None = None
 
 
 class ReportRequest(BaseModel):
@@ -100,6 +122,10 @@ class TaskStatusResponse(BaseModel):
     provider: str
     status: str
     session_id: str | None
+    # True when the agent refused to resume a prior session on the last
+    # report. Lets the CLI drop a stale cwd-store entry (parity with the
+    # local daemon's resume_rejected handling).
+    resume_rejected: bool | None = None
     exit_code: int | None
     stdout: str | None = None
     stderr: str | None = None
@@ -108,7 +134,12 @@ class TaskStatusResponse(BaseModel):
     updated_at: str
     daemon_id: str | None = None
     target_daemon_id: str | None = None
+    # Phase 4 Step 4: identity for this task (None = no-identity task).
+    identity_did: str | None = None
     work_dir: str | None = None  # Phase 4: AGT metadata directory (None = legacy / remote)
+    # cwd injection (Phase 4 workdir supplement): the agent subprocess's
+    # working directory on the daemon machine. None = daemon's default.
+    agent_cwd: str | None = None
 
 
 # ── Session ─────────────────────────────────────────────────────────
@@ -131,6 +162,11 @@ class HeartbeatRequest(BaseModel):
     # daemon's probe currently sees (default = server leaves runtimes
     # alone, preserving backward compatibility with old clients).
     runtimes: list[RuntimeInfo] = []
+    # The daemon's human-readable label. The heartbeat upsert replaces
+    # the daemon's rows, so clients that know their name send it every
+    # beat; legacy clients omit it and the server preserves the stored
+    # value instead of NULLing it.
+    daemon_name: str | None = None
 
 
 class HeartbeatResponse(BaseModel):
@@ -246,6 +282,7 @@ class DaemonOut(BaseModel):
     """Aggregated daemon summary (grouped from runtimes rows)."""
 
     daemon_id: str
+    daemon_name: str | None = None
     device_name: str
     providers: list[DaemonProviderOut]
     runtime_count: int

@@ -77,6 +77,7 @@ class Daemon:
         agt_meta_dir: Path | None = None,
         first_prompt: str | None = None,
         turn_index: int = 1,
+        identity_did: str | None = None,
     ) -> TaskResult:
         """Execute one prompt against the named provider.
 
@@ -132,7 +133,25 @@ class Daemon:
         else:
             # Neither given: legacy daemon-local layout.
             meta_dir = self.config.work_dir_root / provider / effective_task_id
-        # agent_cwd falls back to meta_dir (legacy single-path mode).
+
+        # cwd injection (Phase 4 workdir supplement): when the caller /
+        # claim supplied an explicit agent_cwd (e.g. from ``agt chat --dir``,
+        # or auto-detected by the CLI), honor it. Enforce the allowlist
+        # *before* using it — never trust a path from the wire without a
+        # sandbox check, even when the CLI already verified existence.
+        # ``None`` → fall back to legacy ``meta_dir`` below.
+        if agent_cwd is not None:
+            from .config import _is_path_under
+            allowlist = self.config.agent_cwd_allowlist or [Path.home()]
+            if not any(
+                _is_path_under(agent_cwd, root) for root in allowlist
+            ):
+                raise ValueError(
+                    f"agent_cwd '{agent_cwd}' is outside the daemon's "
+                    f"allowlist {allowlist}. "
+                    f"Set AGT_AGENT_CWD_ALLOWLIST to widen."
+                )
+
         effective_agent_cwd = agent_cwd or meta_dir or Path.cwd()
 
         session_store = self._resolve_session_store(effective_agent_cwd, provider)
@@ -147,6 +166,7 @@ class Daemon:
             work_dir=meta_dir,
             agent_cwd=effective_agent_cwd,
             resume_session_id=resume_session_id,
+            identity_did=identity_did,
         )
 
         executor = TaskExecutor(runtime=runtime, config=self.config)
@@ -164,6 +184,7 @@ class Daemon:
                 turn_index=turn_index,
                 resume_session_id=resume_session_id,
                 result=result,
+                identity_did=identity_did,
             )
 
         return result
@@ -212,6 +233,7 @@ class Daemon:
         turn_index: int,
         resume_session_id: str | None,
         result: TaskResult,
+        identity_did: str | None = None,
     ) -> None:
         """Persist the run outcome to the cwd store."""
         if result.resume_rejected:
@@ -226,6 +248,7 @@ class Daemon:
                 task_id=task_id,
                 first_prompt=first_prompt or prompt,
                 turn_count=turn_index,
+                identity_did=identity_did,
             )
 
     # ── Internal helpers ────────────────────────────────────────

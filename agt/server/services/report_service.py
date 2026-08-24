@@ -70,6 +70,7 @@ async def record_task_result_for_daemon(
     task.stderr = stderr
     task.duration = duration
     task.status = status
+    task.resume_rejected = resume_rejected
     task.updated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
     if resume_rejected:

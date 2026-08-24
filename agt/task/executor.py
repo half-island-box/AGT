@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 
 from ..daemon.config import DaemonConfig
+from ..daemon.identity_inject import _inject_identity, _reclaim_identity
 from ..runtime.models import Runtime
 from ..server.services.auth_service import TaskToken
 from .models import Task, TaskResult
@@ -183,82 +184,99 @@ class TaskExecutor:
 
         cmd = self._build_command(binary, task)
         work_dir = self._ensure_work_dir(task)
-        env = self._build_env(task)
+        env = self._build_env(task, work_dir)
+
+        # Phase 4 Step 4: stack the agent's AGENTS.md into the spawn cwd
+        # as ``IDENTITY.md`` + a marker block in the provider's
+        # instructions file (``CLAUDE.md`` for claude, else
+        # ``AGENTS.md``). Reclaimed in ``finally`` regardless of how the
+        # spawn exits (timeout, crash, normal exit, interactive).
+        if task.identity_did:
+            _inject_identity(work_dir, task.identity_did, provider=task.provider)
 
         start = time.monotonic()
-        if interactive:
-            return await self._execute_interactive(task, cmd, work_dir, env, start)
-
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=str(work_dir),
-            env=env,
-        )
-
-        reader = StreamReader(
-            stdout=process.stdout,
-            stderr=process.stderr,
-            # Silence stderr on the live terminal: agent CLIs (e.g. codex)
-            # print their banner + diagnostics to stderr, which would
-            # spam the user's chat. The full stderr is still captured in
-            # ``result.stderr`` for reporting / debugging.
-            on_stderr=lambda _line: None,
-        )
-
-        timeout = self._config.agent_timeout
         try:
-            stdout, stderr = await asyncio.wait_for(reader.read_all(), timeout=timeout)
-        except asyncio.TimeoutError:
-            process.kill()
+            if interactive:
+                return await self._execute_interactive(task, cmd, work_dir, env, start)
+
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(work_dir),
+                env=env,
+            )
+
+            reader = StreamReader(
+                stdout=process.stdout,
+                stderr=process.stderr,
+                # Silence stderr on the live terminal: agent CLIs (e.g. codex)
+                # print their banner + diagnostics to stderr, which would
+                # spam the user's chat. The full stderr is still captured in
+                # ``result.stderr`` for reporting / debugging.
+                on_stderr=lambda _line: None,
+            )
+
+            timeout = self._config.agent_timeout
             try:
-                await process.wait()
-            except ProcessLookupError:
-                pass
+                stdout, stderr = await asyncio.wait_for(reader.read_all(), timeout=timeout)
+            except asyncio.TimeoutError:
+                process.kill()
+                try:
+                    await process.wait()
+                except ProcessLookupError:
+                    pass
+                duration = time.monotonic() - start
+                return TaskResult(
+                    task_id=task.task_id,
+                    provider=task.provider,
+                    exit_code=-1,
+                    stdout="",
+                    stderr="",
+                    duration=duration,
+                    status="timeout",
+                )
+
+            await process.wait()
             duration = time.monotonic() - start
+            exit_code = process.returncode if process.returncode is not None else -1
+
+            # Decide the resume outcome based on what actually happened.
+            if task.resume_session_id is not None:
+                if _detect_resume_rejected(stderr, exit_code):
+                    session_id: str | None = None
+                    resume_rejected = True
+                else:
+                    session_id = task.resume_session_id
+                    resume_rejected = False
+            else:
+                session_id = _extract_session_id(stdout, stderr, work_dir, task.provider)
+                resume_rejected = False
+
+            if exit_code == 0:
+                status = "completed"
+            else:
+                status = "failed"
+
             return TaskResult(
                 task_id=task.task_id,
                 provider=task.provider,
-                exit_code=-1,
-                stdout="",
-                stderr="",
+                exit_code=exit_code,
+                stdout=stdout,
+                stderr=stderr,
                 duration=duration,
-                status="timeout",
+                status=status,
+                session_id=session_id,
+                resume_rejected=resume_rejected,
             )
-
-        await process.wait()
-        duration = time.monotonic() - start
-        exit_code = process.returncode if process.returncode is not None else -1
-
-        # Decide the resume outcome based on what actually happened.
-        if task.resume_session_id is not None:
-            if _detect_resume_rejected(stderr, exit_code):
-                session_id: str | None = None
-                resume_rejected = True
-            else:
-                session_id = task.resume_session_id
-                resume_rejected = False
-        else:
-            session_id = _extract_session_id(stdout, stderr, work_dir, task.provider)
-            resume_rejected = False
-
-        if exit_code == 0:
-            status = "completed"
-        else:
-            status = "failed"
-
-        return TaskResult(
-            task_id=task.task_id,
-            provider=task.provider,
-            exit_code=exit_code,
-            stdout=stdout,
-            stderr=stderr,
-            duration=duration,
-            status=status,
-            session_id=session_id,
-            resume_rejected=resume_rejected,
-        )
+        finally:
+            # Phase 4 Step 4: always reclaim the injected identity
+            # files, regardless of exit path (timeout, crash, normal,
+            # interactive). ``_reclaim_identity`` is a no-op when there
+            # is no ``.agt-identity-managed`` sidecar or no AGENTS.md
+            # marker block, so it's safe even when ``inject`` didn't run.
+            if task.identity_did:
+                _reclaim_identity(work_dir, did=task.identity_did)
 
     async def _execute_interactive(
         self,
@@ -346,7 +364,7 @@ class TaskExecutor:
         cmd += ["-p", task.prompt]
         return cmd
 
-    def _build_env(self, task: Task) -> dict[str, str]:
+    def _build_env(self, task: Task, work_dir: Path | None = None) -> dict[str, str]:
         env = os.environ.copy()
         # Hint to Claude Code (and friends) that no TTY is attached.
         env.setdefault("CLAUDE_CODE_HEADLESS", "1")
@@ -375,6 +393,13 @@ class TaskExecutor:
             env["AGT_TASK_TOKEN"] = token
             env["AGT_SERVER_URL"] = self._config.server_url
             env["AGT_TASK_ID"] = task.task_id
+        # Phase 4 Step 4: tell the agent where its identity's AGENTS.md
+        # was injected. The file is ``IDENTITY.md`` in the spawn cwd; the
+        # content is the identity's own AGENTS.md (a copy). Agents that
+        # read this env (Claude Code / Codex hooks, AGT-MCP) get a role
+        # pointer without AGT having to mutate the cwd.
+        if task.identity_did:
+            env["AGT_IDENTITY_FILE"] = str(work_dir / "IDENTITY.md")
         return env
 
     def _ensure_work_dir(self, task: Task) -> Path:
