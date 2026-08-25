@@ -403,3 +403,124 @@ def test_ensure_work_dir_permission_error_propagates(
     executor = TaskExecutor(runtime=_runtime(), config=_config())
     with pytest.raises(PermissionError):
         executor._ensure_work_dir(task)
+
+
+# ── Daemon.run: identity mirror on chat start ─────────────────────
+#
+# Phase 4 Step 4 supplement: a remote daemon doesn't have the
+# ``~/.agt/identities/<slug>/AGENTS.md`` that ``agt identity create``
+# wrote on the CLI machine. ``Daemon.run`` now calls
+# ``ensure_identity_md`` to fetch the identity from the Server and
+# mirror it locally before injecting — otherwise ``_inject_identity``
+# silently no-ops and the agent loses its identity.
+
+
+def _identity_json(updated_at: str = "2026-08-25 14:23:11") -> dict:
+    return {
+        "did": "did:agt:code-reviewer",
+        "daemon_id": "d-uuid5-form",
+        "name": "Code Reviewer",
+        "description": "Reviews PRs.",
+        "capabilities": ["python", "code-review"],
+        "status": "active",
+        "visibility": "private",
+        "created_by": "alice",
+        "created_at": "2026-08-20 10:00:00",
+        "updated_at": updated_at,
+    }
+
+
+def test_daemon_run_mirrors_identity_on_remote(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """End-to-end: ``Daemon.run`` with ``identity_did`` triggers
+    ``ensure_identity_md``, which writes the AGENTS.md mirror at the
+    path ``_inject_identity`` reads from. This is the user-reported
+    remote-daemon bug: the file is now present where the inject path
+    expects it."""
+    # Sandbox ``Path.home()`` so no real ``~/.agt`` is touched.
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+    # Stub the HTTP fetch — return a canned identity.
+    from agt.daemon import identity_sync as isync
+
+    async def _fake_fetch(**_kw):
+        return _identity_json()
+
+    monkeypatch.setattr(isync, "_fetch_identity", _fake_fetch)
+
+    # Stub executor so no agent subprocess actually runs.
+    captured: dict = {}
+
+    async def fake_execute(self, task, *, interactive=False):
+        captured["identity_did"] = task.identity_did
+        return _fake_result(task.task_id, task.provider, session_id=None)
+
+    monkeypatch.setattr(
+        "agt.task.executor.TaskExecutor.execute", fake_execute,
+    )
+
+    controller = _make_daemon(tmp_path)
+
+    async def _run():
+        return await controller.run(
+            provider="claude", prompt="hi", task_id="t-idem",
+            identity_did="did:agt:code-reviewer",
+        )
+
+    asyncio.run(_run())
+
+    # 1. The fetch was called for the right DID.
+    # 2. The mirror file now lives at the path ``_inject_identity``
+    #    reads from on this machine.
+    mirror = tmp_path / ".agt" / "identities" / "code-reviewer" / "AGENTS.md"
+    assert mirror.exists(), (
+        f"AGENTS.md mirror not written at {mirror}; contents of "
+        f"{tmp_path / '.agt'}: "
+        f"{list((tmp_path / '.agt').rglob('*')) if (tmp_path / '.agt').exists() else 'n/a'}"
+    )
+    # 3. The mirror contains the rendered identity content.
+    body = mirror.read_text(encoding="utf-8")
+    assert "did:agt:code-reviewer" in body
+    assert "Code Reviewer" in body
+    # 4. The cache recorded the updated_at.
+    cache = isync.load_state()
+    assert cache["identities"]["did:agt:code-reviewer"] == "2026-08-25 14:23:11"
+    # 5. The executor saw the identity_did (so inject would have run).
+    assert captured["identity_did"] == "did:agt:code-reviewer"
+
+
+def test_daemon_run_skips_ensure_when_no_identity(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """Regression: ``Daemon.run`` without ``identity_did`` must not call
+    ``ensure_identity_md`` — there's nothing to mirror."""
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+    from agt.daemon import identity_sync as isync
+    ensure_called = False
+
+    async def _spy(**_kw):
+        nonlocal ensure_called
+        ensure_called = True
+        return None
+
+    monkeypatch.setattr(isync, "ensure_identity_md", _spy)
+
+    async def fake_execute(self, task, *, interactive=False):
+        return _fake_result(task.task_id, task.provider, session_id=None)
+
+    monkeypatch.setattr(
+        "agt.task.executor.TaskExecutor.execute", fake_execute,
+    )
+
+    controller = _make_daemon(tmp_path)
+
+    async def _run():
+        await controller.run(
+            provider="claude", prompt="hi", task_id="t-noidentity",
+        )
+
+    asyncio.run(_run())
+
+    assert not ensure_called, "ensure_identity_md must not run when identity_did is None"

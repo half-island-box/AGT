@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from pathlib import Path
 
@@ -11,6 +12,8 @@ from ..task.executor import TaskExecutor
 from ..task.models import Task, TaskResult
 from ..task.session import CwdSessionStore
 from .config import DaemonConfig
+
+log = logging.getLogger(__name__)
 
 
 class Daemon:
@@ -153,6 +156,27 @@ class Daemon:
                 )
 
         effective_agent_cwd = agent_cwd or meta_dir or Path.cwd()
+
+        # Phase 4 Step 4 supplement: when ``identity_did`` is set, ensure
+        # the per-identity AGENTS.md mirror is present on THIS machine.
+        # Remote daemons don't have the file ``agt identity create`` wrote
+        # on the CLI machine; without this step ``_inject_identity`` would
+        # silently no-op. Best-effort — failure here just falls back to
+        # "no identity file" (same as the pre-fix silent skip).
+        if identity_did is not None:
+            try:
+                from .identity_sync import ensure_identity_md
+                await ensure_identity_md(
+                    server_url=self.config.server_url,
+                    server_secret=self.config.server_secret,
+                    identity_did=identity_did,
+                )
+            except Exception:
+                log.warning(
+                    "identity %s: ensure failed; inject will be skipped",
+                    identity_did,
+                    exc_info=True,
+                )
 
         session_store = self._resolve_session_store(effective_agent_cwd, provider)
         resume_session_id = self._resolve_resume_session_id(
