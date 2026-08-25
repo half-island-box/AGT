@@ -78,6 +78,7 @@ class Daemon:
         first_prompt: str | None = None,
         turn_index: int = 1,
         identity_did: str | None = None,
+        identity_md: str | None = None,
     ) -> TaskResult:
         """Execute one prompt against the named provider.
 
@@ -106,6 +107,14 @@ class Daemon:
         ``first_prompt`` is the original prompt of the chat session (used
         to label the session in ``agt chat --list``). ``turn_index`` is the
         1-based turn number being executed; we record it on the entry.
+
+        ``identity_did`` (Phase 4 Step 4) declares which identity to
+        inject. ``identity_md`` (Option D) is the server-rendered
+        AGENTS.md body for that identity — passed through to
+        ``TaskExecutor`` verbatim so the daemon never has to fetch from
+        the Server (which is unreachable in reverse-dial). When
+        ``identity_md`` is None, the executor falls back to reading
+        ``~/.agt/identities/<slug>/AGENTS.md`` from disk.
         """
         if not self._started:
             await self.start()
@@ -154,6 +163,15 @@ class Daemon:
 
         effective_agent_cwd = agent_cwd or meta_dir or Path.cwd()
 
+        # Phase 4 Step 4 + Option D: ``identity_md`` (when set) was
+        # rendered by the Server at claim time and bundled into the
+        # claim payload. We pass it through to ``TaskExecutor`` so the
+        # daemon writes it directly into ``IDENTITY.md`` without any
+        # outbound fetch to the Server (impossible in reverse-dial).
+        # ``identity_did`` without ``identity_md`` falls back to reading
+        # ``~/.agt/identities/<slug>/AGENTS.md`` from disk — covers
+        # daemons running outside the server path.
+
         session_store = self._resolve_session_store(effective_agent_cwd, provider)
         resume_session_id = self._resolve_resume_session_id(
             session_store, resume_session_id, interactive, turn_index,
@@ -167,6 +185,7 @@ class Daemon:
             agent_cwd=effective_agent_cwd,
             resume_session_id=resume_session_id,
             identity_did=identity_did,
+            identity_md=identity_md,
         )
 
         executor = TaskExecutor(runtime=runtime, config=self.config)

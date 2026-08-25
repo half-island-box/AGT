@@ -323,6 +323,10 @@ async def _execute_one(
                 agent_cwd=agent_cwd,
                 agt_meta_dir=agt_meta_dir,
                 identity_did=task_payload.get("identity_did"),
+                # Option D: server-rendered AGENTS.md body, sent in the
+                # claim payload. The daemon writes it directly to
+                # ``IDENTITY.md`` without fetching from the Server.
+                identity_md=task_payload.get("identity_md"),
             )
         except Exception as exc:
             log.exception("task %s execution failed", task_id)

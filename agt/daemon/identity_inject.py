@@ -1,14 +1,19 @@
 """Identity injection + reclaim helpers for daemon spawn (Phase 4 Step 4).
 
 When the daemon handles a task with an ``identity_did``, we "stack" the
-identity onto the agent's working directory: copy the source
-``~/.agt/identities/<slug>/AGENTS.md`` into the spawn cwd as
-``IDENTITY.md`` and append a marker block to the spawn cwd's
-project-instructions file. That file is provider-aware: Claude Code
-reads ``CLAUDE.md`` natively (it does not pick up ``AGENTS.md`` by
-default), so for ``provider == "claude"`` the marker goes to
-``CLAUDE.md``; every other agent follows the ``AGENTS.md`` convention.
-When the spawn completes (or crashes), we undo it.
+identity onto the agent's working directory: write the identity's
+``AGENTS.md`` body into the spawn cwd as ``IDENTITY.md`` and append a
+marker block to the spawn cwd's project-instructions file. That file
+is provider-aware: Claude Code reads ``CLAUDE.md`` natively (it does
+not pick up ``AGENTS.md`` by default), so for ``provider == "claude"``
+the marker goes to ``CLAUDE.md``; every other agent follows the
+``AGENTS.md`` convention. When the spawn completes (or crashes), we
+undo it.
+
+The ``AGENTS.md`` body arrives as the ``identity_md`` parameter
+(Option D: server-rendered, bundled into the claim payload). For
+daemons running outside the server path we still fall back to reading
+``~/.agt/identities/<slug>/AGENTS.md`` from disk.
 
 Design notes:
 
@@ -29,7 +34,6 @@ Design notes:
 from __future__ import annotations
 
 import re
-import shutil
 from pathlib import Path
 
 # Sidecar stem that records "we created this file this time". Existence
@@ -71,6 +75,29 @@ def _source_path(identity_did: str) -> Path:
     if the file does not exist; callers must check existence."""
     slug = identity_did.split(":")[-1]
     return Path.home() / ".agt" / "identities" / slug / "AGENTS.md"
+
+
+def _resolve_identity_md(
+    identity_did: str, identity_md: str | None,
+) -> str | None:
+    """Pick the AGENTS.md body for an inject.
+
+    Option D (server-supplied): when ``identity_md`` is set, return it
+    verbatim — the server already rendered the current identity state
+    and bundled it into the claim payload. The daemon never has to
+    reach back to the Server (impossible in reverse-dial).
+
+    Legacy fallback: when ``identity_md`` is None, fall back to reading
+    ``~/.agt/identities/<slug>/AGENTS.md`` so a daemon running outside
+    the server path still works. Returns ``None`` if the file is
+    absent — the caller will silently skip injection in that case.
+    """
+    if identity_md is not None:
+        return identity_md
+    src = _source_path(identity_did)
+    if not src.exists():
+        return None
+    return src.read_text(encoding="utf-8")
 
 
 def _marker_block(identity_did: str) -> str:
@@ -125,16 +152,28 @@ def _strip_marker_block(text: str, did: str | None = None) -> str:
 
 
 def _inject_identity(
-    cwd: Path, identity_did: str, provider: str | None = None
+    cwd: Path,
+    identity_did: str,
+    provider: str | None = None,
+    *,
+    identity_md: str | None = None,
 ) -> None:
     """Inject the identity into ``cwd``. Idempotent (reclaim-first).
+
+    ``identity_md`` (Option D) takes priority: when provided, the
+    server already rendered the identity's AGENTS.md body and bundled
+    it into the claim payload — we use it verbatim. When ``None``, we
+    fall back to reading ``~/.agt/identities/<slug>/AGENTS.md`` from
+    disk (legacy local path). If both are absent, the call silently
+    skips.
 
     Steps (full rationale in the module docstring):
 
     1. Reclaim any prior injection (idempotent / crash-self-heal — in
        both AGENTS.md and CLAUDE.md).
-    2. If source AGENTS.md is missing, skip silently.
-    3. Ensure ``cwd/.agt`` exists; copy source → ``cwd/IDENTITY.md``.
+    2. Resolve the AGENTS.md body (server-rendered or disk-fallback).
+       If absent, skip silently.
+    3. Ensure ``cwd/.agt`` exists; write the body → ``cwd/IDENTITY.md``.
     4. Append (or create) the provider's instructions file
        (``CLAUDE.md`` for claude, else ``AGENTS.md``) with the marker
        block. Track whether we created the file (per-file sidecar) so
@@ -146,16 +185,16 @@ def _inject_identity(
     # 1. Idempotent reclaim — handles crash leftovers from a prior run.
     _reclaim_identity(cwd)
 
-    # 2. Source presence check.
-    src = _source_path(identity_did)
-    if not src.exists():
+    # 2. Resolve body.
+    source_md = _resolve_identity_md(identity_did, identity_md)
+    if source_md is None:
         return
 
-    # 3. Copy identity file into cwd as IDENTITY.md.
+    # 3. Write identity file into cwd as IDENTITY.md.
     aagt_dir = cwd / ".agt"
     aagt_dir.mkdir(exist_ok=True)
     identity_file = cwd / "IDENTITY.md"
-    shutil.copy2(src, identity_file)
+    identity_file.write_text(source_md, encoding="utf-8")
 
     # 4. Append (or create) the marker file with the marker block.
     target = cwd / _marker_filename(provider)

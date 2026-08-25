@@ -45,6 +45,14 @@ class Task:
     # before spawn, and reclaims it in ``finally`` after the spawn
     # completes. ``None`` means no identity — legacy behavior.
     identity_did: str | None = None
+    # Option D (reverse-dial aware): server-rendered AGENTS.md body for
+    # ``identity_did``. ``TaskExecutor`` writes this verbatim into
+    # ``work_dir/IDENTITY.md`` instead of copy-from-``Path.home()`` —
+    # the daemon doesn't need to fetch the file because the server
+    # bundled it into the claim payload. ``None`` falls back to the
+    # legacy ``Path.home()/.agt/identities/<slug>/AGENTS.md`` read, so
+    # a daemon running outside the server path still works.
+    identity_md: str | None = None
 
 
 @dataclass

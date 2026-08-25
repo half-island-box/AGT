@@ -95,6 +95,14 @@ class TaskPayload(BaseModel):
     # (see identity-inject-reclaim spec). None means identity-less task
     # (legacy behavior).
     identity_did: str | None = None
+    # Option D (reverse-dial aware): server-rendered AGENTS.md body for
+    # ``identity_did``. The daemon writes this verbatim into
+    # ``work_dir/IDENTITY.md`` so it never needs to fetch from the
+    # Server. ``None`` when ``identity_did is None`` or the identity has
+    # been deleted since submit. Always-fresh: re-rendered on every
+    # claim so an updated identity propagates within one claim poll
+    # (~500ms) of a new task being submitted.
+    identity_md: str | None = None
     # cwd injection (Phase 4 workdir supplement): agent subprocess cwd
     # on the daemon. NULL = daemon picks (``work_dir_root / provider /
     # task_id`` legacy fallback).

@@ -191,8 +191,17 @@ class TaskExecutor:
         # instructions file (``CLAUDE.md`` for claude, else
         # ``AGENTS.md``). Reclaimed in ``finally`` regardless of how the
         # spawn exits (timeout, crash, normal exit, interactive).
+        #
+        # Option D: when ``task.identity_md`` is set, the server already
+        # rendered the identity and bundled the body into the claim
+        # payload. We write it verbatim — no fetch from the Server,
+        # which would be unreachable in a reverse-dial setup.
         if task.identity_did:
-            _inject_identity(work_dir, task.identity_did, provider=task.provider)
+            _inject_identity(
+                work_dir, task.identity_did,
+                provider=task.provider,
+                identity_md=task.identity_md,
+            )
 
         start = time.monotonic()
         try:
