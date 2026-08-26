@@ -31,6 +31,7 @@ from agt.server.services.identity_service import (
     deprecate_identity,
     get_identity,
     list_identities,
+    normalize_identity_did,
     revoke_identity,
     sync_agent_md,
     update_identity,
@@ -111,6 +112,38 @@ class TestDirName:
         name = _dir_name("did:agt:UPPER")
         assert name.startswith("UPPER-")
         assert len(name) == len("UPPER-") + 8
+
+
+class TestNormalizeIdentityDid:
+    """``normalize_identity_did`` turns user input into a canonical DID."""
+
+    def test_full_did_passthrough(self) -> None:
+        assert normalize_identity_did("did:agt:code-reviewer") == "did:agt:code-reviewer"
+
+    def test_strips_surrounding_whitespace(self) -> None:
+        assert normalize_identity_did("  did:agt:code-reviewer  ") == "did:agt:code-reviewer"
+
+    def test_bare_slug_prefixed(self) -> None:
+        assert normalize_identity_did("code-reviewer") == "did:agt:code-reviewer"
+
+    def test_typo_scheme_rejected(self) -> None:
+        # The common "id:agt:..." typo must not fall through to a 404.
+        with pytest.raises(ValueError, match="unknown scheme 'id:'"):
+            normalize_identity_did("id:agt:code-reviewer")
+
+    def test_empty_rejected(self) -> None:
+        with pytest.raises(ValueError, match="must not be empty"):
+            normalize_identity_did("")
+        with pytest.raises(ValueError, match="must not be empty"):
+            normalize_identity_did("   ")
+
+    def test_invalid_slug_after_prefix_rejected(self) -> None:
+        with pytest.raises(ValueError, match="after 'did:agt:'"):
+            normalize_identity_did("did:agt:UPPER")
+
+    def test_invalid_bare_slug_rejected(self) -> None:
+        with pytest.raises(ValueError, match="invalid identity slug"):
+            normalize_identity_did("Bad_Slug!")
 
 
 class TestDIDGeneration:

@@ -1,17 +1,30 @@
 """TaskExecutor — spawn an Agent CLI subprocess to run a single Task.
 
-Implements the "resume first, fallback to fresh" strategy:
-- If ``task.resume_session_id`` is set, pass ``--resume <id>``.
-- Otherwise create a fresh session and extract the new session_id from the
-  agent's output.
+Three execution modes:
 
-Detect resume-rejection by scanning stderr for known refusal phrases.
-On timeout, kill the process and return ``status="timeout"``.
+- **Streaming** (``sink != NoopSink``): consume structured JSON events
+  from the agent CLI's stream output; print text deltas to the terminal
+  in real time. Used when the provider supports streaming (Phase 5:
+  Claude Code via ``--output-format stream-json``).
+- **Pipe text** (``sink == NoopSink``, default for unknown providers):
+  capture stdout/stderr with :class:`StreamReader`; extract session id
+  from text + disk fallback. Legacy Phase 1 behaviour, preserved
+  unchanged.
+- **Interactive** (``interactive=True``): inherit parent stdio so the
+  agent sees a real TTY. Trades session-id capture for the agent's
+  native interactive UI.
+
+The provider-specific bits (command-line shape, stream sink, disk
+fallback, resume-rejection signal) live in
+:mod:`agt.runtime.registry` — the executor only knows the abstract
+``ProviderAdapter`` API and never references a provider name.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import os
 import re
 import time
@@ -20,10 +33,34 @@ from pathlib import Path
 from ..daemon.config import DaemonConfig
 from ..daemon.identity_inject import _inject_identity, _reclaim_identity
 from ..runtime.models import Runtime
+from ..runtime.registry import (
+    ProviderAdapter,
+    get_adapter,
+)
+from ..runtime.session_locators import SessionLocator
+from ..runtime.streaming import (
+    ClaudeStreamSink,
+    NoopSink,
+    StreamingSink,
+)
 from ..server.services.auth_service import TaskToken
 from .models import Task, TaskResult
 from .stream import StreamReader
 
+log = logging.getLogger(__name__)
+
+
+# ── Legacy text-regex helpers ────────────────────────────────────────
+#
+# Kept as a fallback for providers on the pipe-text path (cursor /
+# copilot / qwen / kimi / opencode / openclaw and any future provider
+# without a streaming implementation). Phase 5 streaming providers
+# (Claude Code) extract session_id / resume-rejection from structured
+# event fields instead — these regexes are not consulted on the
+# streaming path.
+#
+# Marked deprecated so a future change can delete them once the last
+# remaining provider moves off the pipe-text path.
 
 # Phrases observed in Claude Code output when --resume cannot find the session.
 _RESUME_REJECT_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -42,43 +79,33 @@ _SESSION_ID_REGEXES: tuple[re.Pattern[str], ...] = (
 )
 
 # A full UUID — the session id embedded in Codex rollout filenames
-# (``rollout-<ts>-<uuid>.jsonl``).
+# (``rollout-<ts>-<uuid>.jsonl``). Kept for any external importer; the
+# internal Codex disk fallback now goes through
+# :func:`agt.runtime.session_locators.codex_session_locator`.
 _UUID_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
 
 
-def _newest_jsonl_session(projects_root: Path) -> str | None:
-    """Find the most recently modified <uuid>.jsonl under projects_root."""
-    candidates: list[tuple[float, Path]] = []
-    try:
-        for project_dir in projects_root.iterdir():
-            if not project_dir.is_dir():
-                continue
-            for entry in project_dir.iterdir():
-                if entry.suffix != ".jsonl" or not entry.stem:
-                    continue
-                try:
-                    candidates.append((entry.stat().st_mtime, entry))
-                except OSError:
-                    continue
-    except OSError:
-        return None
-    if not candidates:
-        return None
-    candidates.sort(key=lambda pair: pair[0], reverse=True)
-    return candidates[0][1].stem
-
-
 def _detect_resume_rejected(stderr: str, exit_code: int) -> bool:
-    """Return True if the agent explicitly refused the resume attempt."""
+    """Deprecated text-regex resume rejection detector (pipe-text path only).
+
+    Will be removed once the pipe-text path is retired; new code should
+    use :class:`agt.runtime.resume_detectors.ResumeRejectionDetector`.
+    """
     if exit_code == 0:
         return False
     return any(p.search(stderr) for p in _RESUME_REJECT_PATTERNS)
 
 
 def _extract_session_id_from_output(stdout: str) -> str | None:
-    """Try to pull a session id out of the agent's stdout."""
+    """Deprecated text-regex session-id extractor (pipe-text path only).
+
+    Will be removed once the pipe-text path is retired; the streaming
+    path uses the structured ``result.session_id`` field from
+    :class:`agt.runtime.streaming.ClaudeStreamSink` and providers on
+    the pipe-text path fall back to ``_disk_fallback``.
+    """
     for pattern in _SESSION_ID_REGEXES:
         match = pattern.search(stdout)
         if match:
@@ -86,66 +113,71 @@ def _extract_session_id_from_output(stdout: str) -> str | None:
     return None
 
 
-def _extract_session_id_from_claude_projects(work_dir: Path | None) -> str | None:
-    """Fallback: scan Claude Code's project directory for the newest session file.
+# ── Phase 5: provider-agnostic disk fallback ───────────────────────────
 
-    Claude Code stores each session as a ``<uuid>.jsonl`` file inside
-    ``~/.claude/projects/<project-hash>/``. We use the most-recently-modified
-    ``.jsonl`` as the best-effort answer to "which session did we just create".
+
+def _disk_fallback(locator: SessionLocator | None) -> str | None:
+    """Resolve a fresh ``session_id`` from the provider's disk layout.
+
+    Walks ``locator.roots`` recursively, applies ``locator.glob``, and
+    extracts an id via ``locator.id_extractor`` for each match. Returns
+    the most-recently-modified session id, or ``None`` when no locator
+    is registered or no candidates are found.
     """
-    if work_dir is None:
-        return None
-    projects_root = Path.home() / ".claude" / "projects"
-    if not projects_root.is_dir():
-        return None
-    return _newest_jsonl_session(projects_root)
-
-
-def _extract_session_id_from_codex() -> str | None:
-    """Fallback: the session uuid of Codex's newest rollout file.
-
-    Codex stores one ``rollout-<ts>-<uuid>.jsonl`` per session under
-    ``~/.codex/sessions/<YYYY>/<MM>/<DD>/``. When ``codex exec`` doesn't
-    print a parseable session id, the most-recently-modified rollout's
-    uuid is the best-effort answer to "which session did we just create".
-    """
-    sessions_root = Path.home() / ".codex" / "sessions"
-    if not sessions_root.is_dir():
+    if locator is None:
         return None
     candidates: list[tuple[float, str]] = []
-    for path in sessions_root.rglob("*.jsonl"):
-        match = _UUID_RE.search(path.stem)
-        if not match:
+    for root in locator.roots:
+        if not root.exists():
             continue
-        try:
-            candidates.append((path.stat().st_mtime, match.group(0)))
-        except OSError:
-            continue
+        for path in root.rglob(locator.glob):
+            try:
+                sid = locator.id_extractor(path)
+            except Exception:
+                continue
+            if sid is None:
+                continue
+            try:
+                candidates.append((path.stat().st_mtime, sid))
+            except OSError:
+                continue
     if not candidates:
         return None
     candidates.sort(key=lambda pair: pair[0], reverse=True)
     return candidates[0][1]
 
 
-def _extract_session_id(
-    stdout: str,
-    stderr: str,
-    work_dir: Path | None,
-    provider: str | None = None,
-) -> str | None:
-    """Extract a fresh session id from output (stdout+stderr), then disk.
+# ── Phase 5: streaming args dispatch ──────────────────────────────────
 
-    Some CLIs print their session banner on stderr (codex exec does),
-    so both streams are searched. The disk fallback is provider-specific:
-    codex reads ``~/.codex/sessions``, everything else reads Claude
-    Code's ``~/.claude/projects``.
+
+def _stream_args_for(sink: StreamingSink) -> list[str]:
+    """Return the argv additions to enable streaming for ``sink``.
+
+    Looks at the sink's concrete type so the registry stays the single
+    source of truth for "which provider supports what". Unknown sinks
+    get an empty list (the executor falls back to the pipe-text path).
+
+    Note: Claude Code requires ``--verbose`` to honour
+    ``--output-format=stream-json`` under ``-p`` mode; without it the
+    CLI refuses with "When using --print, --output-format=stream-json
+    requires --verbose".
     """
-    from_output = _extract_session_id_from_output(stdout + "\n" + stderr)
-    if from_output:
-        return from_output
-    if provider == "codex":
-        return _extract_session_id_from_codex()
-    return _extract_session_id_from_claude_projects(work_dir)
+    if isinstance(sink, ClaudeStreamSink):
+        # ``--include-partial-messages`` enables Anthropic Messages
+        # streaming events (``content_block_delta`` / ``text_delta``)
+        # so the CLI emits each chunk as it is generated rather than
+        # buffering into one ``assistant`` event at the end. Without
+        # this flag the sink would still work (legacy ``assistant``
+        # full-message events), but the terminal experience would
+        # degrade to "wait for the full message, then dump" — see
+        # phase5-local-streaming-design.md §A.
+        return [
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--include-partial-messages",
+        ]
+    return []
 
 
 class AgentNotFoundError(RuntimeError):
@@ -164,17 +196,18 @@ class TaskExecutor:
     async def execute(self, task: Task, *, interactive: bool = False) -> TaskResult:
         """Run one agent subprocess for ``task``.
 
-        Two modes:
+        Dispatches to one of three private helpers based on the
+        provider's adapter:
 
-        - **Pipe mode** (``interactive=False``, default): stdout/stderr
-          are captured so we can extract the agent's session id and
-          enforce a timeout. Used by the daemon (no parent TTY).
+        - :meth:`_execute_interactive` — when ``interactive=True``
+        - :meth:`_execute_streaming` — when the provider's adapter
+          returns a non-``NoopSink`` (e.g. Claude Code with
+          ``--output-format stream-json``)
+        - :meth:`_execute_pipe_text` — legacy Phase 1 path for providers
+          without a streaming implementation
 
-        - **Interactive mode** (``interactive=True``): the agent inherits
-          the parent's stdio so it sees a real TTY. Some agent CLIs
-          (e.g. ``codex``) refuse to run otherwise. We give up output
-          capture and session-id extraction — the caller can't use
-          ``result.session_id`` for resume.
+        Identity injection (Phase 4 Step 4) wraps the spawn regardless
+        of mode; the injected files are reclaimed in ``finally``.
         """
         binary = self._runtime.agent_entry.path
         if not binary.exists():
@@ -182,7 +215,11 @@ class TaskExecutor:
                 f"Agent binary not found at {binary}; run `agt probe` to re-scan."
             )
 
-        cmd = self._build_command(binary, task)
+        adapter = get_adapter(self._runtime.agent_entry.provider)
+        sink = adapter.stream_sink_factory()
+        stream_args = _stream_args_for(sink)
+        cmd = adapter.command_builder.build(binary, task, stream_args)
+
         work_dir = self._ensure_work_dir(task)
         env = self._build_env(task, work_dir)
 
@@ -198,7 +235,8 @@ class TaskExecutor:
         # which would be unreachable in a reverse-dial setup.
         if task.identity_did:
             _inject_identity(
-                work_dir, task.identity_did,
+                work_dir,
+                task.identity_did,
                 provider=task.provider,
                 identity_md=task.identity_md,
             )
@@ -207,77 +245,11 @@ class TaskExecutor:
         try:
             if interactive:
                 return await self._execute_interactive(task, cmd, work_dir, env, start)
-
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=str(work_dir),
-                env=env,
-            )
-
-            reader = StreamReader(
-                stdout=process.stdout,
-                stderr=process.stderr,
-                # Silence stderr on the live terminal: agent CLIs (e.g. codex)
-                # print their banner + diagnostics to stderr, which would
-                # spam the user's chat. The full stderr is still captured in
-                # ``result.stderr`` for reporting / debugging.
-                on_stderr=lambda _line: None,
-            )
-
-            timeout = self._config.agent_timeout
-            try:
-                stdout, stderr = await asyncio.wait_for(reader.read_all(), timeout=timeout)
-            except asyncio.TimeoutError:
-                process.kill()
-                try:
-                    await process.wait()
-                except ProcessLookupError:
-                    pass
-                duration = time.monotonic() - start
-                return TaskResult(
-                    task_id=task.task_id,
-                    provider=task.provider,
-                    exit_code=-1,
-                    stdout="",
-                    stderr="",
-                    duration=duration,
-                    status="timeout",
+            if not isinstance(sink, NoopSink):
+                return await self._execute_streaming(
+                    task, cmd, work_dir, env, start, sink, adapter
                 )
-
-            await process.wait()
-            duration = time.monotonic() - start
-            exit_code = process.returncode if process.returncode is not None else -1
-
-            # Decide the resume outcome based on what actually happened.
-            if task.resume_session_id is not None:
-                if _detect_resume_rejected(stderr, exit_code):
-                    session_id: str | None = None
-                    resume_rejected = True
-                else:
-                    session_id = task.resume_session_id
-                    resume_rejected = False
-            else:
-                session_id = _extract_session_id(stdout, stderr, work_dir, task.provider)
-                resume_rejected = False
-
-            if exit_code == 0:
-                status = "completed"
-            else:
-                status = "failed"
-
-            return TaskResult(
-                task_id=task.task_id,
-                provider=task.provider,
-                exit_code=exit_code,
-                stdout=stdout,
-                stderr=stderr,
-                duration=duration,
-                status=status,
-                session_id=session_id,
-                resume_rejected=resume_rejected,
-            )
+            return await self._execute_pipe_text(task, cmd, work_dir, env, start)
         finally:
             # Phase 4 Step 4: always reclaim the injected identity
             # files, regardless of exit path (timeout, crash, normal,
@@ -286,6 +258,8 @@ class TaskExecutor:
             # marker block, so it's safe even when ``inject`` didn't run.
             if task.identity_did:
                 _reclaim_identity(work_dir, did=task.identity_did)
+
+    # ── Mode: interactive ───────────────────────────────────────
 
     async def _execute_interactive(
         self,
@@ -342,36 +316,336 @@ class TaskExecutor:
             resume_rejected=False,
         )
 
-    # ── Command construction ────────────────────────────────────
+    # ── Mode: streaming (Phase 5) ────────────────────────────────
 
-    def _build_command(self, binary: Path, task: Task) -> list[str]:
-        """Build the non-interactive command line for the agent CLI.
+    async def _execute_streaming(
+        self,
+        task: Task,
+        cmd: list[str],
+        work_dir: Path,
+        env: dict[str, str],
+        start: float,
+        sink: StreamingSink,
+        adapter: ProviderAdapter,
+    ) -> TaskResult:
+        """Spawn the agent and consume its structured event stream.
 
-        Style is taken from the probed ``AgentEntry.cli_style``:
+        Each line of stdout is parsed as JSON and handed to ``sink``.
+        ``sink.on_text_delta`` prints text fragments to the terminal in
+        real time; ``sink.finalize`` yields the terminal
+        :class:`SinkResult` carrying ``session_id`` and ``is_error``.
+        The executor then:
 
-        - ``"codex"``: ``<bin> exec --skip-git-repo-check [resume <id>
-          --all] <prompt>`` — Codex's non-interactive mode is the ``exec``
-          subcommand with a positional prompt; resume is a nested
-          subcommand. ``--skip-git-repo-check`` is required because our
-          per-task work dirs aren't git repos and codex refuses to run
-          outside one without it. ``--all`` makes the resume search
-          every directory, not just the cwd (codex scopes resume/--last
-          to the cwd by default, unlike Claude Code's project-hash).
-        - ``"claude"`` (default): ``<bin> [--resume <id>] -p <prompt>``
-          — Claude Code and most ``-p``-style CLIs.
+        - falls back to ``_disk_fallback(adapter.session_locator)`` when
+          the sink could not extract a ``session_id`` and we did not
+          request a specific one (so a brand-new session has a fresh
+          pointer for the next ``--resume``).
+        - delegates resume-rejection detection to
+          ``adapter.resume_rejection_detector``, which inspects the
+          structured ``result`` event from the sink rather than stderr
+          text.
+
+        ``TaskResult.stdout`` is the plain-text concatenation the sink
+        collected — the legacy "stdout is plain text" contract is
+        preserved so downstream consumers (``/api/tasks/<id>/status``,
+        ``_echo_task_result``, report_service) see no shape change.
         """
-        style = getattr(self._runtime.agent_entry, "cli_style", "claude") or "claude"
-        if style == "codex":
-            cmd: list[str] = [str(binary), "exec", "--skip-git-repo-check"]
-            if task.resume_session_id:
-                cmd += ["resume", task.resume_session_id, "--all"]
-            cmd += [task.prompt]
-            return cmd
-        cmd = [str(binary)]
-        if task.resume_session_id:
-            cmd += ["--resume", task.resume_session_id]
-        cmd += ["-p", task.prompt]
-        return cmd
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(work_dir),
+            env=env,
+        )
+
+        stdout_task = asyncio.create_task(self._drain_json(process.stdout, sink))
+        stderr_task = asyncio.create_task(self._drain_silent(process.stderr))
+
+        timeout = self._config.agent_timeout
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(stdout_task, stderr_task),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            process.kill()
+            try:
+                await process.wait()
+            except ProcessLookupError:
+                pass
+            duration = time.monotonic() - start
+            return TaskResult(
+                task_id=task.task_id,
+                provider=task.provider,
+                exit_code=-1,
+                stdout="",
+                stderr="",
+                duration=duration,
+                status="timeout",
+            )
+
+        await process.wait()
+        duration = time.monotonic() - start
+        exit_code = process.returncode if process.returncode is not None else -1
+
+        result = sink.finalize()
+        session_id, resume_rejected = self._resolve_streaming_outcome(
+            task=task,
+            result=result,
+            sink=sink,
+            adapter=adapter,
+        )
+
+        return TaskResult(
+            task_id=task.task_id,
+            provider=task.provider,
+            exit_code=exit_code,
+            stdout=result.text,
+            stderr="",
+            duration=duration,
+            status="completed" if exit_code == 0 else "failed",
+            session_id=session_id,
+            resume_rejected=resume_rejected,
+        )
+
+    @staticmethod
+    def _resolve_streaming_outcome(
+        *,
+        task: Task,
+        result,
+        sink: StreamingSink,
+        adapter: ProviderAdapter,
+    ) -> tuple[str | None, bool]:
+        """Resolve final ``session_id`` and ``resume_rejected`` from a sink result.
+
+        Pulled out of :meth:`_execute_streaming` so the dispatch logic in
+        :meth:`execute` stays under the cognitive-complexity cap.
+        """
+        # When resuming we keep the requested sid on success; on rejection
+        # (detector below) we drop it. For a brand-new session we prefer
+        # the sink's structured field, falling back to the provider's
+        # disk layout.
+        if task.resume_session_id is not None and not result.is_error:
+            session_id: str | None = task.resume_session_id
+        else:
+            session_id = result.session_id
+            if not session_id and task.resume_session_id is None:
+                session_id = _disk_fallback(adapter.session_locator)
+
+        # Resume-rejection detector: inspect the structured result event.
+        # We hand it the last "result" event by re-deriving the relevant
+        # fields from the sink. ``ClaudeStreamSink`` exposes ``subtype``
+        # and ``errors``; detectors for other providers can ignore them.
+        raw_event: dict | None = None
+        raw_error: dict | None = None
+        if isinstance(sink, ClaudeStreamSink):
+            raw_event = {
+                "subtype": sink.subtype,
+                "errors": list(sink.errors),
+            }
+        resume_rejected = bool(
+            result.is_error
+            and adapter.resume_rejection_detector.is_resume_rejection(
+                is_error=result.is_error,
+                raw_error=raw_error,
+                raw_event=raw_event,
+            )
+        )
+
+        # When the detector says the resume was rejected, the requested
+        # sid is unusable — clear it so the next claim starts fresh.
+        if resume_rejected:
+            session_id = None
+        return session_id, resume_rejected
+
+    async def _drain_json(self, stream, sink: StreamingSink) -> None:
+        """Read JSON Lines from ``stream`` and feed each event to ``sink``.
+
+        Tolerant by design: malformed JSON lines and exceptions raised
+        by ``sink.consume`` are logged at warning and skipped, so a
+        single bad frame cannot break the stream.
+
+        Uses :meth:`_read_lines` so there is no per-line limit (the
+        default ``StreamReader.readline`` 64 KiB cap is too small for
+        stream-json events that contain a long ``text`` block).
+        """
+        async for raw_line in self._read_lines(stream):
+            try:
+                obj = json.loads(raw_line.decode("utf-8", errors="replace"))
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            try:
+                sink.consume(obj)
+            except Exception as exc:
+                log.warning("sink.consume raised; dropping event: %s", exc)
+
+    async def _read_lines(self, stream):
+        """Yield one line at a time from ``stream`` with no per-line limit.
+
+        Reads fixed-size chunks (64 KiB) and splits on newlines; any
+        incomplete trailing line at EOF is also yielded. Both the
+        streaming and pipe-text paths use this so neither hits the
+        ``StreamReader.readline`` 64 KiB cap.
+        """
+        buf = b""
+        chunk_size = 64 * 1024
+        while True:
+            try:
+                chunk = await stream.read(chunk_size)
+            except ValueError:
+                log.warning("stream.read raised; aborting drain")
+                return
+            if not chunk:
+                if buf.strip():
+                    yield buf
+                return
+            buf += chunk
+            while b"\n" in buf:
+                line_bytes, _, buf = buf.partition(b"\n")
+                if line_bytes.strip():
+                    yield line_bytes
+
+    async def _drain_silent(self, stream) -> None:
+        """Read ``stream`` to EOF and discard its content.
+
+        Agent CLIs (notably codex) print banner / diagnostics on stderr.
+        Surfacing those on the live terminal would interleave them with
+        the streaming text deltas and break the visual rhythm; we
+        silently consume instead. ``TaskResult.stderr`` stays empty for
+        now — extending it is a follow-up.
+        """
+        async for _ in self._read_lines(stream):
+            pass
+
+    async def _drain_silent_lines(self, stream, sink: list[str]) -> None:
+        """Like :meth:`_drain_silent` but collects lines into ``sink``.
+
+        Used by the legacy pipe-text path so ``result.stderr`` is
+        populated for reporting / debugging.
+        """
+        async for line in self._read_lines(stream):
+            sink.append(line.decode("utf-8", errors="replace"))
+
+    async def _read_to_string(self, stream, on_line) -> str:
+        """Read ``stream`` to EOF, calling ``on_line(line_str)`` per line.
+
+        Uses :meth:`_read_lines` so lines longer than 64 KiB are
+        handled correctly. Returns the concatenated string.
+        """
+        chunks: list[str] = []
+        async for raw in self._read_lines(stream):
+            text = raw.decode("utf-8", errors="replace")
+            chunks.append(text)
+            on_line(text)
+        return "".join(chunks)
+
+    # ── Mode: pipe text (legacy Phase 1, unchanged behaviour) ────
+
+    async def _execute_pipe_text(
+        self,
+        task: Task,
+        cmd: list[str],
+        work_dir: Path,
+        env: dict[str, str],
+        start: float,
+    ) -> TaskResult:
+        """Legacy Phase 1 execution path (still used by non-streaming providers).
+
+        Reads stdout/stderr via the chunked :meth :meth:`_read_lines`
+        helper (no per-line 64 KiB cap like the default
+        ``StreamReader.readline``), extracts the session id with text
+        regex (deprecated — kept as a fallback for providers on this
+        path) plus the adapter's ``session_locator`` for a disk-side
+        fallback, and detects resume rejection via stderr regex
+        (deprecated). Behaviour is intentionally close to the
+        pre-Phase-5 implementation so providers without streaming keep
+        working without regression.
+        """
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(work_dir),
+            env=env,
+        )
+
+        # Print stdout live (the agent's answer streams to the terminal
+        # line-by-line) and silence stderr on the live terminal: agent
+        # CLIs (notably the non-streaming Codex path) print their banner
+        # + diagnostics on stderr, which would spam the user's chat.
+        # Both streams are still captured — stdout for ``result.stdout``
+        # (contract A), stderr for reporting / debugging. This mirrors
+        # the pre-Phase-5 ``StreamReader`` behaviour; the silent
+        # ``_read_lines`` collector dropped the live print and mangled
+        # newlines (see phase5-local-streaming-design.md §4.6.2).
+        reader = StreamReader(
+            stdout=process.stdout,
+            stderr=process.stderr,
+            on_stderr=lambda _line: None,
+        )
+
+        timeout = self._config.agent_timeout
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                reader.read_all(), timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            process.kill()
+            try:
+                await process.wait()
+            except ProcessLookupError:
+                pass
+            duration = time.monotonic() - start
+            return TaskResult(
+                task_id=task.task_id,
+                provider=task.provider,
+                exit_code=-1,
+                stdout="",
+                stderr="",
+                duration=duration,
+                status="timeout",
+            )
+
+        await process.wait()
+        duration = time.monotonic() - start
+        exit_code = process.returncode if process.returncode is not None else -1
+
+        # Decide the resume outcome based on what actually happened.
+        if task.resume_session_id is not None:
+            if _detect_resume_rejected(stderr, exit_code):
+                session_id: str | None = None
+                resume_rejected = True
+            else:
+                session_id = task.resume_session_id
+                resume_rejected = False
+        else:
+            # Text-regex first (legacy), then the adapter's disk locator.
+            adapter = get_adapter(task.provider)
+            session_id = _extract_session_id_from_output(stdout + "\n" + stderr)
+            if not session_id:
+                session_id = _disk_fallback(adapter.session_locator)
+            resume_rejected = False
+
+        if exit_code == 0:
+            status = "completed"
+        else:
+            status = "failed"
+
+        return TaskResult(
+            task_id=task.task_id,
+            provider=task.provider,
+            exit_code=exit_code,
+            stdout=stdout,
+            stderr=stderr,
+            duration=duration,
+            status=status,
+            session_id=session_id,
+            resume_rejected=resume_rejected,
+        )
+
+    # ── Env / workdir preparation ───────────────────────────────
 
     def _build_env(self, task: Task, work_dir: Path | None = None) -> dict[str, str]:
         env = os.environ.copy()

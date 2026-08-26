@@ -75,14 +75,28 @@ def _fake_result(task_id: str, provider: str, *, session_id: str | None) -> Task
 class _FakeProc:
     """Stands in for ``asyncio.subprocess.Process`` in mock tests.
 
-    Pipe-mode tests also need ``stdout`` and ``stderr`` because the
-    executor passes them to ``StreamReader`` even though we never read.
+    The streaming executor (Phase 5) and the legacy pipe-text executor
+    both pass ``stdout`` / ``stderr`` to a reader that calls
+    ``readline()``. To keep both paths happy without leaking half-read
+    state across tests, we attach empty :class:`asyncio.StreamReader`
+    instances inside a running event loop; tests that need different
+    stdin/stdout/stderr behaviour just pass different kwargs (e.g.
+    interactive mode passes ``stdout=None`` to inherit the parent's
+    TTY — and that's a kwarg assertion, not a process attribute check).
     """
 
     def __init__(self, exit_code: int = 0) -> None:
         self.returncode = exit_code
-        self.stdout = None
-        self.stderr = None
+
+    def attach(self) -> None:
+        """Build StreamReader objects inside a running event loop."""
+        from asyncio import StreamReader
+
+        self.stdout = StreamReader()
+        self.stderr = StreamReader()
+        # No data → readline() returns b"" and the drain loops exit.
+        self.stdout.feed_eof()
+        self.stderr.feed_eof()
 
     async def wait(self) -> int:
         return self.returncode
@@ -136,7 +150,9 @@ def test_task_executor_pipe_mode_captures_output(
 
     async def fake_exec(*cmd, **kwargs):
         captured.update(kwargs)
-        return _FakeProc()
+        proc = _FakeProc()
+        proc.attach()  # make stdout/stderr readable for the streaming path
+        return proc
 
     monkeypatch.setattr(_asyncio, "create_subprocess_exec", fake_exec)
 
@@ -146,7 +162,8 @@ def test_task_executor_pipe_mode_captures_output(
 
     asyncio.run(_run())
 
-    # In pipe mode stdout/stderr must be PIPE for output capture.
+    # In pipe mode stdout/stderr must be PIPE for output capture (this
+    # holds for both the streaming and legacy pipe-text paths).
     assert captured.get("stdout") is _asyncio.subprocess.PIPE
     assert captured.get("stderr") is _asyncio.subprocess.PIPE
 

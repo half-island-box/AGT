@@ -76,6 +76,42 @@ class TestRun:
             assert "identity_did" not in calls["submit"][-1]
 
 
+class TestIdentityNormalization:
+    """``--identity`` accepts a full DID or a bare slug; anything else
+    (e.g. the ``id:agt:`` typo) is rejected cleanly before it can reach
+    the server as a cryptic ``identity_not_found`` 404."""
+
+    def test_run_bare_slug_normalized(self) -> None:
+        calls: dict = {}
+        with patch("agt.cli.main.ServerClient", _stub_client(calls)), \
+             patch("agt.cli.main._pick_provider", return_value="claude"):
+            result = _invoke([
+                "run", "--prompt", "hi", "--identity", "code-reviewer",
+                "--daemon", "d1",
+            ])
+        assert result.exit_code in (0, 2), result.output
+        assert calls.get("submit")
+        assert calls["submit"][-1]["identity_did"] == "did:agt:code-reviewer"
+
+    def test_run_typo_scheme_rejected(self) -> None:
+        calls: dict = {}
+        with patch("agt.cli.main.ServerClient", _stub_client(calls)):
+            result = _invoke([
+                "run", "--prompt", "hi", "--identity", "id:agt:code-reviewer",
+                "--daemon", "d1",
+            ])
+        assert result.exit_code == 2
+        assert "unknown scheme 'id:'" in result.output
+        assert not calls.get("submit")  # never reached the server
+
+    def test_chat_typo_scheme_rejected(self) -> None:
+        result = _invoke([
+            "chat", "--identity", "id:agt:code-reviewer", "--daemon", "d1",
+        ])
+        assert result.exit_code == 2
+        assert "unknown scheme 'id:'" in result.output
+
+
 class TestChat:
     def test_chat_identity_remote_forwards_each_turn(self) -> None:
         calls: dict = {}

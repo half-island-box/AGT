@@ -28,6 +28,7 @@ from ..comm import ServerClient
 from ..daemon.daemon import Daemon as DaemonController
 from ..runtime.models import AgentEntry
 from ..server.services.auth_service import TaskToken
+from ..server.services.identity_service import normalize_identity_did
 from ..task.session import CwdSessionStore
 from ..agent_history import load_history
 
@@ -37,6 +38,22 @@ from ..agent_history import load_history
 
 class CLIError(RuntimeError):
     """Raised by CLI helpers to surface user-visible errors with sys.exit."""
+
+
+def _coerce_identity_did(identity_did: str | None) -> str | None:
+    """Normalize ``--identity``; exit cleanly on an invalid value.
+
+    Keeps a typo'd value (e.g. ``id:agt:...``) from reaching the server,
+    where it would surface as a cryptic ``identity_not_found`` 404. Accepts
+    a full ``did:agt:<slug>`` or a bare slug; anything else is a usage error.
+    """
+    if identity_did is None:
+        return None
+    try:
+        return normalize_identity_did(identity_did)
+    except ValueError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(2)
 
 
 # System-directory blacklist for ``_validate_cwd``. A cwd inside one of these
@@ -464,6 +481,7 @@ def run(
             err=True,
         )
         sys.exit(2)
+    identity_did = _coerce_identity_did(identity_did)
     """Spawn the agent once with the given prompt and stream its output.
 
     With ``--daemon`` the task is submitted to the Server, pinned to that
@@ -536,6 +554,13 @@ def _chat_turn_local(
         )
 
     result = asyncio.run(_run())
+    # Streaming (Phase 5): each text block is printed with
+    # ``end=""``, so the terminal cursor may sit mid-line when the
+    # turn ends. Make sure the next ``agt> `` prompt lands on a fresh
+    # line — ``result.stdout`` mirrors what we printed, so we use it
+    # to decide whether a trailing newline is needed.
+    if result.stdout and not result.stdout.endswith("\n"):
+        click.echo()
     if result.resume_rejected:
         click.echo("⚠️  Resume was rejected; this turn ran on a fresh session.")
     if result.status != "completed" and result.stderr:
@@ -718,6 +743,7 @@ def chat(
             err=True,
         )
         sys.exit(2)
+    identity_did = _coerce_identity_did(identity_did)
     """Interactive chat mode with session continuity.
 
     With ``--daemon`` each turn is submitted to the Server, pinned to that

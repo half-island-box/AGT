@@ -62,6 +62,54 @@ def _dir_name(did: str) -> str:
     return f"{slug}-{hash_suffix}"
 
 
+def normalize_identity_did(value: str) -> str:
+    """Normalize a user-supplied ``--identity`` value to a full DID.
+
+    The canonical DID is ``did:agt:<slug>`` (namespace isolation was removed
+    in 2026-08). Users often pass a bare slug, or mis-type the scheme (e.g.
+    ``id:agt:code-reviewer``). Both are caught here so they fail with a clear
+    message at the CLI instead of a cryptic ``identity_not_found`` 404 from
+    the server.
+
+    Accepts:
+      - an already-full DID ``did:agt:<slug>`` (returned as-is, stripped);
+      - a bare slug ``code-reviewer`` (prefixed to ``did:agt:code-reviewer``).
+
+    Raises:
+        ValueError: empty input, a non-``did:agt:`` scheme, or an invalid slug.
+    """
+    value = (value or "").strip()
+    if not value:
+        raise ValueError("identity must not be empty")
+
+    prefix = "did:agt:"
+    if value.startswith(prefix):
+        slug = value[len(prefix):]
+        if not _SLUG_PATTERN.match(slug):
+            raise ValueError(
+                f"invalid identity '{value}': the part after 'did:agt:' must "
+                "be a lowercase alphanumeric slug with hyphens"
+            )
+        return value
+
+    # A colon that isn't the did:agt: scheme is almost always a typo
+    # (e.g. 'id:agt:...'); reject it rather than let it 404 on the server.
+    if ":" in value:
+        scheme = value.split(":", 1)[0]
+        raise ValueError(
+            f"invalid identity '{value}': unknown scheme '{scheme}:' — "
+            "expected 'did:agt:<slug>' or a bare slug"
+        )
+
+    # No scheme → treat as a bare slug and expand to the full DID.
+    if not _SLUG_PATTERN.match(value):
+        raise ValueError(
+            f"invalid identity slug '{value}': must be 1-64 chars, lowercase "
+            "alphanumeric with hyphens, no leading/trailing hyphens"
+        )
+    return f"{prefix}{value}"
+
+
 def _render_agent_md(identity: IdentityModel | dict[str, Any]) -> str:
     """Render identity metadata into AGENTS.md markdown format.
 
@@ -514,6 +562,7 @@ __all__ = [
     "create_identity",
     "get_identity",
     "list_identities",
+    "normalize_identity_did",
     "update_identity",
     "deprecate_identity",
     "revoke_identity",
