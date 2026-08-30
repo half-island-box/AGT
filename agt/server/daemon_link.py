@@ -68,6 +68,31 @@ class DaemonLink:
     def connected(self) -> bool:
         return self._link is not None and not self._link.closed
 
+    async def notify_available(self, provider: str | None = None) -> bool:
+        """Best-effort hint to the remote daemon that task(s) may be available.
+
+        This is a latency hint, not a task delivery. The daemon is still
+        expected to claim tasks through the normal ``tasks.claim`` path.
+        Returns ``True`` if the notify frame was sent and acknowledged,
+        ``False`` if the link is down or the daemon doesn't support the
+        notify RPC.
+        """
+        link = self._link
+        if link is None or link.closed or not link.supports_rpc_v1:
+            return False
+        try:
+            await link.call(
+                "tasks.available",
+                {"provider": provider},
+                timeout_ms=5000,
+            )
+            return True
+        except Exception:
+            log.debug(
+                "notify_available failed for %s", self.daemon_id, exc_info=True,
+            )
+            return False
+
     async def run(self, shutdown: asyncio.Event) -> None:
         """Dial + read-loop + reconnect. Runs until ``shutdown`` is set.
 

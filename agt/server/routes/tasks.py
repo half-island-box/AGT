@@ -6,6 +6,7 @@ import asyncio
 import json
 import uuid
 from datetime import datetime, timezone
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
@@ -28,7 +29,10 @@ from ..schemas import (
     SubmitTaskResponse,
     TaskStatusResponse,
 )
-from ..services.claim_service import claim_tasks_for_daemon
+from ..services.claim_service import (
+    claim_tasks_for_daemon,
+    notify_task_available,
+)
 from ..services.report_service import (
     record_task_progress_for_daemon,
     record_task_result_for_daemon,
@@ -74,6 +78,7 @@ def _new_task_id() -> str:
 @router.post("/submit", response_model=SubmitTaskResponse, status_code=status.HTTP_201_CREATED)
 async def submit_task(
     payload: SubmitTaskRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> SubmitTaskResponse:
     """Insert a task in pending state.
@@ -165,6 +170,7 @@ async def submit_task(
         existing.identity_did = payload.identity_did
         existing.updated_at = now
         await db.commit()
+        await _notify_daemons(request, effective_target, effective_provider)
         return SubmitTaskResponse(task_id=task_id, status="pending")
 
     db.add(
@@ -182,7 +188,43 @@ async def submit_task(
         )
     )
     await db.commit()
+    await _notify_daemons(request, effective_target, effective_provider)
     return SubmitTaskResponse(task_id=task_id, status="pending")
+
+
+async def _notify_daemons(
+    request: Request,
+    target_daemon_id: str | None,
+    provider: str,
+) -> None:
+    """Best-effort notify daemons that a task may be available.
+
+    Two mechanisms are used:
+
+    1. Set the module-level ``claim_service`` event so any HTTP-long-polling
+       local daemon wakes immediately.
+    2. Send ``tasks.available`` over reverse-dial WebSocket links for remote
+       daemons (targeted or all online for free tasks).
+
+    Both are fire-and-forget: failures are swallowed because the normal
+    claim poll will pick up the task anyway.
+    """
+    notify_task_available()
+
+    daemon_links: dict[str, Any] = getattr(request.app.state, "daemon_links", {})
+    if target_daemon_id:
+        link = daemon_links.get(target_daemon_id)
+        if link is not None:
+            try:
+                await link.notify_available(provider)
+            except Exception:
+                pass
+        return
+    for link in daemon_links.values():
+        try:
+            await link.notify_available(provider)
+        except Exception:
+            pass
 
 
 def _server_work_dir(payload: SubmitTaskRequest) -> str | None:

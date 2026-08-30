@@ -61,6 +61,10 @@ class DaemonWsServer:
         self.current_link: WsRpcLink | None = None
         self._link_lock = asyncio.Lock()
         self._on_connect = on_connect
+        # Woken by an inbound ``tasks.available`` notify from the Server.
+        # The claim loop sleeps on this event with a timeout so idle
+        # polling is interrupted as soon as new work arrives.
+        self.claim_wakeup = asyncio.Event()
 
     async def start(self) -> None:
         """Bind the WS server on ``0.0.0.0:<port>`` and start serving."""
@@ -148,13 +152,27 @@ class DaemonWsServer:
             except Exception:
                 pass
 
-    async def _handle_inbound_request(self, method: str, body: dict) -> dict:
-        """Daemon-side inbound RPC handler. Currently returns unknown_method.
+    def _handle_inbound_request(self, method: str, body: dict) -> dict:
+        """Daemon-side inbound RPC handler.
 
-        Step 3.3 leaves the daemon as the requester only; the server
-        responds. Future ``tasks.assign`` (server-push) would live here.
+        Handles ``tasks.available`` — a latency hint from the Server that
+        task(s) may be claimable. Wakes the claim loop so it immediately
+        polls instead of waiting out the idle interval. Other methods are
+        still unsupported.
         """
+        if method == "tasks.available":
+            self.wake_claim_loop()
+            return {"ok": True}
         raise ValueError({"type": "unknown_method", "message": method})
+
+    def wake_claim_loop(self) -> None:
+        """Wake the daemon's claim loop immediately.
+
+        Safe to call from any thread/task; if the loop is already awake
+        the event remains set, which causes the next sleep to return
+        immediately.
+        """
+        self.claim_wakeup.set()
 
     def _require_link(self) -> WsRpcLink:
         """Return ``current_link`` or raise ``WSRPCUnavailable`` (no connection)."""

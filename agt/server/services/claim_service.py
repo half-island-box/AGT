@@ -22,6 +22,26 @@ from .identity_service import _render_agent_md, get_identity
 
 log = logging.getLogger(__name__)
 
+# Module-level event used to wake up long-polling HTTP claim requests as
+# soon as a new task is submitted. Best-effort: if the event fires
+# spuriously, claimers simply re-query the DB and go back to sleep.
+_task_available_event: asyncio.Event | None = None
+
+
+def get_task_available_event() -> asyncio.Event:
+    """Return the module-level task-available event, creating it lazily."""
+    global _task_available_event
+    if _task_available_event is None:
+        _task_available_event = asyncio.Event()
+    return _task_available_event
+
+
+def notify_task_available() -> None:
+    """Wake any HTTP claim requests currently long-polling for tasks."""
+    event = _task_available_event
+    if event is not None:
+        event.set()
+
 
 async def claim_tasks_for_daemon(
     db: AsyncSession,
@@ -54,6 +74,7 @@ async def claim_tasks_for_daemon(
     """
     deadline = time.monotonic() + timeout_seconds
     poll_interval = 0.5
+    event = get_task_available_event()
 
     # Step 3.4: explicit "I have nothing" short-circuits the poll. The
     # daemon declared no capabilities, so we honor that immediately
@@ -76,7 +97,18 @@ async def claim_tasks_for_daemon(
         if time.monotonic() >= deadline:
             return []
 
-        await asyncio.sleep(poll_interval)
+        # Sleep until the next poll, but wake immediately when a task is
+        # submitted via ``notify_task_available``.
+        try:
+            await asyncio.wait_for(event.wait(), timeout=poll_interval)
+        except asyncio.TimeoutError:
+            pass
+        else:
+            # Woken by a task submission. Clear the event so future
+            # claimers block again; concurrent claimers all race to claim,
+            # which is harmless because ``_claim_candidate`` is atomic.
+            if event.is_set():
+                event.clear()
         await db.rollback()
 
 

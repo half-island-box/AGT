@@ -126,6 +126,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         # background tasks; failure of one daemon link doesn't affect
         # others or the HTTP API.
         shutdown_event = asyncio.Event()
+        daemon_links: dict[str, DaemonLink] = {}
         daemon_link_tasks: list[asyncio.Task] = []
         for target in cfg.daemons:
             link = DaemonLink(
@@ -135,9 +136,11 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                 session_factory=session_factory,
                 name=target.name,
             )
+            daemon_links[target.daemon_id] = link
             daemon_link_tasks.append(
                 asyncio.create_task(link.run(shutdown_event), name=f"daemon-link:{target.daemon_id}")
             )
+        app.state.daemon_links = daemon_links
         if cfg.daemons:
             log.info(
                 "Reverse-dial pool: %d daemon link(s) → %s",

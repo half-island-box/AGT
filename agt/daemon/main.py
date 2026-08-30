@@ -162,6 +162,32 @@ def _ensure_local_daemons_entry(ws_port: int) -> bool:
     return True
 
 
+async def _sleep_or_wake(
+    ws_server: DaemonWsServer | None,
+    timeout: float,
+) -> None:
+    """Sleep for ``timeout`` seconds, waking immediately on notify.
+
+    HTTP-only daemons (``ws_server`` is ``None``) fall back to plain sleep.
+    Reverse-dial daemons wait on ``ws_server.claim_wakeup`` so inbound
+    ``tasks.available`` frames interrupt idle polling.
+    """
+    if ws_server is None:
+        await asyncio.sleep(timeout)
+        return
+    event = ws_server.claim_wakeup
+    if event.is_set():
+        # A notify arrived while we were busy; consume it and poll now.
+        event.clear()
+        return
+    try:
+        await asyncio.wait_for(event.wait(), timeout=timeout)
+    except asyncio.TimeoutError:
+        pass
+    else:
+        event.clear()
+
+
 async def _claim_loop(
     client: ServerClient,
     daemon: Daemon,
@@ -193,7 +219,7 @@ async def _claim_loop(
 
     while not shutdown.is_set():
         if semaphore.locked():
-            await asyncio.sleep(CLAIM_INTERVAL)
+            await _sleep_or_wake(ws_server, CLAIM_INTERVAL)
             continue
         rids = list(daemon.runtime_providers())
 
@@ -201,7 +227,7 @@ async def _claim_loop(
         # Reverse-dial mode without a link: HTTP fallback is futile, just wait.
         if ws_source is None and ws_server is not None:
             idle_log.tick_no_link()
-            await asyncio.sleep(CLAIM_INTERVAL)
+            await _sleep_or_wake(ws_server, CLAIM_INTERVAL)
             continue
         idle_log.tick_with_link(ws_source is not None)
 
@@ -209,7 +235,7 @@ async def _claim_loop(
             tasks = await _do_claim(client, ws_source, state, rids)
         except Exception as exc:  # network blip etc.
             log.warning("claim failed: %s", exc)
-            await asyncio.sleep(CLAIM_INTERVAL)
+            await _sleep_or_wake(ws_server, CLAIM_INTERVAL)
             continue
 
         for task_payload in tasks:
@@ -223,7 +249,7 @@ async def _claim_loop(
             spawned.add(task)
             task.add_done_callback(spawned.discard)
         if not tasks:
-            await asyncio.sleep(CLAIM_INTERVAL)
+            await _sleep_or_wake(ws_server, CLAIM_INTERVAL)
 
 
 class _IdleLinkLog:
