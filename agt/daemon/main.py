@@ -26,7 +26,12 @@ from ..server.services.auth_service import TaskToken
 from .config import DaemonConfig
 from .daemon import Daemon
 from .local_server import LocalResourceServer
-from .ws_claim import ClaimStateMachine, claim_tasks_ws_first, report_task_ws_first
+from .ws_claim import (
+    ClaimStateMachine,
+    claim_tasks_ws_first,
+    report_task_progress_ws_first,
+    report_task_ws_first,
+)
 from .ws_server import DaemonWsServer
 
 log = logging.getLogger("agt.daemon")
@@ -314,6 +319,33 @@ async def _execute_one(
         ws_source = (
             _resolve_ws_source(ws_server) if ws_server is not None else None
         )
+
+        # Phase 5 remote streaming: report incremental stdout prefixes to
+        # the Server while the agent runs. Re-resolves the WS source on
+        # every sample (the link may have rotated mid-execution); failures
+        # are swallowed inside ``report_task_progress_ws_first`` and the
+        # executor sampler, so progress can never break the terminal
+        # report path.
+        async def _progress_cb(stdout_prefix: str) -> None:
+            cur_ws = (
+                _resolve_ws_source(ws_server) if ws_server is not None else None
+            )
+            if claim_state is not None:
+                await report_task_progress_ws_first(
+                    wsrpc=cur_ws,
+                    http_client=client,
+                    state=claim_state,
+                    task_id=task_id,
+                    stdout_prefix=stdout_prefix,
+                )
+            else:
+                try:
+                    await client.report_progress(
+                        task_id=task_id, stdout_prefix=stdout_prefix,
+                    )
+                except Exception:
+                    pass
+
         try:
             result = await daemon.run(
                 provider=task_payload["provider"],
@@ -327,6 +359,7 @@ async def _execute_one(
                 # claim payload. The daemon writes it directly to
                 # ``IDENTITY.md`` without fetching from the Server.
                 identity_md=task_payload.get("identity_md"),
+                progress_cb=_progress_cb,
             )
         except Exception as exc:
             log.exception("task %s execution failed", task_id)

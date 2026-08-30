@@ -214,4 +214,61 @@ async def report_task_ws_first(
         return False
 
 
-__all__ = ["ClaimStateMachine", "claim_tasks_ws_first", "report_task_ws_first"]
+async def report_task_progress_ws_first(
+    *,
+    wsrpc: "WsRpcLink | None",
+    http_client: "ServerClient",
+    state: ClaimStateMachine,
+    task_id: str,
+    stdout_prefix: str,
+) -> bool:
+    """Report an incremental stdout prefix via WS first; HTTP fallback.
+
+    Mirrors :func:`report_task_ws_first` but is deliberately fire-and-forget
+    in semantics, because progress is best-effort by design:
+
+    1. **Never touches the safety window** — on ``WSRPCUncertain`` we just
+       drop this sample (the next sample, ``flush_interval`` later,
+       supersedes it). Marking the window here would stall the *claim and
+       terminal-report* paths, which is exactly the wrong trade: a lost
+       progress frame is harmless, a lost report is not.
+    2. **RPCRejected is swallowed** — a 404/403 mid-run means the server
+       has already moved past this task (deleted / re-claimed); retrying
+       via HTTP is pointless.
+
+    Returns True if a path recorded the prefix (best-effort); the caller
+    (executor sampler) ignores the result entirely.
+    """
+    body = {"task_id": task_id, "stdout_prefix": stdout_prefix}
+
+    if wsrpc is not None and wsrpc.supports_rpc_v1 and not state.blocked:
+        try:
+            await wsrpc.call("tasks.progress", body, timeout_ms=5000)
+            return True
+        except WSRPCUnavailable:
+            # Frame never left — HTTP fallback is safe.
+            pass
+        except WSRPCUncertain:
+            # Outcome unknown; do NOT mark the window (best-effort). Drop
+            # the sample — the next one supersedes it.
+            return False
+        except RPCRejected:
+            # Permanent rejection; retrying over HTTP is futile.
+            return False
+
+    try:
+        await http_client.report_progress(
+            task_id=task_id, stdout_prefix=stdout_prefix,
+        )
+        return True
+    except Exception as exc:
+        log.debug("HTTP progress failed for task %s: %s", task_id, exc)
+        return False
+
+
+__all__ = [
+    "ClaimStateMachine",
+    "claim_tasks_ws_first",
+    "report_task_ws_first",
+    "report_task_progress_ws_first",
+]

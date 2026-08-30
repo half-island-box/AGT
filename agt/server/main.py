@@ -83,8 +83,6 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         # PRAGMA WAL once at startup; aiosqlite is per-connection, so applying
         # it here is informational. Real WAL behavior is enforced at the
         # filesystem level when SQLite first opens the database.
-        async with session_scope(session_factory) as db:
-            await migrate_sessions_json(db, cfg.sessions_json_path)
         # Schema check: ensure tables exist (Alembic may not have been run),
         # then apply any column migrations for pre-existing DB files.
         async with engine.begin() as conn:
@@ -92,6 +90,11 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             await conn.run_sync(ensure_schema)
         async with engine.begin() as conn:
             await conn.run_sync(migrate_identities_and_sessions, Path(cfg.db_path).parent)
+        # One-shot Phase 1 sessions.json migration. Runs AFTER the schema
+        # migrations so the sessions table already carries the Phase 4
+        # (task_id, identity_did, provider) shape the ORM model expects.
+        async with session_scope(session_factory) as db:
+            await migrate_sessions_json(db, cfg.sessions_json_path)
         # Startup sweep: drop runtime rows whose ``last_seen`` is older than
         # the liveness TTL. These are remnants from daemons that crashed
         # without deregistering, or whose machine / id changed — without

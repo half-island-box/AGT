@@ -195,7 +195,7 @@ def test_daemon_run_threads_interactive_to_executor(
     session_id was captured in interactive mode)."""
     captured: dict = {}
 
-    async def fake_execute(self, task, *, interactive=False):
+    async def fake_execute(self, task, *, interactive=False, progress_cb=None):
         captured["interactive"] = interactive
         return _fake_result(task.task_id, task.provider, session_id=None)
 
@@ -225,7 +225,7 @@ def test_daemon_run_pipe_mode_writes_session(
     and writes it to SessionStore — preserves existing behavior."""
     captured: dict = {}
 
-    async def fake_execute(self, task, *, interactive=False):
+    async def fake_execute(self, task, *, interactive=False, progress_cb=None):
         captured["interactive"] = interactive
         return _fake_result(task.task_id, task.provider, session_id="s-xyz")
 
@@ -254,7 +254,7 @@ def test_bare_chat_does_not_create_tasks_subdir(
     agt_meta_dir=None) must NOT create ``<agent_cwd>/.agt/tasks/<id>/``.
     That subdirectory was always empty and just accumulated over time.
     """
-    async def fake_execute(self, task, *, interactive=False):
+    async def fake_execute(self, task, *, interactive=False, progress_cb=None):
         return _fake_result(task.task_id, task.provider, session_id=None)
 
     monkeypatch.setattr(
@@ -288,7 +288,7 @@ def test_explicit_work_dir_still_creates_meta_dir(
     create their per-task meta dirs as the user explicitly asked."""
     captured: dict = {}
 
-    async def fake_execute(self, task, *, interactive=False):
+    async def fake_execute(self, task, *, interactive=False, progress_cb=None):
         captured["work_dir"] = task.work_dir
         return _fake_result(task.task_id, task.provider, session_id=None)
 
@@ -331,7 +331,7 @@ def test_legacy_fallback_when_both_cwds_absent(
     (e.g. ``~/.agt/workspaces/<provider>/<id>/``)."""
     captured: dict = {}
 
-    async def fake_execute(self, task, *, interactive=False):
+    async def fake_execute(self, task, *, interactive=False, progress_cb=None):
         captured["work_dir"] = task.work_dir
         captured["agent_cwd"] = task.agent_cwd
         return _fake_result(task.task_id, task.provider, session_id=None)
@@ -451,7 +451,7 @@ def test_daemon_run_with_identity_md_writes_injected_md(
 
     captured: dict = {}
 
-    async def fake_execute(self, task, *, interactive=False):
+    async def fake_execute(self, task, *, interactive=False, progress_cb=None):
         captured["identity_did"] = task.identity_did
         captured["identity_md"] = task.identity_md
         # Simulate the executor's inject step so we can verify IDENTITY.md.
@@ -510,7 +510,7 @@ def test_daemon_run_without_identity_md_falls_back_to_file(
     agent_cwd = tmp_path / "project"
     agent_cwd.mkdir()
 
-    async def fake_execute(self, task, *, interactive=False):
+    async def fake_execute(self, task, *, interactive=False, progress_cb=None):
         from agt.daemon.identity_inject import _inject_identity
         _inject_identity(
             task.agent_cwd or task.work_dir or Path.cwd(),
@@ -550,7 +550,7 @@ def test_daemon_run_skips_inject_when_no_identity(
 
     captured: dict = {}
 
-    async def fake_execute(self, task, *, interactive=False):
+    async def fake_execute(self, task, *, interactive=False, progress_cb=None):
         captured["identity_did"] = task.identity_did
         captured["identity_md"] = task.identity_md
         return _fake_result(task.task_id, task.provider, session_id=None)

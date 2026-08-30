@@ -70,6 +70,10 @@ async def migrate_sessions_json(
                 provider=str(provider),
                 session_id=str(session_id),
                 created_at=created_at_val,
+                # Phase 4: legacy JSON has no identity — the empty-string
+                # sentinel marks these as identity-less sessions.
+                identity_did="",
+                updated_at=created_at_val,
             )
         )
         migrated += 1

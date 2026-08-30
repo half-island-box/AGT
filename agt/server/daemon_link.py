@@ -30,7 +30,10 @@ from ..comm.wsrpc_link import WsRpcLink
 from .database import session_scope
 from .services.auth_service import TaskToken
 from .services.claim_service import claim_tasks_for_daemon
-from .services.report_service import record_task_result_for_daemon
+from .services.report_service import (
+    record_task_progress_for_daemon,
+    record_task_result_for_daemon,
+)
 from .services.runtime_service import upsert_daemon_runtimes
 
 log = logging.getLogger("agt.server.daemon_link")
@@ -156,6 +159,8 @@ class DaemonLink:
             return await self._handle_runtimes_register(body)
         if method == "tasks.report":
             return await self._handle_tasks_report(body)
+        if method == "tasks.progress":
+            return await self._handle_tasks_progress(body)
         raise ValueError({"type": "unknown_method", "message": method})
 
     async def _handle_claim(self, body: dict) -> dict:
@@ -248,6 +253,42 @@ class DaemonLink:
                 raise RPCRejected(403, payload) from None
             # Unknown ValueError shape — let wsrpc_link turn it into
             # a generic validation_error response.
+            raise
+
+    async def _handle_tasks_progress(self, body: dict) -> dict:
+        """Record an incremental stdout prefix over the reverse-dial link.
+
+        Reverse-dial counterpart to ``POST /api/tasks/{id}/progress``.
+        ``daemon_id`` comes from the configured target, never the body —
+        a misbehaving daemon can't post progress for another daemon's task.
+        Business rejections surface as ``RPCRejected(404|403)`` so the
+        daemon can tell permanent failure from a transport issue, exactly
+        like ``tasks.report``.
+        """
+        required = ("task_id", "stdout_prefix")
+        for field_name in required:
+            if field_name not in body:
+                raise ValueError({
+                    "type": "validation_error",
+                    "message": f"missing field: {field_name}",
+                })
+        try:
+            async with session_scope(self._session_factory) as db:
+                return await record_task_progress_for_daemon(
+                    db,
+                    daemon_id=self.daemon_id,
+                    task_id=body["task_id"],
+                    stdout_prefix=str(body["stdout_prefix"]),
+                )
+        except ValueError as exc:
+            payload = (
+                exc.args[0] if exc.args and isinstance(exc.args[0], dict) else {}
+            )
+            err_type = payload.get("type")
+            if err_type == "task_not_found":
+                raise RPCRejected(404, payload) from None
+            if err_type == "task_not_owned":
+                raise RPCRejected(403, payload) from None
             raise
 
 

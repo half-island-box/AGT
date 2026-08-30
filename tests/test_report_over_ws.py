@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import socket
 from datetime import datetime, timezone
+from pathlib import Path
 
 from sqlalchemy import delete, select
 from starlette.testclient import TestClient
@@ -35,7 +36,7 @@ from agt.comm.wsrpc_link import WsRpcLink
 from agt.server.config import ServerConfig
 from agt.server.database import make_engine, make_session_factory, session_scope
 from agt.server.main import create_app
-from agt.server.migrate_schema import ensure_schema
+from agt.server.migrate_schema import ensure_schema, migrate_identities_and_sessions
 from agt.server.models import Base, SessionModel, TaskModel
 from agt.server.services.report_service import record_task_result_for_daemon
 
@@ -68,6 +69,11 @@ def _fresh_db():
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
             await conn.run_sync(ensure_schema)
+        # Phase 4 Step 3: the sessions PK rebuild lives in the full
+        # migration. Run it too so a stale fixed-path DB (left by an
+        # earlier run) picks up the new sessions schema.
+        async with engine.begin() as conn:
+            await conn.run_sync(migrate_identities_and_sessions, Path("/tmp"))
         factory = make_session_factory(engine)
         async with session_scope(factory) as db:
             await db.execute(delete(TaskModel))
@@ -168,7 +174,7 @@ def test_service_resume_rejected_deletes_session_model() -> None:
         async with session_scope(factory) as db:
             db.add(SessionModel(
                 task_id="t1", provider="claude",
-                session_id="old", created_at=_utcnow(),
+                session_id="old", created_at=_utcnow(), updated_at=_utcnow(),
             ))
             await db.commit()
         # Report with resume_rejected=True — must drop the SessionModel row.

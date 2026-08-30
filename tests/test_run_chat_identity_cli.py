@@ -200,6 +200,11 @@ class TestRemoteSessionRecording:
             async def __aenter__(self): return self
             async def __aexit__(self, *a): return False
             async def submit_task(self, **kw): return "t1"
+            async def stream_task(self, tid, **kw):
+                yield {"type": "snapshot", "status": "running", "stdout": ""}
+                yield {"type": "done", "status": "completed", "stdout": "ok",
+                       "stderr": "", "session_id": "sid-remote-1",
+                       "exit_code": 0, "resume_rejected": False}
             async def wait_task(self, tid, **kw):
                 return {"status": "completed", "stdout": "ok", "stderr": "",
                         "task_id": tid, "exit_code": 0, "duration": 0.1,
@@ -264,6 +269,11 @@ class TestRemoteSessionRecording:
             async def __aenter__(self): return self
             async def __aexit__(self, *a): return False
             async def submit_task(self, **kw): return "t1"
+            async def stream_task(self, tid, **kw):
+                yield {"type": "snapshot", "status": "running", "stdout": ""}
+                yield {"type": "done", "status": "completed", "stdout": "ok",
+                       "stderr": "", "session_id": "fresh-2",
+                       "exit_code": 0, "resume_rejected": True}
             async def wait_task(self, tid, **kw):
                 return {"status": "completed", "stdout": "ok", "stderr": "",
                         "task_id": tid, "exit_code": 0, "duration": 0.1,
@@ -411,6 +421,12 @@ class TestRemoteSessionRecordsIdentity(_ResumeFixtureMixin):
             async def __aenter__(self): return self
             async def __aexit__(self, *a): return False
             async def submit_task(self, **kw): return "t1"
+            async def stream_task(self, tid, **kw):
+                yield {"type": "snapshot", "status": "running", "stdout": ""}
+                yield {"type": "done", "status": "completed", "stdout": "ok",
+                       "stderr": "", "task_id": tid, "exit_code": 0,
+                       "duration": 0.1, "session_id": "sid-with-identity",
+                       "resume_rejected": False}
             async def wait_task(self, tid, **kw):
                 return {"status": "completed", "stdout": "ok", "stderr": "",
                         "task_id": tid, "exit_code": 0, "duration": 0.1,

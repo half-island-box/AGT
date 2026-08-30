@@ -27,6 +27,57 @@ def _column_names(conn: Connection, table: str) -> set[str]:
     return {row[1] for row in rows}
 
 
+def _table_pk(conn: Connection, table: str) -> list[str]:
+    """Return the PK column names of ``table`` in declaration order.
+
+    ``PRAGMA table_info`` reports the PK position in the last column
+    (1-based, 0 for non-PK). An empty result means the table doesn't
+    exist yet — ``create_all`` will build it with the model schema.
+    """
+    rows = conn.exec_driver_sql(f"PRAGMA table_info({table})").fetchall()
+    pk_rows = [r for r in rows if r[5] > 0]
+    pk_rows.sort(key=lambda r: r[5])
+    return [r[1] for r in pk_rows]
+
+
+_SESSIONS_PK = ["task_id", "identity_did", "provider"]
+
+
+def _rebuild_sessions_table(conn: Connection) -> None:
+    """Rebuild ``sessions`` with the Phase 4 composite PK, preserving data.
+
+    SQLite cannot alter a PRIMARY KEY in place, so we create a new table,
+    copy every row across (stamping ``identity_did=''`` for legacy rows
+    and ``updated_at=created_at``), then swap it in. Idempotent: a no-op
+    when the table already has the new PK (or doesn't exist yet).
+    """
+    if _table_pk(conn, "sessions") in ([], _SESSIONS_PK):
+        return
+    conn.exec_driver_sql("""
+        CREATE TABLE sessions_new (
+            task_id TEXT NOT NULL,
+            identity_did TEXT NOT NULL DEFAULT '',
+            provider TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (task_id, identity_did, provider)
+        )
+    """)
+    conn.exec_driver_sql("""
+        INSERT INTO sessions_new
+            (task_id, identity_did, provider, session_id, created_at, updated_at)
+        SELECT task_id, '', provider, session_id, created_at, created_at
+        FROM sessions
+    """)
+    conn.exec_driver_sql("DROP TABLE sessions")
+    conn.exec_driver_sql("ALTER TABLE sessions_new RENAME TO sessions")
+    conn.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS idx_sessions_task ON sessions(task_id)"
+    )
+    log.info("Rebuilt sessions table with (task_id, identity_did, provider) PK")
+
+
 def ensure_schema(conn: Connection) -> None:
     """Add columns introduced after the initial schema. Idempotent."""
     # Step 3.6: daemon-targeted routing. A NULL target means "free task"
@@ -83,8 +134,7 @@ def migrate_identities_and_sessions(conn: Connection, root_dir: Path | None = No
     - identities table (did PK, daemon_id, name, description, capabilities, status, visibility, created_by, timestamps)
     - identity_bindings table (m:n relationship for Step 2, created now for schema)
     - tasks.identity_did column (NULLable, indexed)
-
-    Does NOT modify sessions PK (deferred to Step 3).
+    - sessions table rebuilt with the (task_id, identity_did, provider) PK
 
     Args:
         conn: SQLAlchemy connection
@@ -152,7 +202,12 @@ def migrate_identities_and_sessions(conn: Connection, root_dir: Path | None = No
         "CREATE INDEX IF NOT EXISTS idx_tasks_identity ON tasks(identity_did)"
     )
 
-    # 4. Ensure ~/.agt/identities directory exists (for AGENTS.md files)
+    # 4. Rebuild sessions with the composite (task_id, identity_did,
+    #    provider) PK (Phase 4 Step 3). No-op on fresh DBs (create_all
+    #    already produced the new schema) and on already-migrated DBs.
+    _rebuild_sessions_table(conn)
+
+    # 5. Ensure ~/.agt/identities directory exists (for AGENTS.md files)
     identities_dir = root_dir / ".agt" / "identities"
     identities_dir.mkdir(parents=True, exist_ok=True)
     log.info(f"Idempotent: ensured identities directory exists at {identities_dir}")

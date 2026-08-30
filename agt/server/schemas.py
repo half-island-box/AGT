@@ -125,6 +125,18 @@ class ReportResponse(BaseModel):
     recorded: bool
 
 
+class ProgressRequest(BaseModel):
+    """Incremental stdout prefix reported mid-execution (Phase 5 remote streaming)."""
+
+    daemon_id: str
+    task_id: str
+    stdout_prefix: str
+
+
+class ProgressResponse(BaseModel):
+    recorded: bool
+
+
 class TaskStatusResponse(BaseModel):
     task_id: str
     provider: str
@@ -150,11 +162,47 @@ class TaskStatusResponse(BaseModel):
     agent_cwd: str | None = None
 
 
+# ── Stream (SSE) events — Phase 5 remote streaming ──────────────────
+#
+# The ``event:`` line of the SSE frame carries the same value as ``type``;
+# the ``data:`` payload also embeds it so a client that only parses
+# ``data`` stays unambiguous.
+
+
+class StreamSnapshotEvent(BaseModel):
+    """Full cumulative stdout + status, sent immediately on subscribe."""
+
+    type: str = "snapshot"
+    status: str
+    stdout: str
+
+
+class StreamDeltaEvent(BaseModel):
+    """Incremental chunk not yet seen by this subscriber."""
+
+    type: str = "delta"
+    chunk: str
+
+
+class StreamDoneEvent(BaseModel):
+    """Authoritative terminal payload; stream closes after this frame."""
+
+    type: str = "done"
+    status: str
+    stdout: str
+    session_id: str | None = None
+    exit_code: int | None = None
+    resume_rejected: bool | None = None
+    stderr: str | None = None
+
+
 # ── Session ─────────────────────────────────────────────────────────
 
 
 class SessionOut(BaseModel):
     task_id: str
+    # Phase 4: "" for identity-less (legacy) sessions.
+    identity_did: str = ""
     provider: str
     session_id: str
 
@@ -326,7 +374,12 @@ __all__ = [
     "TaskPayload",
     "ReportRequest",
     "ReportResponse",
+    "ProgressRequest",
+    "ProgressResponse",
     "TaskStatusResponse",
+    "StreamSnapshotEvent",
+    "StreamDeltaEvent",
+    "StreamDoneEvent",
     "SessionOut",
     "HeartbeatRequest",
     "HeartbeatResponse",

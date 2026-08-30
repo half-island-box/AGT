@@ -23,6 +23,7 @@ fallback, resume-rejection signal) live in
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -48,6 +49,11 @@ from .models import Task, TaskResult
 from .stream import StreamReader
 
 log = logging.getLogger(__name__)
+
+# Progress sampler cadence. Module-level (not config) so tests can patch it
+# without touching DaemonConfig; mirrors the ``_monotonic`` seam in
+# ``agt.daemon.ws_claim``.
+_PROGRESS_FLUSH_INTERVAL = 0.5
 
 
 # ── Legacy text-regex helpers ────────────────────────────────────────
@@ -193,7 +199,13 @@ class TaskExecutor:
 
     # ── Public entry point ──────────────────────────────────────
 
-    async def execute(self, task: Task, *, interactive: bool = False) -> TaskResult:
+    async def execute(
+        self,
+        task: Task,
+        *,
+        interactive: bool = False,
+        progress_cb=None,
+    ) -> TaskResult:
         """Run one agent subprocess for ``task``.
 
         Dispatches to one of three private helpers based on the
@@ -247,7 +259,8 @@ class TaskExecutor:
                 return await self._execute_interactive(task, cmd, work_dir, env, start)
             if not isinstance(sink, NoopSink):
                 return await self._execute_streaming(
-                    task, cmd, work_dir, env, start, sink, adapter
+                    task, cmd, work_dir, env, start, sink, adapter,
+                    progress_cb=progress_cb,
                 )
             return await self._execute_pipe_text(task, cmd, work_dir, env, start)
         finally:
@@ -327,6 +340,8 @@ class TaskExecutor:
         start: float,
         sink: StreamingSink,
         adapter: ProviderAdapter,
+        *,
+        progress_cb=None,
     ) -> TaskResult:
         """Spawn the agent and consume its structured event stream.
 
@@ -349,6 +364,13 @@ class TaskExecutor:
         collected — the legacy "stdout is plain text" contract is
         preserved so downstream consumers (``/api/tasks/<id>/status``,
         ``_echo_task_result``, report_service) see no shape change.
+
+        ``progress_cb`` (Phase 5 remote streaming), when provided, is an
+        ``async(current_prefix) -> None`` callback invoked by a background
+        sampler every ``_PROGRESS_FLUSH_INTERVAL`` seconds while the
+        cumulative stdout prefix grows. It never affects the terminal
+        ``TaskResult`` — the sampler is cancelled in ``finally`` and its
+        exceptions are swallowed (see design decision 10).
         """
         process = await asyncio.create_subprocess_exec(
             *cmd,
@@ -360,6 +382,12 @@ class TaskExecutor:
 
         stdout_task = asyncio.create_task(self._drain_json(process.stdout, sink))
         stderr_task = asyncio.create_task(self._drain_silent(process.stderr))
+
+        sampler_task = None
+        if progress_cb is not None:
+            sampler_task = asyncio.create_task(
+                self._sample_progress(sink, progress_cb)
+            )
 
         timeout = self._config.agent_timeout
         try:
@@ -383,6 +411,11 @@ class TaskExecutor:
                 duration=duration,
                 status="timeout",
             )
+        finally:
+            if sampler_task is not None:
+                sampler_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await sampler_task
 
         await process.wait()
         duration = time.monotonic() - start
@@ -407,6 +440,31 @@ class TaskExecutor:
             session_id=session_id,
             resume_rejected=resume_rejected,
         )
+
+    async def _sample_progress(self, sink: StreamingSink, progress_cb) -> None:
+        """Periodically report the sink's cumulative stdout prefix.
+
+        Runs as a background task for the duration of the streaming
+        execution. Reports the **full prefix** (idempotency requirement on
+        the server side — a lost prefix can always be rebuilt by the next
+        sample), only when it grew since the previous sample. ``progress_cb``
+        exceptions are swallowed so a network blip on the report path can
+        never crash the executor or leave an un-retrieved task exception.
+        """
+        last_len = 0
+        while True:
+            await asyncio.sleep(_PROGRESS_FLUSH_INTERVAL)
+            current = "".join(sink.accumulated_text)
+            if len(current) <= last_len:
+                continue
+            last_len = len(current)
+            try:
+                await progress_cb(current)
+            except Exception:
+                log.debug(
+                    "progress_cb raised; skipping this sample",
+                    exc_info=True,
+                )
 
     @staticmethod
     def _resolve_streaming_outcome(

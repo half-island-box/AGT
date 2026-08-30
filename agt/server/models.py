@@ -98,17 +98,26 @@ class TaskModel(Base):
 
 
 class SessionModel(Base):
-    """A pointer mapping task_id+provider → session_id (no conversation content)."""
+    """A pointer mapping (task_id, identity_did, provider) → session_id.
+
+    Phase 4: the PK gains ``identity_did`` so the same ``task_id`` under
+    different identities (or with no identity at all) is treated as
+    distinct conversations. ``identity_did`` is ``""`` for identity-less
+    (legacy) sessions — SQLite treats NULL as distinct in UNIQUE
+    constraints, so the empty string is the sentinel that keeps
+    ``(task_id, "", provider)`` unique.
+    """
 
     __tablename__ = "sessions"
-    __table_args__ = (
-        UniqueConstraint("task_id", "provider", name="uq_session_task_provider"),
-    )
 
     task_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    identity_did: Mapped[str] = mapped_column(
+        String(256), primary_key=True, default=""
+    )
     provider: Mapped[str] = mapped_column(String(32), primary_key=True)
     session_id: Mapped[str] = mapped_column(String(128), nullable=False)
     created_at: Mapped[str] = mapped_column(String(32), nullable=False)
+    updated_at: Mapped[str] = mapped_column(String(32), nullable=False)
 
 
 class IdentityModel(Base):

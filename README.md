@@ -81,6 +81,8 @@ By default, the server listens on `127.0.0.1:8420`. Its OpenAPI documentation is
 
 Remote daemons can connect over HTTP or reverse-dial WebSocket, allowing execution on machines behind NATs. See the [quick-start guide](<docs/guide%20docs/quick_start.md>) for deployment details.
 
+Remote `--daemon` / `--identity` chat streams agent output live: the daemon samples stdout prefixes, the server pushes them over SSE, and the CLI renders them incrementally (`snapshot → delta* → done`), with a poll fallback if the stream drops.
+
 ## CLI overview
 
 | Command              | Description                                              |

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from typing import Any
@@ -220,6 +221,21 @@ class ServerClient:
         resp = await self._post(f"/api/tasks/{task_id}/report", payload)
         return bool(resp.get("recorded", False))
 
+    async def report_progress(self, task_id: str, stdout_prefix: str) -> bool:
+        """Report an incremental stdout prefix (Phase 5 remote streaming).
+
+        Best-effort: the caller treats failures as ignorable — the next
+        sample supersedes this one, and the terminal ``report_task`` is the
+        authoritative write.
+        """
+        payload = {
+            "daemon_id": self._daemon_id,
+            "task_id": task_id,
+            "stdout_prefix": stdout_prefix,
+        }
+        resp = await self._post(f"/api/tasks/{task_id}/progress", payload)
+        return bool(resp.get("recorded", False))
+
     async def task_status(self, task_id: str) -> dict:
         return await self._get(f"/api/tasks/{task_id}/status")
 
@@ -259,15 +275,71 @@ class ServerClient:
                 )
             await asyncio.sleep(poll_interval)
 
+    async def stream_task(
+        self,
+        task_id: str,
+        *,
+        read_timeout: float = 30.0,
+        connect_timeout: float = 10.0,
+    ):
+        """Subscribe to a task's SSE stream (Phase 5 remote streaming).
+
+        Yields parsed event dicts with a ``type`` key: ``snapshot``,
+        ``delta``, or ``done``. The server sends a ``: ping`` comment frame
+        every ~15s, so a healthy stream never hits ``read_timeout``; a dead
+        server raises ``httpx.ReadTimeout``, which the caller uses to
+        trigger reconnect/fallback.
+
+        ``httpx.ConnectError`` / ``httpx.TransportError`` propagate to the
+        caller for the same reason — they mean "reconnect, don't hang".
+        """
+        assert self._client is not None, "ServerClient must be used as async context manager"
+        timeout = httpx.Timeout(
+            connect_timeout,
+            read=read_timeout,
+            write=10.0,
+            pool=10.0,
+        )
+        async with self._client.stream(
+            "GET",
+            f"/api/tasks/{task_id}/stream",
+            headers=self._headers(),
+            timeout=timeout,
+        ) as resp:
+            if resp.status_code >= 300:
+                raise RPCRejected(resp.status_code, {"raw": ""})
+            event_type = "message"
+            async for line in resp.aiter_lines():
+                if not line:
+                    continue
+                if line.startswith(":"):
+                    # SSE comment (keep-alive ``: ping``) — skip.
+                    continue
+                if line.startswith("event:"):
+                    event_type = line[len("event:"):].strip()
+                elif line.startswith("data:"):
+                    payload = json.loads(line[len("data:"):].strip())
+                    payload.setdefault("type", event_type)
+                    yield payload
+
     # ── Sessions ──────────────────────────────────────────────────
 
-    async def get_session(self, task_id: str, provider: str) -> str | None:
-        """Return session_id for the given task+provider, or None if none exists."""
+    async def get_session(
+        self,
+        task_id: str,
+        provider: str,
+        identity_did: str | None = None,
+    ) -> str | None:
+        """Return session_id for the given task+provider (+identity), or None.
+
+        ``identity_did`` omitted (or None) means the identity-less slot —
+        matching the server's ``""`` sentinel for legacy sessions.
+        """
+        params: dict[str, Any] = {"task_id": task_id, "provider": provider}
+        if identity_did is not None:
+            params["identity_did"] = identity_did
         try:
-            resp = await self._get(
-                "/api/sessions",
-                params={"task_id": task_id, "provider": provider},
-            )
+            resp = await self._get("/api/sessions", params=params)
         except RPCRejected as exc:
             if exc.status == 404:
                 return None

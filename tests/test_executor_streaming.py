@@ -302,3 +302,145 @@ def test_streaming_args_injected_for_claude(tmp_path):
     idx = argv.index("--output-format")
     assert argv[idx + 1] == "stream-json"
     assert "--verbose" in argv
+
+
+# ── Phase 5: remote-streaming progress sampler ──────────────────────
+
+
+class _SlowFeedProcess:
+    """Fake subprocess that feeds stdout chunks over time.
+
+    Gives the progress sampler time to wake up between text additions.
+    """
+
+    def __init__(self, chunks: list[str], returncode: int = 0) -> None:
+        self.chunks = chunks
+        self.returncode = returncode
+        self._feed_task: asyncio.Task | None = None
+
+    def attach(self) -> None:
+        from asyncio import StreamReader
+
+        self.stdout = StreamReader()
+        self.stderr = StreamReader()
+        self.stderr.feed_eof()
+        self._feed_task = asyncio.create_task(self._feed())
+
+    async def _feed(self) -> None:
+        for chunk in self.chunks:
+            await asyncio.sleep(0.05)
+            self.stdout.feed_data(chunk.encode("utf-8"))
+        self.stdout.feed_eof()
+
+    async def wait(self) -> int:
+        assert self._feed_task is not None
+        await self._feed_task
+        return self.returncode
+
+    def kill(self) -> None:
+        pass
+
+
+def test_progress_callback_receives_growing_prefix(tmp_path, monkeypatch):
+    """When ``progress_cb`` is supplied, the sampler calls it with the
+    cumulative stdout prefix whenever the prefix grows."""
+    monkeypatch.setattr(
+        "agt.task.executor._PROGRESS_FLUSH_INTERVAL", 0.02, raising=True
+    )
+    executor = TaskExecutor(runtime=_runtime_with_provider("claude"), config=_config())
+    task = Task(
+        prompt="hi",
+        provider="claude",
+        task_id="t1",
+        work_dir=tmp_path,
+        agent_cwd=tmp_path,
+    )
+    progress_calls: list[str] = []
+
+    async def progress_cb(prefix: str) -> None:
+        progress_calls.append(prefix)
+
+    async def go():
+        chunks = [
+            '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello"}}}\n',
+            '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":" "}}}\n',
+            '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"world"}}}\n',
+            '{"type":"result","is_error":false,"session_id":"x"}\n',
+        ]
+        fake = _SlowFeedProcess(chunks=chunks)
+        fake.attach()
+        with _patched_subprocess(lambda *a, **k: fake):
+            return await executor.execute(
+                task, interactive=False, progress_cb=progress_cb
+            )
+
+    result = asyncio.run(go())
+    assert result.status == "completed"
+    assert result.stdout == "Hello world"
+    # We should see at least one progress report, and each report must be a
+    # prefix of the final accumulated text (cumulative idempotency).
+    assert progress_calls
+    assert all(
+        result.stdout.startswith(p) and len(p) <= len(result.stdout)
+        for p in progress_calls
+    )
+    # Monotonic growth: each subsequent call is at least as long as the last.
+    assert all(
+        len(progress_calls[i]) <= len(progress_calls[i + 1])
+        for i in range(len(progress_calls) - 1)
+    )
+
+
+def test_progress_callback_exception_is_swallowed(tmp_path):
+    """A raising ``progress_cb`` must not abort the run or break result capture."""
+    executor = TaskExecutor(runtime=_runtime_with_provider("claude"), config=_config())
+    task = Task(
+        prompt="hi",
+        provider="claude",
+        task_id="t1",
+        work_dir=tmp_path,
+        agent_cwd=tmp_path,
+    )
+
+    async def progress_cb(_prefix: str) -> None:
+        raise RuntimeError("network blip")
+
+    async def go():
+        fake = _FakeProcess(
+            stdout_text='{"type":"result","is_error":false,"session_id":"x"}',
+            returncode=0,
+        )
+        fake.attach()
+        with _patched_subprocess(lambda *a, **k: fake):
+            return await executor.execute(
+                task, interactive=False, progress_cb=progress_cb
+            )
+
+    result = asyncio.run(go())
+    assert result.status == "completed"
+    assert result.session_id == "x"
+
+
+def test_no_callback_runs_without_sampler(tmp_path):
+    """Omitting ``progress_cb`` keeps the legacy streaming behavior intact."""
+    executor = TaskExecutor(runtime=_runtime_with_provider("claude"), config=_config())
+    task = Task(
+        prompt="hi",
+        provider="claude",
+        task_id="t1",
+        work_dir=tmp_path,
+        agent_cwd=tmp_path,
+    )
+
+    async def go():
+        fake = _FakeProcess(
+            stdout_text='{"type":"result","is_error":false,"session_id":"x"}',
+            returncode=0,
+        )
+        fake.attach()
+        with _patched_subprocess(lambda *a, **k: fake):
+            return await executor.execute(task, interactive=False)
+
+    result = asyncio.run(go())
+    assert result.status == "completed"
+    assert result.session_id == "x"

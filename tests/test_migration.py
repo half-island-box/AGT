@@ -168,3 +168,80 @@ def test_run_on_already_migrated_model_schema(tmp_path: Path) -> None:
     # Regression: the index must also exist on the fresh path, where
     # create_all already added the column and the ALTER branch is skipped.
     assert "idx_tasks_identity" in _indexes(engine)
+
+
+# ── Phase 4 Step 3: sessions PK rebuild ────────────────────────────
+
+
+LEGACY_SESSIONS_DDL = """
+CREATE TABLE sessions (
+    task_id TEXT,
+    provider TEXT,
+    session_id TEXT,
+    created_at TEXT,
+    PRIMARY KEY (task_id, provider)
+)
+"""
+
+
+def _sessions_pk(engine) -> list[str]:
+    with engine.connect() as conn:
+        rows = conn.execute(text("PRAGMA table_info(sessions)")).fetchall()
+    pk = sorted((r for r in rows if r[5] > 0), key=lambda r: r[5])
+    return [r[1] for r in pk]
+
+
+def _sessions_columns(engine) -> list[str]:
+    with engine.connect() as conn:
+        rows = conn.execute(text("PRAGMA table_info(sessions)")).fetchall()
+    return [r[1] for r in rows]
+
+
+def test_legacy_sessions_rebuilt_with_identity_pk(tmp_path: Path) -> None:
+    """A pre-Phase 4 sessions table is rebuilt to the 3-column PK, with
+    existing rows preserved and stamped identity_did=''."""
+    engine = _engine(tmp_path)
+    with engine.begin() as conn:
+        conn.exec_driver_sql(LEGACY_TASKS_DDL)
+        conn.exec_driver_sql(LEGACY_SESSIONS_DDL)
+        conn.exec_driver_sql(
+            "INSERT INTO sessions (task_id, provider, session_id, created_at) "
+            "VALUES ('chat-1', 'claude', 'sess-xyz', '2026-01-01')"
+        )
+
+    _run_migration(engine, tmp_path / "home")
+
+    assert _sessions_pk(engine) == ["task_id", "identity_did", "provider"]
+    cols = _sessions_columns(engine)
+    assert "identity_did" in cols
+    assert "updated_at" in cols
+
+    with engine.connect() as conn:
+        row = conn.execute(text(
+            "SELECT task_id, identity_did, provider, session_id, created_at, updated_at "
+            "FROM sessions WHERE task_id='chat-1'"
+        )).fetchone()
+    assert row == ("chat-1", "", "claude", "sess-xyz", "2026-01-01", "2026-01-01")
+
+
+def test_sessions_rebuild_is_idempotent(tmp_path: Path) -> None:
+    """Running the migration again after the rebuild is a no-op."""
+    engine = _engine(tmp_path)
+    with engine.begin() as conn:
+        conn.exec_driver_sql(LEGACY_TASKS_DDL)
+        conn.exec_driver_sql(LEGACY_SESSIONS_DDL)
+        conn.exec_driver_sql(
+            "INSERT INTO sessions (task_id, provider, session_id, created_at) "
+            "VALUES ('chat-1', 'claude', 'sess-xyz', '2026-01-01')"
+        )
+
+    root = tmp_path / "home"
+    _run_migration(engine, root)
+    snapshot = _sessions_pk(engine)
+
+    _run_migration(engine, root)  # must not raise
+
+    assert _sessions_pk(engine) == snapshot
+    with engine.connect() as conn:
+        count = conn.execute(text("SELECT COUNT(*) FROM sessions")).scalar_one()
+    assert count == 1

@@ -23,8 +23,9 @@ import uuid
 from pathlib import Path
 
 import click
+import httpx
 
-from ..comm import ServerClient
+from ..comm import RPCRejected, ServerClient
 from ..daemon.daemon import Daemon as DaemonController
 from ..runtime.models import AgentEntry
 from ..server.services.auth_service import TaskToken
@@ -571,6 +572,90 @@ def _chat_turn_local(
             click.echo()
 
 
+def _finish_stream_line(stdout: str) -> None:
+    """Emit the trailing newline if the streamed text didn't end with one.
+
+    Streamed chunks are printed with ``nl=False`` so the cursor can sit
+    mid-line; once the turn is done we mirror ``_chat_turn_local`` and land
+    the next ``agt> `` prompt on a fresh line.
+    """
+    if stdout and not stdout.endswith("\n"):
+        click.echo()
+
+
+async def _stream_and_wait(
+    client: ServerClient,
+    task_id: str,
+    target_daemon_id: str,
+) -> dict | None:
+    """Subscribe to the task's SSE stream and render it incrementally.
+
+    ``printed`` is the byte offset already echoed. It advances with each
+    delta and re-aligns on every ``snapshot`` / ``done``, so reconnects and
+    fallbacks never re-print content the user has already seen (design
+    decision 6).
+    """
+    printed = 0
+
+    for attempt in range(2):
+        try:
+            async for event in client.stream_task(task_id):
+                etype = event.get("type")
+                if etype == "snapshot":
+                    snap = event.get("stdout") or ""
+                    tail = snap[printed:]
+                    if tail:
+                        click.echo(tail, nl=False)
+                    printed = len(snap)
+                elif etype == "delta":
+                    chunk = event.get("chunk") or ""
+                    if chunk:
+                        click.echo(chunk, nl=False)
+                        printed += len(chunk)
+                elif etype == "done":
+                    final = dict(event)
+                    final_stdout = final.get("stdout") or ""
+                    tail = final_stdout[printed:]
+                    if tail:
+                        click.echo(tail, nl=False)
+                    _finish_stream_line(final_stdout)
+                    return final
+            # Stream ended without a ``done`` frame (server closed early).
+            break
+        except (httpx.RequestError, RPCRejected):
+            # Dead connection / feature-absent server. Reconnect once (the
+            # fresh snapshot re-syncs ``printed``); otherwise fall back.
+            if attempt == 0:
+                continue
+            break
+
+    return await _poll_fallback(client, task_id, target_daemon_id, printed)
+
+
+async def _poll_fallback(
+    client: ServerClient,
+    task_id: str,
+    target_daemon_id: str,
+    printed: int,
+) -> dict | None:
+    """Legacy wait_task polling, cursor-aware (never re-prints the prefix
+    already streamed)."""
+    try:
+        data = await client.wait_task(task_id)
+    except TimeoutError:
+        click.echo(
+            f"⚠️  No response — is daemon '{target_daemon_id}' online?",
+            err=True,
+        )
+        return None
+    stdout = data.get("stdout") or ""
+    tail = stdout[printed:]
+    if tail:
+        click.echo(tail, nl=False)
+    _finish_stream_line(stdout)
+    return data
+
+
 def _chat_turn_remote(
     provider: str,
     prompt: str,
@@ -608,14 +693,7 @@ def _chat_turn_remote(
                 identity_did=identity_did,
                 agent_cwd=str(agent_cwd) if agent_cwd is not None else None,
             )
-            try:
-                return await client.wait_task(task_id)
-            except TimeoutError:
-                click.echo(
-                    f"⚠️  No response — is daemon '{target_daemon_id}' online?",
-                    err=True,
-                )
-                return None
+            return await _stream_and_wait(client, task_id, target_daemon_id)
 
     try:
         data = asyncio.run(_remote())
@@ -625,9 +703,6 @@ def _chat_turn_remote(
 
     if data is None:
         return
-    stdout = data.get("stdout") or ""
-    if stdout:
-        click.echo(stdout, nl=not stdout.endswith("\n"))
 
     # Record the daemon-reported session locally — mirrors the local
     # daemon's ``_record_session_outcome`` (rejected resume deletes the

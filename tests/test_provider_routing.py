@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+from pathlib import Path
 
 from sqlalchemy import delete
 from starlette.testclient import TestClient
@@ -20,7 +21,7 @@ from starlette.testclient import TestClient
 from agt.server.config import ServerConfig
 from agt.server.database import make_engine, make_session_factory, session_scope
 from agt.server.main import create_app
-from agt.server.migrate_schema import ensure_schema
+from agt.server.migrate_schema import ensure_schema, migrate_identities_and_sessions
 from agt.server.models import Base, TaskModel
 
 
@@ -46,6 +47,8 @@ def _build_app_with_tasks(
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
             await conn.run_sync(ensure_schema)
+        async with engine.begin() as conn:
+            await conn.run_sync(migrate_identities_and_sessions, Path("/tmp"))
         factory = make_session_factory(engine)
         async with session_scope(factory) as db:
             await db.execute(delete(TaskModel))

@@ -79,6 +79,7 @@ class Daemon:
         turn_index: int = 1,
         identity_did: str | None = None,
         identity_md: str | None = None,
+        progress_cb=None,
     ) -> TaskResult:
         """Execute one prompt against the named provider.
 
@@ -189,7 +190,9 @@ class Daemon:
         )
 
         executor = TaskExecutor(runtime=runtime, config=self.config)
-        result = await executor.execute(task, interactive=interactive)
+        result = await executor.execute(
+            task, interactive=interactive, progress_cb=progress_cb,
+        )
 
         # Update the session store based on the outcome (only when caller
         # opted into session continuity by passing a task_id AND we
