@@ -31,7 +31,7 @@ from ..runtime.models import AgentEntry
 from ..server.services.auth_service import TaskToken
 from ..server.services.identity_service import normalize_identity_did
 from ..task.session import CwdSessionStore
-from ..agent_history import load_history
+from ..agent_history import Message, load_history
 
 
 # ── workdir helpers (Phase 4) ──────────────────────────────────────
@@ -663,20 +663,16 @@ def _chat_turn_remote(
     target_daemon_id: str,
     server_url: str,
     work_dir_str: str | None,
-    cwd: Path,
-    first_prompt: str | None,
-    turn_index: int,
-    resume_session_id: str | None = None,
     identity_did: str | None = None,
     agent_cwd: Path | None = None,
 ) -> None:
     """Run one chat turn pinned to a remote daemon via the Server.
 
-    The session the daemon reports back is recorded into the LOCAL cwd
-    store (``<cwd>/.agt/sessions.json``) so ``agt chat --list`` sees
-    remote-daemon chats too. Without this, bare ``--daemon`` chats landed
-    only in the daemon's workspace dir (no work_dir forwarded) and the
-    cwd index stayed empty.
+    Remote session state belongs to the daemon, not this cwd — the session
+    index is written on the daemon's machine (``<agent_cwd>/.agt/
+    sessions.json``) and by the Server (``TaskModel``); the local cwd store
+    is deliberately left untouched. Use ``agt chat --list --daemon=X`` to
+    read it back from the Server.
 
     ``agent_cwd`` is the agent subprocess's working directory on the
     daemon machine (also the IDENTITY.md / AGENTS.md injection point).
@@ -696,31 +692,9 @@ def _chat_turn_remote(
             return await _stream_and_wait(client, task_id, target_daemon_id)
 
     try:
-        data = asyncio.run(_remote())
+        asyncio.run(_remote())
     except Exception as exc:
         click.echo(f"Error: {exc}", err=True)
-        return
-
-    if data is None:
-        return
-
-    # Record the daemon-reported session locally — mirrors the local
-    # daemon's ``_record_session_outcome`` (rejected resume deletes the
-    # broken sid; otherwise record/update the reported one).
-    store = CwdSessionStore.load_or_create(cwd, provider=provider)
-    if data.get("resume_rejected"):
-        if resume_session_id:
-            store.delete(resume_session_id)
-        return
-    session_id = data.get("session_id")
-    if session_id:
-        store.record(
-            session_id=session_id,
-            task_id=task_id,
-            first_prompt=first_prompt or prompt,
-            turn_count=turn_index,
-            identity_did=identity_did,
-        )
 
 
 # ── chat ───────────────────────────────────────────────────────────
@@ -846,19 +820,49 @@ def chat(
     cwd = Path(os.getcwd())
 
     if list_mode:
-        _print_chat_session_list(cwd, provider)
+        _print_chat_session_list(cwd, provider, target_daemon_id, server_url)
         return
 
     if resume_session_id is not None and not no_history:
-        _print_resumed_history(cwd, resume_session_id, target_daemon_id)
+        _print_resumed_history(cwd, resume_session_id, target_daemon_id, server_url)
 
-    # Resolve agent_cwd: explicit --dir wins; otherwise auto-detect for the
-    # local-daemon case (daemon process alive on this machine AND its id
-    # matches --daemon); otherwise refuse — a remote daemon can't see
-    # your local cwd.
+    # --resume resolution (remote path). The Server is the authoritative
+    # session index for remote daemons — it records every task a daemon
+    # executed with its session_id + provider + identity + agent cwd. We
+    # resolve once up front so the recovered values can drive provider,
+    # identity, the reused task_id, and the agent cwd auto-fill below.
+    resume_task_id: str | None = None
+    resume_dir: str | None = None
+    if resume_session_id is not None and target_daemon_id is not None:
+        _res = _resolve_remote_session(resume_session_id, target_daemon_id, server_url)
+        if _res is None:
+            sys.exit(2)
+        resume_task_id = _res["task_id"]
+        resume_dir = _res.get("dir")
+        if provider is None:
+            provider = _res["provider"]
+        # Identity mismatch is a hard error (same rule as the local path).
+        if _res.get("identity_did"):
+            if identity_did is None:
+                identity_did = _res["identity_did"]
+            elif identity_did != _res["identity_did"]:
+                click.echo(
+                    f"Error: --resume {resume_session_id[:8]}… was started "
+                    f"with identity '{_res['identity_did']}'; refusing to "
+                    f"resume with '{identity_did}'.",
+                    err=True,
+                )
+                sys.exit(2)
+
+    # Resolve agent_cwd: explicit --dir wins; a remote resume reuses the
+    # recorded dir; otherwise auto-detect for the local-daemon case
+    # (daemon process alive on this machine AND its id matches --daemon);
+    # otherwise refuse — a remote daemon can't see your local cwd.
     agent_cwd: Path | None = None
     if agent_cwd_override is not None:
         agent_cwd = agent_cwd_override
+    elif target_daemon_id is not None and resume_dir:
+        agent_cwd = Path(resume_dir)
     elif target_daemon_id is not None:
         # 链A: pid-file liveness (same evidence `agt daemon status` uses).
         pid = _local_daemon_alive()
@@ -887,11 +891,12 @@ def chat(
 
     controller = DaemonController() if target_daemon_id is None else None
 
-    # --resume resolution: pull provider + identity from sessions.json
-    # in a single lookup (the file is tiny; cost is the file read, not
-    # the scan). Both fields were recorded when the session was first
-    # created; subsequent updates preserve the originals.
-    if resume_session_id is not None:
+    # --resume resolution (local path): pull provider + identity from
+    # sessions.json in a single lookup (the file is tiny; cost is the file
+    # read, not the scan). Both fields were recorded when the session was
+    # first created; subsequent updates preserve the originals. The remote
+    # path was already handled above via the Server.
+    if resume_session_id is not None and target_daemon_id is None:
         _resume_entry = CwdSessionStore.load_or_create(cwd).get(
             resume_session_id
         )
@@ -925,7 +930,10 @@ def chat(
     provider = _pick_provider(
         provider, target_daemon_id, server_url, local_controller=controller,
     )
-    task_id = f"chat-{uuid.uuid4().hex[:8]}"
+    # Remote resume reuses the recorded task_id so the Server reopens the
+    # task (keeping the SessionModel pointer) and the daemon truly resumes
+    # the same session; otherwise start a fresh chat task.
+    task_id = resume_task_id or f"chat-{uuid.uuid4().hex[:8]}"
     # Bare ``agt chat`` no longer creates a per-task meta subdir under
     # ``<cwd>/.agt/tasks/chat-xxx/`` — that directory was always empty
     # (nothing wrote to it) and just accumulated over time. The session
@@ -1067,21 +1075,30 @@ def _run_chat_turn(
             provider, line, task_id,
             target_daemon_id,  # type: ignore[arg-type]
             server_url, work_dir_str,
-            cwd=cwd,
-            first_prompt=first_prompt if is_first else None,
-            turn_index=turn_index,
-            resume_session_id=resume_for_turn,
             identity_did=identity_did,
             agent_cwd=agent_cwd,
         )
 
 
-def _print_chat_session_list(cwd: Path, provider: str | None = None) -> None:
-    """Print a table of sessions stored in ``<cwd>/.agt/sessions.json``.
+def _print_chat_session_list(
+    cwd: Path,
+    provider: str | None = None,
+    target_daemon_id: str | None = None,
+    server_url: str = "http://127.0.0.1:8420",
+) -> None:
+    """Print a table of chat sessions.
 
-    ``provider`` filters to one agent's sessions; ``None`` lists every
-    session in the cwd regardless of which agent created it.
+    Local (``target_daemon_id`` None): sessions stored in
+    ``<cwd>/.agt/sessions.json``. Remote (``target_daemon_id`` set): every
+    session that daemon has executed, read from the Server — a global,
+    cross-directory view with a ``DIR`` column.
+
+    ``provider`` filters to one agent's sessions; ``None`` lists all.
     """
+    if target_daemon_id is not None:
+        _print_remote_session_list(target_daemon_id, provider, server_url)
+        return
+
     store = CwdSessionStore.load_or_create(cwd)
     entries = store.list_sessions()
     if provider is not None:
@@ -1125,22 +1142,119 @@ def _print_chat_session_list(cwd: Path, provider: str | None = None) -> None:
         )
 
 
+def _print_remote_session_list(
+    daemon_id: str,
+    provider: str | None,
+    server_url: str,
+) -> None:
+    """Print a daemon's sessions (cross-directory) fetched from the Server."""
+
+    async def _run() -> list[dict]:
+        async with ServerClient(base_url=server_url, daemon_id="cli-direct") as client:
+            return await client.list_daemon_sessions(daemon_id)
+
+    try:
+        sessions = asyncio.run(_run())
+    except Exception as exc:
+        click.echo(
+            f"Error listing sessions for daemon '{daemon_id}': {exc}", err=True,
+        )
+        return
+
+    if provider is not None:
+        sessions = [s for s in sessions if s.get("provider") == provider]
+    if not sessions:
+        label = f"{provider} " if provider else ""
+        click.echo(f"No {label}chat sessions on daemon '{daemon_id}' yet.")
+        return
+    click.echo(f"{len(sessions)} session(s) on daemon '{daemon_id}'\n")
+    rows = [
+        (
+            s.get("session_id", ""),
+            s.get("provider", ""),
+            s.get("dir") or "—",
+            s.get("last_seen_at", ""),
+            _truncate(s.get("first_prompt", ""), 60),
+        )
+        for s in sessions
+    ]
+    widths = [
+        max(len(r[0]) for r in rows),
+        max(len(r[1]) for r in rows),
+        max(len(r[2]) for r in rows),
+        max(len(r[3]) for r in rows),
+        0,
+    ]
+    widths[4] = max(len(r[4]) for r in rows)
+    header = (
+        f"  {'SESSION':<{widths[0]}}  {'PROVIDER':<{widths[1]}}  "
+        f"{'DIR':<{widths[2]}}  {'LAST USED':<{widths[3]}}  FIRST PROMPT"
+    )
+    click.echo(header)
+    click.echo("  " + "─" * (sum(widths) + 10))
+    for r in rows:
+        click.echo(
+            f"  {r[0]:<{widths[0]}}  {r[1]:<{widths[1]}}  "
+            f"{r[2]:<{widths[2]}}  {r[3]:<{widths[3]}}  {r[4]}"
+        )
+
+
+def _resolve_remote_session(
+    session_id: str,
+    target_daemon_id: str,
+    server_url: str,
+) -> dict | None:
+    """Resolve a remote session via the Server for ``--resume``.
+
+    Returns the resolve record (task_id / provider / identity_did / dir /
+    daemon_id) on success, or ``None`` after printing an error (the caller
+    exits). Validates that the session actually belongs to the requested
+    daemon so a session from another daemon can't be resumed here.
+    """
+
+    async def _run() -> dict | None:
+        async with ServerClient(base_url=server_url, daemon_id="cli-direct") as client:
+            return await client.resolve_session(session_id)
+
+    try:
+        res = asyncio.run(_run())
+    except Exception as exc:
+        click.echo(
+            f"Error: failed to resolve session via Server ({server_url}): {exc}",
+            err=True,
+        )
+        return None
+    if res is None:
+        click.echo(
+            f"Error: session {session_id[:8]}… not found on Server "
+            f"{server_url}; remote sessions are not stored locally.",
+            err=True,
+        )
+        return None
+    if res.get("daemon_id") and res["daemon_id"] != target_daemon_id:
+        click.echo(
+            f"Error: session {session_id[:8]}… belongs to daemon "
+            f"'{res['daemon_id']}', not '{target_daemon_id}'.",
+            err=True,
+        )
+        return None
+    return res
+
+
 def _print_resumed_history(
     cwd: Path,
     session_id: str,
     target_daemon_id: str | None,
+    server_url: str,
 ) -> None:
-    """Verify ``session_id`` is in the cwd store, then print history.
+    """Print a session's past transcript before resuming it.
 
-    For remote daemons the history lives on the daemon's machine, not
-    here — we skip printing and tell the user.
+    Local resume reads the transcript straight off this machine; remote
+    resume (``--daemon``) asks the Server to fetch it from the owning
+    daemon, where the agent's ``~/.claude`` / ``~/.codex`` actually live.
     """
     if target_daemon_id is not None:
-        click.echo(
-            "⚠️  --history printing is local-only; "
-            "remote daemon sessions keep their history on the daemon.",
-            err=True,
-        )
+        _print_remote_resumed_history(session_id, server_url)
         return
     store = CwdSessionStore.load_or_create(cwd)
     entry = store.get(session_id)
@@ -1155,6 +1269,57 @@ def _print_resumed_history(
     except NotImplementedError as exc:
         click.echo(f"⚠️  {exc}", err=True)
         history = []
+    _render_history(session_id, history)
+
+
+def _print_remote_resumed_history(session_id: str, server_url: str) -> None:
+    """Fetch and print a remote session's transcript via the Server.
+
+    Best-effort: history display never blocks the resume. A missing session,
+    an offline daemon, or an unimplemented provider reader each produce a
+    one-line hint and the resume proceeds.
+    """
+
+    async def _run() -> dict | None:
+        async with ServerClient(base_url=server_url, daemon_id="cli-direct") as client:
+            return await client.get_session_history(session_id)
+
+    try:
+        result = asyncio.run(_run())
+    except RPCRejected as exc:
+        if exc.status == 503:
+            click.echo(
+                "⚠️  daemon offline — remote history unavailable right now.",
+                err=True,
+            )
+        else:
+            click.echo(f"⚠️  could not fetch remote history: {exc}", err=True)
+        return
+    except Exception as exc:
+        click.echo(f"⚠️  could not fetch remote history: {exc}", err=True)
+        return
+    if result is None:
+        click.echo(
+            f"⚠️  session {session_id[:8]}… not found on Server; no history to show.",
+            err=True,
+        )
+        return
+    if result.get("not_implemented"):
+        click.echo(
+            "⚠️  history reader for this provider is not yet implemented.",
+            err=True,
+        )
+        return
+    history = [
+        Message(role=m.get("role", ""), content=m.get("content", ""),
+                timestamp=m.get("timestamp"))
+        for m in result.get("messages", [])
+    ]
+    _render_history(session_id, history)
+
+
+def _render_history(session_id: str, history: list[Message]) -> None:
+    """Print a transcript (shared by the local and remote resume paths)."""
     if not history:
         click.echo(
             f"(no history available for {session_id[:8]}…)",

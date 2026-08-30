@@ -101,14 +101,23 @@ def test_print_chat_session_list_filter_no_match(tmp_path: Path, capsys) -> None
 
 def test_print_resumed_history_missing_session(tmp_path: Path, capsys) -> None:
     with pytest.raises(SystemExit) as exc_info:
-        _print_resumed_history(tmp_path / "proj", "nope", None)
+        _print_resumed_history(tmp_path / "proj", "nope", None, "http://x")
     assert exc_info.value.code == 2
     assert "not found" in capsys.readouterr().err
 
 
-def test_print_resumed_history_remote_skip(tmp_path: Path, capsys) -> None:
-    _print_resumed_history(tmp_path / "proj", "sess-abc", target_daemon_id="d1")
-    assert "local-only" in capsys.readouterr().err
+def test_print_resumed_history_remote_dispatches(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Remote resume delegates to the Server-backed history fetch."""
+    called: dict = {}
+
+    def _fake_remote(session_id, server_url):
+        called.update(session_id=session_id, server_url=server_url)
+
+    monkeypatch.setattr("agt.cli.main._print_remote_resumed_history", _fake_remote)
+    _print_resumed_history(tmp_path / "proj", "sess-abc", "d1", "http://x")
+    assert called == {"session_id": "sess-abc", "server_url": "http://x"}
 
 
 def test_print_resumed_history_prints_turns(
@@ -125,7 +134,7 @@ def test_print_resumed_history_prints_turns(
             Message(role="assistant", content="4"),
         ],
     )
-    _print_resumed_history(cwd, "sess-abc", None)
+    _print_resumed_history(cwd, "sess-abc", None, "http://x")
     out = capsys.readouterr().out
     assert "what is 2+2" in out
     assert "4" in out
@@ -139,5 +148,5 @@ def test_print_resumed_history_no_history_available(
     store.record(session_id="sess-abc", task_id="chat-1", first_prompt="hi", turn_count=1)
 
     monkeypatch.setattr("agt.cli.main.load_history", lambda provider, session_id: [])
-    _print_resumed_history(cwd, "sess-abc", None)
+    _print_resumed_history(cwd, "sess-abc", None, "http://x")
     assert "no history available" in capsys.readouterr().err

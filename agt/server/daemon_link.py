@@ -93,6 +93,26 @@ class DaemonLink:
             )
             return False
 
+    async def get_session_history(self, session_id: str, provider: str) -> dict:
+        """Fetch a session's transcript from the remote daemon's local reader.
+
+        The transcript lives on the daemon machine (``~/.claude`` /
+        ``~/.codex``); this round-trips a ``session.history`` RPC so the CLI
+        can print it on a remote ``--resume`` without re-running the agent.
+
+        Raises ``WSRPCUnavailable`` when the link is down or not yet
+        negotiated, and propagates ``RPCRejected`` / ``WSRPCUncertain`` from
+        the underlying call. The caller maps these to a 503/502.
+        """
+        link = self._link
+        if link is None or link.closed or not link.supports_rpc_v1:
+            raise WSRPCUnavailable("daemon offline")
+        return await link.call(
+            "session.history",
+            {"session_id": session_id, "provider": provider},
+            timeout_ms=8000,
+        )
+
     async def run(self, shutdown: asyncio.Event) -> None:
         """Dial + read-loop + reconnect. Runs until ``shutdown`` is set.
 

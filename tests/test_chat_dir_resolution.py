@@ -112,8 +112,7 @@ class TestChatTurnRemoteAgentCwd:
             cli_mod._chat_turn_remote(
                 provider="claude", prompt="hi", task_id="t1",
                 target_daemon_id="d1", server_url="http://x",
-                work_dir_str=None, cwd=tmp_path,
-                first_prompt="hi", turn_index=1,
+                work_dir_str=None,
                 identity_did="did:agt:reviewer",
                 agent_cwd=target,
             )
@@ -127,8 +126,7 @@ class TestChatTurnRemoteAgentCwd:
             cli_mod._chat_turn_remote(
                 provider="claude", prompt="hi", task_id="t1",
                 target_daemon_id="d1", server_url="http://x",
-                work_dir_str=None, cwd=Path("."),
-                first_prompt="hi", turn_index=1,
+                work_dir_str=None,
                 # agent_cwd omitted (default None).
             )
         assert captured["kw"].get("agent_cwd") is None

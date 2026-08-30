@@ -133,6 +133,41 @@ class ServerClient:
         resp = await self._get(f"/api/daemons/{daemon_id}/bindings")
         return resp.get("bindings", [])
 
+    async def list_daemon_sessions(
+        self, daemon_id: str, limit: int = 200
+    ) -> list[dict]:
+        """List every conversation session a daemon has executed (cross-dir)."""
+        resp = await self._get(
+            f"/api/daemons/{daemon_id}/sessions", params={"limit": limit}
+        )
+        return resp.get("sessions", [])
+
+    async def resolve_session(self, session_id: str) -> dict | None:
+        """Reverse-lookup a session → {task_id, provider, identity, dir}.
+
+        Returns None when the Server has no such session (404).
+        """
+        try:
+            return await self._get(f"/api/sessions/{session_id}")
+        except RPCRejected as exc:
+            if exc.status == 404:
+                return None
+            raise
+
+    async def get_session_history(self, session_id: str) -> dict | None:
+        """Fetch a remote session's transcript via the Server.
+
+        Returns ``{"messages": [...], "not_implemented": bool}`` on success,
+        or ``None`` when the Server has no such session (404). Raises
+        ``RPCRejected`` for 503 (daemon offline) / 502 (daemon rejection).
+        """
+        try:
+            return await self._get(f"/api/sessions/{session_id}/history")
+        except RPCRejected as exc:
+            if exc.status == 404:
+                return None
+            raise
+
     # ── Tasks ─────────────────────────────────────────────────────
 
     async def submit_task(

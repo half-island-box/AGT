@@ -189,10 +189,11 @@ class TestRunChatTurnForwarding:
         assert captured["kw"]["identity_did"] == "did:agt:reviewer"
 
 
-class TestRemoteSessionRecording:
-    """Remote chat must record the daemon-reported session into the LOCAL
-    cwd store so ``agt chat --list`` shows ``--daemon`` chats (the pre-fix
-    behaviour only wrote to the daemon's workspace dir)."""
+class TestRemoteSessionNotRecordedLocally:
+    """Remote chat must NOT mirror the daemon-reported session into the
+    LOCAL cwd store — the conversation belongs to the daemon (and the
+    Server). It is read back via ``agt chat --list --daemon=X``, not the
+    local ``<cwd>/.agt/sessions.json``."""
 
     def _stub(self):
         class _Stub:
@@ -211,7 +212,8 @@ class TestRemoteSessionRecording:
                         "session_id": "sid-remote-1"}
         return _Stub
 
-    def test_records_session_to_cwd_store(self, tmp_path) -> None:
+    def test_chat_turn_remote_leaves_cwd_store_untouched(self, tmp_path) -> None:
+        import inspect
         from agt.cli import main as cli_mod
         from agt.task.session import CwdSessionStore
 
@@ -223,73 +225,25 @@ class TestRemoteSessionRecording:
                 target_daemon_id="d1",
                 server_url="http://x",
                 work_dir_str=None,
-                cwd=tmp_path,
-                first_prompt="hi",
-                turn_index=1,
                 identity_did="did:agt:reviewer",
+                agent_cwd=tmp_path,
             )
-        entry = CwdSessionStore.load(tmp_path).get("sid-remote-1")
-        assert entry is not None
-        assert entry.task_id == "t1"
-        assert entry.turn_count == 1
-        assert entry.first_prompt == "hi"
-        assert entry.provider == "claude"
-
-    def test_second_turn_bumps_turn_count(self, tmp_path) -> None:
-        from agt.cli import main as cli_mod
-        from agt.task.session import CwdSessionStore
-
-        with patch("agt.cli.main.ServerClient", self._stub()):
-            cli_mod._chat_turn_remote(
-                provider="claude", prompt="hi", task_id="t1",
-                target_daemon_id="d1", server_url="http://x",
-                work_dir_str=None, cwd=tmp_path,
-                first_prompt="hi", turn_index=1,
-            )
-            cli_mod._chat_turn_remote(
-                provider="claude", prompt="again", task_id="t1",
-                target_daemon_id="d1", server_url="http://x",
-                work_dir_str=None, cwd=tmp_path,
-                first_prompt=None, turn_index=2,
-            )
-        store = CwdSessionStore.load(tmp_path)
-        assert len(store.list_sessions()) == 1  # same sid, updated not duplicated
-        assert store.get("sid-remote-1").turn_count == 2
-
-    def test_resume_rejected_deletes_stale_sid(self, tmp_path) -> None:
-        from agt.cli import main as cli_mod
-        from agt.task.session import CwdSessionStore
-
+        # The remote turn never touches the local cwd store: no session
+        # (nor any other) entry is recorded.
         store = CwdSessionStore.load_or_create(tmp_path)
-        store.record(session_id="stale-1", task_id="t0",
-                     first_prompt="old", turn_count=1)
+        assert store.list_sessions() == []
 
-        class _Rejected:
-            def __init__(self, *a, **k): pass
-            async def __aenter__(self): return self
-            async def __aexit__(self, *a): return False
-            async def submit_task(self, **kw): return "t1"
-            async def stream_task(self, tid, **kw):
-                yield {"type": "snapshot", "status": "running", "stdout": ""}
-                yield {"type": "done", "status": "completed", "stdout": "ok",
-                       "stderr": "", "session_id": "fresh-2",
-                       "exit_code": 0, "resume_rejected": True}
-            async def wait_task(self, tid, **kw):
-                return {"status": "completed", "stdout": "ok", "stderr": "",
-                        "task_id": tid, "exit_code": 0, "duration": 0.1,
-                        "session_id": "fresh-2", "resume_rejected": True}
+    def test_chat_turn_remote_has_no_cwd_store_params(self) -> None:
+        """Structural guard: the mirror hook (cwd / first_prompt /
+        turn_index / resume_session_id) is gone from the remote turn."""
+        import inspect
+        from agt.cli import main as cli_mod
 
-        with patch("agt.cli.main.ServerClient", _Rejected):
-            cli_mod._chat_turn_remote(
-                provider="claude", prompt="hi", task_id="t1",
-                target_daemon_id="d1", server_url="http://x",
-                work_dir_str=None, cwd=tmp_path,
-                first_prompt="hi", turn_index=1,
-                resume_session_id="stale-1",
-            )
-        store = CwdSessionStore.load(tmp_path)
-        assert store.get("stale-1") is None
-        assert store.get("fresh-2") is None  # rejected resume records nothing
+        sig = inspect.signature(cli_mod._chat_turn_remote)
+        assert "cwd" not in sig.parameters
+        assert "first_prompt" not in sig.parameters
+        assert "turn_index" not in sig.parameters
+        assert "resume_session_id" not in sig.parameters
 
 
 class _ResumeFixtureMixin:
@@ -405,71 +359,36 @@ class TestChatResumeProvider(_ResumeFixtureMixin):
         assert "not found" in result.output
 
 
-# ── chat() records identity_did to the cwd store ──────────────────
-
-
-class TestRemoteSessionRecordsIdentity(_ResumeFixtureMixin):
-    """When --identity is supplied, ``_chat_turn_remote`` stamps it onto
-    the cwd store entry so ``--resume`` can restore it later."""
-
-    def test_records_identity_did_to_entry(self, tmp_path) -> None:
-        from agt.cli import main as cli_mod
-        from agt.task.session import CwdSessionStore
-
-        class _Stub:
-            def __init__(self, *a, **k): pass
-            async def __aenter__(self): return self
-            async def __aexit__(self, *a): return False
-            async def submit_task(self, **kw): return "t1"
-            async def stream_task(self, tid, **kw):
-                yield {"type": "snapshot", "status": "running", "stdout": ""}
-                yield {"type": "done", "status": "completed", "stdout": "ok",
-                       "stderr": "", "task_id": tid, "exit_code": 0,
-                       "duration": 0.1, "session_id": "sid-with-identity",
-                       "resume_rejected": False}
-            async def wait_task(self, tid, **kw):
-                return {"status": "completed", "stdout": "ok", "stderr": "",
-                        "task_id": tid, "exit_code": 0, "duration": 0.1,
-                        "session_id": "sid-with-identity"}
-
-        with patch("agt.cli.main.ServerClient", _Stub):
-            cli_mod._chat_turn_remote(
-                provider="codex", prompt="hi", task_id="t1",
-                target_daemon_id="d1", server_url="http://x",
-                work_dir_str=None, cwd=tmp_path,
-                first_prompt="hi", turn_index=1,
-                identity_did="did:agt:code-reviewer",
-            )
-
-        entry = CwdSessionStore.load(tmp_path).get("sid-with-identity")
-        assert entry is not None
-        assert entry.identity_did == "did:agt:code-reviewer"
-
-
-# ── chat() --resume restores + validates identity_did ──────────────
+# ── chat() --resume restores + validates identity_did (remote) ──────
+#
+# For a remote daemon the identity is recovered from the Server's session
+# resolve record (``_resolve_remote_session``), not the local cwd store.
 
 
 class TestResumeRestoresIdentity(_ResumeFixtureMixin):
-    """``--resume <sid>`` without ``--identity`` restores the DID recorded
-    in ``sessions.json``. When ``--identity`` IS supplied, it must match
-    the recorded value exactly — except when the index has no recorded
-    DID (legacy / first-time assignment), in which case the supplied
-    value is accepted."""
+    """``--resume <sid> --daemon=X`` without ``--identity`` restores the
+    DID the Server recorded for that session. When ``--identity`` IS
+    supplied, it must match the recorded value exactly — except when the
+    record has no DID (legacy / first-time assignment), in which case the
+    supplied value is accepted."""
 
-    def _run_chat(self, args, monkeypatch, tmp_path, captured):
-        """Invoke ``chat`` with the chat loop no-op'd; capture resolved
-        identity_did via _pick_provider hook. ``captured`` is a dict
-        mutated by the test."""
+    def _run_chat(self, args, monkeypatch, tmp_path, captured, resolve_record):
+        """Invoke ``chat`` with the chat loop no-op'd; capture the
+        resolved ``identity_did`` / ``provider`` reaching the chat loop.
+        ``resolve_record`` is what the Server resolve returns."""
         monkeypatch.chdir(tmp_path)
-        # All callers pass ``--dir=<tmp_path>`` so chat() skips the
-        # local-daemon detection branch entirely (we only care about
-        # the identity restore path here).
+        # --dir skips the local-daemon detection branch; we only care
+        # about the identity restore path here.
         monkeypatch.setattr(
             "agt.cli.main._pick_provider",
             lambda provider, *a, **kw: provider or "claude",
         )
         monkeypatch.setattr(
             "agt.cli.main._print_resumed_history", lambda *a, **kw: None
+        )
+        monkeypatch.setattr(
+            "agt.cli.main._resolve_remote_session",
+            lambda *a, **kw: resolve_record,
         )
         # Capture identity_did reaching the chat loop (== chat() final
         # resolved value).
@@ -479,37 +398,38 @@ class TestResumeRestoresIdentity(_ResumeFixtureMixin):
         )
         return _invoke(args)
 
+    def _record(self, tmp_path, *, identity_did):
+        return {
+            "task_id": "t0", "session_id": self.SID,
+            "provider": "codex", "identity_did": identity_did,
+            "daemon_id": "any", "dir": str(tmp_path),
+        }
+
     def test_resume_without_identity_restores_recorded(
         self, tmp_path, monkeypatch
     ) -> None:
-        # Seed: provider=codex, identity=code-reviewer DID.
-        self._seed_store(
-            tmp_path, provider="codex",
-            identity_did="did:agt:code-reviewer",
-        )
+        # Server record: provider=codex, identity=code-reviewer DID.
         captured: dict = {}
         result = self._run_chat(
             ["chat", "--resume", self.SID, "--provider", "codex",
              "--daemon", "any", "--dir", str(tmp_path)],
             monkeypatch, tmp_path, captured,
+            self._record(tmp_path, identity_did="did:agt:code-reviewer"),
         )
         assert result.exit_code in (0, 1), result.output
-        # No --identity passed; chat() restored it from the index.
+        # No --identity passed; chat() restored it from the Server record.
         assert captured.get("identity_did") == "did:agt:code-reviewer"
 
     def test_resume_with_matching_identity_succeeds(
         self, tmp_path, monkeypatch
     ) -> None:
-        self._seed_store(
-            tmp_path, provider="codex",
-            identity_did="did:agt:code-reviewer",
-        )
         captured: dict = {}
         result = self._run_chat(
             ["chat", "--resume", self.SID,
              "--identity", "did:agt:code-reviewer",
              "--daemon", "any", "--dir", str(tmp_path)],
             monkeypatch, tmp_path, captured,
+            self._record(tmp_path, identity_did="did:agt:code-reviewer"),
         )
         assert result.exit_code in (0, 1), result.output
         assert captured.get("identity_did") == "did:agt:code-reviewer"
@@ -519,16 +439,13 @@ class TestResumeRestoresIdentity(_ResumeFixtureMixin):
     ) -> None:
         # Session was opened with code-reviewer; resuming with fronted
         # is a hard error (would silently switch identities mid-session).
-        self._seed_store(
-            tmp_path, provider="codex",
-            identity_did="did:agt:code-reviewer",
-        )
         captured: dict = {}
         result = self._run_chat(
             ["chat", "--resume", self.SID,
              "--identity", "did:agt:fronted-design-engineer",
              "--daemon", "any", "--dir", str(tmp_path)],
             monkeypatch, tmp_path, captured,
+            self._record(tmp_path, identity_did="did:agt:code-reviewer"),
         )
         assert result.exit_code == 2
         assert "refusing to resume with" in result.output
@@ -538,15 +455,15 @@ class TestResumeRestoresIdentity(_ResumeFixtureMixin):
     def test_resume_legacy_session_no_identity_accepts_new(
         self, tmp_path, monkeypatch
     ) -> None:
-        # Legacy entry: identity_did was never recorded (None).
+        # Legacy record: identity_did was never recorded (None).
         # First-time assignment: any supplied --identity is accepted.
-        self._seed_store(tmp_path, provider="codex", identity_did=None)
         captured: dict = {}
         result = self._run_chat(
             ["chat", "--resume", self.SID,
              "--identity", "did:agt:code-reviewer",
              "--daemon", "any", "--dir", str(tmp_path)],
             monkeypatch, tmp_path, captured,
+            self._record(tmp_path, identity_did=None),
         )
         assert result.exit_code in (0, 1), result.output
         assert captured.get("identity_did") == "did:agt:code-reviewer"
@@ -555,12 +472,12 @@ class TestResumeRestoresIdentity(_ResumeFixtureMixin):
         self, tmp_path, monkeypatch
     ) -> None:
         # Legacy + no --identity passed: no identity used.
-        self._seed_store(tmp_path, provider="codex", identity_did=None)
         captured: dict = {}
         result = self._run_chat(
             ["chat", "--resume", self.SID, "--provider", "codex",
              "--daemon", "any", "--dir", str(tmp_path)],
             monkeypatch, tmp_path, captured,
+            self._record(tmp_path, identity_did=None),
         )
         assert result.exit_code in (0, 1), result.output
         assert captured.get("identity_did") is None

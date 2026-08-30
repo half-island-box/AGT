@@ -207,6 +207,66 @@ class SessionOut(BaseModel):
     session_id: str
 
 
+class DaemonSessionOut(BaseModel):
+    """One conversation session as seen from a daemon-level listing.
+
+    ``dir`` is the agent subprocess's working directory on the daemon
+    machine (``agent_cwd``, falling back to ``work_dir``); it is the
+    directory the session actually ran in.
+    """
+
+    session_id: str
+    task_id: str
+    provider: str
+    identity_did: str | None = None
+    dir: str | None = None
+    first_prompt: str
+    last_seen_at: str
+
+
+class ListDaemonSessionsResponse(BaseModel):
+    """Response listing a daemon's conversation sessions."""
+
+    sessions: list[DaemonSessionOut]
+
+
+class SessionResolveOut(BaseModel):
+    """Reverse lookup of one session_id → task / provider / identity.
+
+    Backs remote ``agt chat --resume <sid> --daemon=X``: the CLI recovers
+    provider + identity, reuses ``task_id`` so the Server reopens the task
+    (keeping the SessionModel pointer), and re-derives the agent cwd.
+    """
+
+    task_id: str
+    session_id: str
+    provider: str
+    identity_did: str | None = None
+    daemon_id: str | None = None
+    dir: str | None = None
+
+
+class SessionHistoryMessage(BaseModel):
+    """One message in a provider session transcript (remote history echo)."""
+
+    role: str  # "user" | "assistant" | "system"
+    content: str
+    timestamp: float | None = None
+
+
+class SessionHistoryOut(BaseModel):
+    """Transcript of a remote session, read from the owning daemon.
+
+    ``not_implemented`` is True when the daemon's history reader has no
+    support for this session's provider (e.g. cursor) — the CLI then shows
+    the same "not implemented" hint it does for local resumes.
+    """
+
+    session_id: str
+    messages: list[SessionHistoryMessage]
+    not_implemented: bool = False
+
+
 # ── Heartbeat ───────────────────────────────────────────────────────
 
 
@@ -381,6 +441,11 @@ __all__ = [
     "StreamDeltaEvent",
     "StreamDoneEvent",
     "SessionOut",
+    "DaemonSessionOut",
+    "ListDaemonSessionsResponse",
+    "SessionResolveOut",
+    "SessionHistoryMessage",
+    "SessionHistoryOut",
     "HeartbeatRequest",
     "HeartbeatResponse",
     "HealthResponse",

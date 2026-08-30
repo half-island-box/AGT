@@ -156,17 +156,22 @@ def test_ws_server_tasks_available_wakes_claim_loop() -> None:
     server = DaemonWsServer(port=0, secret="x")
     assert not server.claim_wakeup.is_set()
 
-    result = server._handle_inbound_request("tasks.available", {})
+    result = asyncio.run(server._handle_inbound_request("tasks.available", {}))
 
     assert result == {"ok": True}
     assert server.claim_wakeup.is_set()
 
 
 def test_ws_server_unknown_method_still_rejected() -> None:
-    """Methods other than ``tasks.available`` keep returning unknown_method."""
+    """Methods other than ``tasks.available`` / ``session.history`` keep
+    returning unknown_method."""
     server = DaemonWsServer(port=0, secret="x")
-    with pytest.raises(ValueError, match="unknown_method"):
-        server._handle_inbound_request("tasks.assign", {})
+
+    async def _run() -> None:
+        with pytest.raises(ValueError, match="unknown_method"):
+            await server._handle_inbound_request("tasks.assign", {})
+
+    asyncio.run(_run())
 
 
 # ── DaemonLink notify_available ──────────────────────────────────────

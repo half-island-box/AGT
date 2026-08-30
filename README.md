@@ -58,7 +58,7 @@ Start an interactive session:
 agt chat --provider claude
 ```
 
-Session metadata is stored in `<project>/.agt/sessions.json`. In Git repositories, agt idempotently adds `.agt/` to `.gitignore`.
+Session metadata is stored in `<project>/.agt/sessions.json`. In Git repositories, agt idempotently adds `.agt/` to `.gitignore`. Remote `--daemon` chat sessions belong to the daemon and are not mirrored locally — list them across directories with `agt chat --list --daemon=<id>` and resume with `agt chat --resume <sid> --daemon=<id>` (provider / identity / directory are resolved through the server). Remote resume prints the past transcript too: the transcript stays on the daemon machine and the server fetches it on demand over the reverse-dial link.
 
 ## Server and daemon mode
 
