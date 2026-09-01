@@ -159,20 +159,29 @@ async def _claim_candidate(
 
     The caller is responsible for ``db.commit()`` — keeping that outside
     lets tests stage the work and inspect intermediate state if needed.
+
+    Phase 1: claiming a Step also transitions the parent Job to running.
     """
     candidate.status = "running"
     candidate.daemon_id = daemon_id
     candidate.updated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-    session_rec = (
-        await db.execute(
-            select(SessionModel).where(
-                SessionModel.task_id == candidate.task_id,
-                SessionModel.provider == candidate.provider,
+    # Drive the parent Job state machine.
+    from .job_service import claim_step
+
+    await claim_step(db, candidate.task_id)
+
+    session_rec = None
+    if candidate.job_id is not None:
+        session_rec = (
+            await db.execute(
+                select(SessionModel).where(
+                    SessionModel.job_id == candidate.job_id,
+                    SessionModel.provider == candidate.provider,
+                )
             )
-        )
-    ).scalars().first()
-    resume_session_id = session_rec.session_id if session_rec else None
+        ).scalars().first()
+    resume_session_id = session_rec.session_id if session_rec else candidate.session_id
 
     # Option D: render the identity's AGENTS.md here so the daemon can
     # write it directly without a callback to the Server. Defensive: a

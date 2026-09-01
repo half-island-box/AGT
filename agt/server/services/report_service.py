@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models import SessionModel, TaskModel
+from ..models import JobModel, SessionModel, TaskModel
 from ..stream_hub import default_hub
 
 
@@ -44,14 +44,19 @@ async def record_task_result_for_daemon(
     status: str,
     session_id: str | None,
     resume_rejected: bool,
+    outcome: str | None = None,
 ) -> dict:
-    """Record execution results on a claimed task.
+    """Record execution results on a claimed task (Step).
 
     ``daemon_id`` semantics differ by caller:
     - HTTP path passes ``payload.daemon_id`` (backward compat).
     - WS path passes the configured ``self.daemon_id`` (body value
       ignored, so a misbehaving daemon can't spoof another daemon's
       report).
+
+    Phase 1: ``outcome`` drives the parent Job state machine. Legacy
+    daemons that don't send ``outcome`` have it derived from
+    ``exit_code`` (0 -> done, otherwise error).
 
     On success returns ``{"recorded": True}``. On business failure
     raises ``ValueError({"type": "task_not_found"|"task_not_owned",
@@ -72,50 +77,82 @@ async def record_task_result_for_daemon(
     task.duration = duration
     task.status = status
     task.resume_rejected = resume_rejected
+
+    # Derive outcome for legacy daemons. Chat jobs stay in waiting_input
+    # after a clean exit so the user can submit the next turn; task jobs
+    # complete on a clean exit. Query the parent Job explicitly to avoid
+    # lazy-loading the ORM relationship inside an async session.
+    if outcome is None:
+        job_type = "task"
+        if task.job_id is not None:
+            job = await db.get(JobModel, task.job_id)
+            if job is not None:
+                job_type = job.job_type
+        if exit_code == 0 and job_type == "chat":
+            outcome = "needs_input"
+        else:
+            outcome = "done" if exit_code == 0 else "error"
+    task.outcome = outcome
+
     task.updated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-    # Phase 4: session rows are keyed by (task_id, identity_did, provider).
+    # Phase 1: session rows are keyed by (job_id, identity_did, provider).
     # ``identity_did`` normalizes to "" for identity-less tasks so the
     # session pointer matches the empty-string sentinel the model uses.
     ctx = task.identity_did or ""
+    job_id = task.job_id
 
     if resume_rejected:
         # Drop the session pointer — the agent refused to resume, so
         # the next claim on this task should start a fresh session.
-        await db.execute(
-            SessionModel.__table__.delete().where(
-                (SessionModel.task_id == task_id)
-                & (SessionModel.identity_did == ctx)
-                & (SessionModel.provider == task.provider)
+        if job_id is not None:
+            await db.execute(
+                SessionModel.__table__.delete().where(
+                    (SessionModel.job_id == job_id)
+                    & (SessionModel.identity_did == ctx)
+                    & (SessionModel.provider == task.provider)
+                )
             )
-        )
         task.session_id = None
     elif session_id:
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-        existing = (
-            await db.execute(
-                select(SessionModel).where(
-                    SessionModel.task_id == task_id,
-                    SessionModel.identity_did == ctx,
-                    SessionModel.provider == task.provider,
-                )
-            )
-        ).scalars().first()
-        if existing is None:
-            db.add(
-                SessionModel(
-                    task_id=task_id,
-                    identity_did=ctx,
-                    provider=task.provider,
-                    session_id=session_id,
-                    created_at=now,
-                    updated_at=now,
-                )
-            )
+        if job_id is None:
+            # Should not happen for new tasks, but tolerate legacy rows
+            # that weren't backfilled by writing no session pointer.
+            task.session_id = session_id
         else:
-            existing.session_id = session_id
-            existing.updated_at = now
-        task.session_id = session_id
+            existing = (
+                await db.execute(
+                    select(SessionModel).where(
+                        SessionModel.job_id == job_id,
+                        SessionModel.identity_did == ctx,
+                        SessionModel.provider == task.provider,
+                    )
+                )
+            ).scalars().first()
+            if existing is None:
+                db.add(
+                    SessionModel(
+                        job_id=job_id,
+                        identity_did=ctx,
+                        provider=task.provider,
+                        session_id=session_id,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+            else:
+                existing.session_id = session_id
+                existing.updated_at = now
+            task.session_id = session_id
+
+    await db.flush()
+
+    # Drive the parent Job state machine.
+    if job_id is not None:
+        from .job_service import report_step
+
+        await report_step(db, task_id, outcome)
 
     await db.commit()
 
@@ -133,6 +170,7 @@ async def record_task_result_for_daemon(
             "session_id": task.session_id,
             "exit_code": task.exit_code,
             "resume_rejected": task.resume_rejected,
+            "outcome": task.outcome,
         },
     )
     return {"recorded": True}

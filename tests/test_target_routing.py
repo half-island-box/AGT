@@ -7,7 +7,7 @@ Verifies that ``target_daemon_id`` on submit pins a task to one daemon:
 - A free task (no ``target_daemon_id``) stays claimable by any matching
   daemon — both classes coexist in the same queue.
 - Submit validation rejects a target that has not registered the provider.
-- A terminal task reopens on resubmit (session continuity across turns).
+- A terminal task_id cannot be resubmitted (Steps are immutable → 409).
 """
 
 from __future__ import annotations
@@ -196,11 +196,15 @@ def test_submit_targeted_ok_and_status_reflects_target(tmp_path) -> None:
         dispose()
 
 
-# ── Terminal reopen (session continuity) ──────────────────────────
+# ── Terminal task_id resubmit (immutable Step) ────────────────────
 
 
-def test_terminal_task_reopens_on_resubmit(tmp_path) -> None:
-    """A completed task_id can be resubmitted → reopens as pending."""
+def test_terminal_task_resubmit_conflicts(tmp_path) -> None:
+    """A completed task_id cannot be resubmitted → 409 (no reopen).
+
+    Phase 1 makes a Step immutable: session continuity is expressed as a
+    new Step under the same Job, not by reopening a terminal task_id.
+    """
     client, dispose = _build_app(tmp_path)
     try:
         _register(client, "d1", ["claude"])
@@ -220,12 +224,11 @@ def test_terminal_task_reopens_on_resubmit(tmp_path) -> None:
         assert report.status_code == 200
         assert client.get("/api/tasks/t-reuse/status").json()["status"] == "completed"
 
-        # Resubmit the same task_id → reopens (201, pending), not 409.
+        # Resubmit the same task_id → 409 (terminal task_ids no longer reopen).
         again = client.post("/api/tasks/submit", json={
             "prompt": "turn 2", "provider": "claude", "task_id": "t-reuse",
         })
-        assert again.status_code == 201
-        assert client.get("/api/tasks/t-reuse/status").json()["status"] == "pending"
+        assert again.status_code == 409
     finally:
         dispose()
 

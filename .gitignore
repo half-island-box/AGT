@@ -29,3 +29,4 @@ htmlcov/
 .agt/
 
 openspec/
+tests/

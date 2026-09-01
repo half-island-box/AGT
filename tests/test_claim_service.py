@@ -32,7 +32,7 @@ from agt.server.config import ServerConfig
 from agt.server.database import make_engine, make_session_factory
 from agt.server.main import create_app
 from agt.server.migrate_schema import ensure_schema, migrate_identities_and_sessions
-from agt.server.models import Base, RuntimeModel, TaskModel
+from agt.server.models import Base, JobModel, RuntimeModel, TaskModel
 from agt.server.services.binding_service import create_binding
 from agt.server.services.claim_service import claim_tasks_for_daemon
 from agt.server.services.identity_service import (
@@ -111,13 +111,19 @@ async def _seed_runtime(factory, *, daemon_id: str, provider: str) -> None:
 async def _submit_task(factory, *, identity_did: str | None) -> str:
     async with factory() as session:
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        job = JobModel(
+            job_id="t1", status="queued", job_type="task",
+            provider="claude", identity_did=identity_did,
+            created_at=now, updated_at=now,
+        )
         task = TaskModel(
-            task_id="t1", provider="claude",
+            task_id="t1", job_id="t1", provider="claude",
             prompt="hi", status="pending",
             work_dir=None, agent_cwd=None,
             identity_did=identity_did,
             created_at=now, updated_at=now,
         )
+        session.add(job)
         session.add(task)
         await session.commit()
     return "t1"
@@ -271,13 +277,18 @@ class TestIdentityMdRendering:
                         session,
                     )
                     await session.commit()
-                # Re-queue a fresh task so we can claim again.
+                # Re-queue a fresh Job + Step so we can claim again.
                 async with factory() as session:
                     now = datetime.now(timezone.utc).strftime(
                         "%Y-%m-%d %H:%M:%S"
                     )
+                    session.add(JobModel(
+                        job_id="t2", status="queued", job_type="task",
+                        provider="claude", identity_did="did:agt:dynamic",
+                        created_at=now, updated_at=now,
+                    ))
                     session.add(TaskModel(
-                        task_id="t2", provider="claude",
+                        task_id="t2", job_id="t2", provider="claude",
                         prompt="again", status="pending",
                         work_dir=None, agent_cwd=None,
                         identity_did="did:agt:dynamic",

@@ -23,6 +23,7 @@ from .models import Base
 from .routes.daemons import router as daemons_router
 from .routes.heartbeat import router as heartbeat_router
 from .routes.identities import router as identities_router
+from .routes.jobs import router as jobs_router
 from .routes.runtimes import router as runtimes_router
 from .routes.sessions import router as sessions_router
 from .routes.tasks import router as tasks_router
@@ -191,6 +192,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     app.include_router(runtimes_router)
     app.include_router(daemons_router)
     app.include_router(tasks_router)
+    app.include_router(jobs_router)
     app.include_router(sessions_router)
     app.include_router(heartbeat_router)
     app.include_router(identities_router)

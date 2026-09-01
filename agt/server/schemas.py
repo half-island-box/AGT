@@ -119,6 +119,9 @@ class ReportRequest(BaseModel):
     status: str  # "completed" | "failed" | "timeout" | "cancelled"
     session_id: str | None = None
     resume_rejected: bool = False
+    # Phase 1: structured outcome reported by the daemon. Server derives
+    # from exit_code when omitted for backward compatibility.
+    outcome: str | None = None
 
 
 class ReportResponse(BaseModel):
@@ -200,7 +203,7 @@ class StreamDoneEvent(BaseModel):
 
 
 class SessionOut(BaseModel):
-    task_id: str
+    job_id: str
     # Phase 4: "" for identity-less (legacy) sessions.
     identity_did: str = ""
     provider: str
@@ -231,13 +234,14 @@ class ListDaemonSessionsResponse(BaseModel):
 
 
 class SessionResolveOut(BaseModel):
-    """Reverse lookup of one session_id → task / provider / identity.
+    """Reverse lookup of one session_id → job / provider / identity.
 
     Backs remote ``agt chat --resume <sid> --daemon=X``: the CLI recovers
-    provider + identity, reuses ``task_id`` so the Server reopens the task
-    (keeping the SessionModel pointer), and re-derives the agent cwd.
+    provider + identity and obtains ``job_id`` so it can submit subsequent
+    turns to ``POST /api/jobs/{job_id}/input``.
     """
 
+    job_id: str
     task_id: str
     session_id: str
     provider: str

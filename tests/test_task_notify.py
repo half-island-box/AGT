@@ -28,7 +28,7 @@ from agt.daemon.ws_server import DaemonWsServer
 from agt.server.config import ServerConfig
 from agt.server.daemon_link import DaemonLink
 from agt.server.database import make_engine, make_session_factory
-from agt.server.models import Base, RuntimeModel, TaskModel
+from agt.server.models import Base, JobModel, RuntimeModel, TaskModel
 from agt.server.routes.tasks import _notify_daemons
 from agt.server.services.claim_service import (
     claim_tasks_for_daemon,
@@ -79,8 +79,15 @@ async def _submit_task(factory, *, task_id: str = "t1", provider: str = "claude"
     async with factory() as session:
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         session.add(
+            JobModel(
+                job_id=task_id, status="queued", job_type="task",
+                provider=provider, created_at=now, updated_at=now,
+            )
+        )
+        session.add(
             TaskModel(
                 task_id=task_id,
+                job_id=task_id,
                 provider=provider,
                 prompt="hi",
                 status="pending",

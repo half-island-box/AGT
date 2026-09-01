@@ -30,7 +30,7 @@ from agt.server.daemon_link import DaemonLink
 from agt.server.database import make_engine, make_session_factory
 from agt.server.main import create_app
 from agt.server.migrate_schema import ensure_schema
-from agt.server.models import Base, TaskModel
+from agt.server.models import Base, JobModel, SessionModel, TaskModel
 
 SECRET = "remote-history-test-secret"
 
@@ -166,9 +166,17 @@ async def _seed_task(
 ) -> None:
     now = _now()
     async with factory() as session:
+        session.add(JobModel(
+            job_id=task_id, status="done", job_type="task",
+            provider=provider, created_at=now, updated_at=now,
+        ))
+        session.add(SessionModel(
+            job_id=task_id, identity_did="", provider=provider,
+            session_id=session_id, created_at=now, updated_at=now,
+        ))
         session.add(TaskModel(
-            task_id=task_id, provider=provider, prompt="hi",
-            status="completed", daemon_id=daemon_id, session_id=session_id,
+            task_id=task_id, job_id=task_id, provider=provider, prompt="hi",
+            status="completed", daemon_id=daemon_id,
             created_at=now, updated_at=now,
         ))
         await session.commit()

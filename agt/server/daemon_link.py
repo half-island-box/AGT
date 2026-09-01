@@ -286,6 +286,7 @@ class DaemonLink:
                     status=str(body["status"]),
                     session_id=body.get("session_id"),
                     resume_rejected=bool(body.get("resume_rejected", False)),
+                    outcome=body.get("outcome"),
                 )
         except ValueError as exc:
             payload = (

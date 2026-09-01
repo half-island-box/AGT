@@ -153,27 +153,29 @@ class TestRunChatTurnForwarding:
 
         captured: dict = {}
 
-        async def _fake_submit(self, **kw):
+        async def _fake_create_job(self, **kw):
             captured["kw"] = kw
-            return "t1"
+            return {"job_id": "j1", "task_id": "t1", "status": "queued"}
 
-        async def _fake_wait(self, tid, **kw):
-            return {"status": "completed", "stdout": "ok", "stderr": "", "task_id": tid,
-                    "exit_code": 0, "duration": 0.1}
+        async def _fake_stream(self, tid, **kw):
+            yield {"type": "snapshot", "status": "running", "stdout": ""}
+            yield {"type": "done", "status": "completed", "stdout": "ok",
+                   "stderr": "", "session_id": None, "exit_code": 0,
+                   "resume_rejected": False}
 
         class _Stub:
             def __init__(self, *a, **k): pass
             async def __aenter__(self): return self
             async def __aexit__(self, *a): return False
-            submit_task = _fake_submit
-            wait_task = _fake_wait
+            create_job = _fake_create_job
+            stream_task = _fake_stream
 
         with patch("agt.cli.main.ServerClient", _Stub):
             cli_mod._run_chat_turn(
                 controller=None,
                 provider="claude",
                 line="hi",
-                task_id="t1",
+                job_id=None,
                 cwd=__import__("pathlib").Path("."),
                 agt_meta_dir=None,
                 work_dir_str=None,
@@ -221,7 +223,7 @@ class TestRemoteSessionNotRecordedLocally:
             cli_mod._chat_turn_remote(
                 provider="claude",
                 prompt="hi",
-                task_id="t1",
+                step_id="t1",
                 target_daemon_id="d1",
                 server_url="http://x",
                 work_dir_str=None,

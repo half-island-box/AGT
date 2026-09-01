@@ -199,10 +199,14 @@ def _sessions_columns(engine) -> list[str]:
 
 def test_legacy_sessions_rebuilt_with_identity_pk(tmp_path: Path) -> None:
     """A pre-Phase 4 sessions table is rebuilt to the 3-column PK, with
-    existing rows preserved and stamped identity_did=''."""
+    existing rows preserved, task_id resolved to job_id, and identity_did=''."""
     engine = _engine(tmp_path)
     with engine.begin() as conn:
         conn.exec_driver_sql(LEGACY_TASKS_DDL)
+        conn.exec_driver_sql(
+            "INSERT INTO tasks (task_id, provider, prompt, status, created_at, updated_at) "
+            "VALUES ('chat-1', 'claude', 'hello', 'completed', '2026-01-01', '2026-01-01')"
+        )
         conn.exec_driver_sql(LEGACY_SESSIONS_DDL)
         conn.exec_driver_sql(
             "INSERT INTO sessions (task_id, provider, session_id, created_at) "
@@ -211,15 +215,15 @@ def test_legacy_sessions_rebuilt_with_identity_pk(tmp_path: Path) -> None:
 
     _run_migration(engine, tmp_path / "home")
 
-    assert _sessions_pk(engine) == ["task_id", "identity_did", "provider"]
+    assert _sessions_pk(engine) == ["job_id", "identity_did", "provider"]
     cols = _sessions_columns(engine)
     assert "identity_did" in cols
     assert "updated_at" in cols
 
     with engine.connect() as conn:
         row = conn.execute(text(
-            "SELECT task_id, identity_did, provider, session_id, created_at, updated_at "
-            "FROM sessions WHERE task_id='chat-1'"
+            "SELECT job_id, identity_did, provider, session_id, created_at, updated_at "
+            "FROM sessions WHERE job_id='chat-1'"
         )).fetchone()
     assert row == ("chat-1", "", "claude", "sess-xyz", "2026-01-01", "2026-01-01")
 
@@ -229,6 +233,10 @@ def test_sessions_rebuild_is_idempotent(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     with engine.begin() as conn:
         conn.exec_driver_sql(LEGACY_TASKS_DDL)
+        conn.exec_driver_sql(
+            "INSERT INTO tasks (task_id, provider, prompt, status, created_at, updated_at) "
+            "VALUES ('chat-1', 'claude', 'hello', 'completed', '2026-01-01', '2026-01-01')"
+        )
         conn.exec_driver_sql(LEGACY_SESSIONS_DDL)
         conn.exec_driver_sql(
             "INSERT INTO sessions (task_id, provider, session_id, created_at) "

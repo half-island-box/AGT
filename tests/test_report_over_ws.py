@@ -37,7 +37,7 @@ from agt.server.config import ServerConfig
 from agt.server.database import make_engine, make_session_factory, session_scope
 from agt.server.main import create_app
 from agt.server.migrate_schema import ensure_schema, migrate_identities_and_sessions
-from agt.server.models import Base, SessionModel, TaskModel
+from agt.server.models import Base, JobModel, SessionModel, TaskModel
 from agt.server.services.report_service import record_task_result_for_daemon
 
 
@@ -78,6 +78,7 @@ def _fresh_db():
         async with session_scope(factory) as db:
             await db.execute(delete(TaskModel))
             await db.execute(delete(SessionModel))
+            await db.execute(delete(JobModel))
             await db.commit()
 
     asyncio.run(_setup())
@@ -87,8 +88,12 @@ def _fresh_db():
 async def _seed_task(factory, task_id: str, daemon_id: str | None) -> None:
     now = _utcnow()
     async with session_scope(factory) as db:
+        db.add(JobModel(
+            job_id=task_id, status="running", job_type="task",
+            provider="claude", created_at=now, updated_at=now,
+        ))
         db.add(TaskModel(
-            task_id=task_id, provider="claude", prompt="hi",
+            task_id=task_id, job_id=task_id, provider="claude", prompt="hi",
             status="running", daemon_id=daemon_id,
             created_at=now, updated_at=now,
         ))
@@ -141,7 +146,7 @@ def test_service_session_id_upserts_session_model() -> None:
             )
         async with session_scope(factory) as db:
             rows = (await db.execute(
-                select(SessionModel).where(SessionModel.task_id == "t1")
+                select(SessionModel).where(SessionModel.job_id == "t1")
             )).scalars().all()
         assert len(rows) == 1
         assert rows[0].session_id == "sess-A"
@@ -155,7 +160,7 @@ def test_service_session_id_upserts_session_model() -> None:
             )
         async with session_scope(factory) as db:
             rows = (await db.execute(
-                select(SessionModel).where(SessionModel.task_id == "t1")
+                select(SessionModel).where(SessionModel.job_id == "t1")
             )).scalars().all()
         assert len(rows) == 1
         assert rows[0].session_id == "sess-B"
@@ -173,7 +178,7 @@ def test_service_resume_rejected_deletes_session_model() -> None:
         # Seed a SessionModel row first.
         async with session_scope(factory) as db:
             db.add(SessionModel(
-                task_id="t1", provider="claude",
+                job_id="t1", provider="claude",
                 session_id="old", created_at=_utcnow(), updated_at=_utcnow(),
             ))
             await db.commit()
@@ -187,7 +192,7 @@ def test_service_resume_rejected_deletes_session_model() -> None:
             )
         async with session_scope(factory) as db:
             rows = (await db.execute(
-                select(SessionModel).where(SessionModel.task_id == "t1")
+                select(SessionModel).where(SessionModel.job_id == "t1")
             )).scalars().all()
         assert rows == []
         row = await _row(factory, "t1")
@@ -368,6 +373,8 @@ def test_http_report_route_still_works() -> None:
         factory = make_session_factory(engine)
         async with session_scope(factory) as db:
             await db.execute(delete(TaskModel))
+            await db.execute(delete(SessionModel))
+            await db.execute(delete(JobModel))
             await db.commit()
         await _seed_task(factory, "t-http", "d-http")
         cfg._engine_ref = engine  # type: ignore[attr-defined]
@@ -588,6 +595,7 @@ def test_report_end_to_end_over_reverse_dial() -> None:
             async with session_scope(factory) as db:
                 await db.execute(delete(TaskModel))
                 await db.execute(delete(SessionModel))
+                await db.execute(delete(JobModel))
                 await db.commit()
             # Seed a task as if this daemon had already claimed it.
             await _seed_task(factory, "t-e2e", "d-e2e")
@@ -646,7 +654,7 @@ def test_report_end_to_end_over_reverse_dial() -> None:
                 async with session_scope(factory) as db:
                     sess = (await db.execute(
                         select(SessionModel).where(
-                            SessionModel.task_id == "t-e2e"
+                            SessionModel.job_id == "t-e2e"
                         )
                     )).scalars().all()
                 assert len(sess) == 1

@@ -23,7 +23,7 @@ from agt.server.config import ServerConfig
 from agt.server.database import make_engine, make_session_factory, session_scope
 from agt.server.main import create_app
 from agt.server.migrate_schema import ensure_schema
-from agt.server.models import Base, SessionModel, TaskModel
+from agt.server.models import Base, JobModel, SessionModel, TaskModel
 from agt.server.services.report_service import record_task_result_for_daemon
 
 
@@ -56,8 +56,13 @@ async def _seed_task(
 ) -> None:
     now = _utcnow()
     async with session_scope(factory) as db:
+        db.add(JobModel(
+            job_id=task_id, status="running", job_type="task",
+            provider="claude", identity_did=identity_did,
+            created_at=now, updated_at=now,
+        ))
         db.add(TaskModel(
-            task_id=task_id, provider="claude", prompt="hi",
+            task_id=task_id, job_id=task_id, provider="claude", prompt="hi",
             status="running", daemon_id=daemon_id,
             identity_did=identity_did,
             created_at=now, updated_at=now,
@@ -68,7 +73,7 @@ async def _seed_task(
 async def _session_rows(factory, task_id: str) -> list[SessionModel]:
     async with session_scope(factory) as db:
         return (await db.execute(
-            select(SessionModel).where(SessionModel.task_id == task_id)
+            select(SessionModel).where(SessionModel.job_id == task_id)
         )).scalars().all()
 
 
@@ -124,11 +129,11 @@ def test_resume_rejected_deletes_only_matching_identity(tmp_path) -> None:
         # identities. Only the cr slot should be dropped on reject.
         async with session_scope(factory) as db:
             db.add(SessionModel(
-                task_id="t1", identity_did="did:agt:cr", provider="claude",
+                job_id="t1", identity_did="did:agt:cr", provider="claude",
                 session_id="cr-sess", created_at=now, updated_at=now,
             ))
             db.add(SessionModel(
-                task_id="t1", identity_did="did:agt:translator", provider="claude",
+                job_id="t1", identity_did="did:agt:translator", provider="claude",
                 session_id="tr-sess", created_at=now, updated_at=now,
             ))
             await db.commit()
@@ -152,11 +157,11 @@ def test_session_route_exact_and_list(tmp_path) -> None:
     async def _seed() -> None:
         async with session_scope(factory) as db:
             db.add(SessionModel(
-                task_id="chat-1", identity_did="did:agt:cr", provider="claude",
+                job_id="chat-1", identity_did="did:agt:cr", provider="claude",
                 session_id="cr-sess", created_at=now, updated_at=now,
             ))
             db.add(SessionModel(
-                task_id="chat-1", identity_did="", provider="claude",
+                job_id="chat-1", identity_did="", provider="claude",
                 session_id="legacy-sess", created_at=now, updated_at=now,
             ))
             await db.commit()
@@ -169,7 +174,7 @@ def test_session_route_exact_and_list(tmp_path) -> None:
         # Exact lookup with identity → the cr slot.
         resp = client.get(
             "/api/sessions", params={
-                "task_id": "chat-1", "provider": "claude",
+                "job_id": "chat-1", "provider": "claude",
                 "identity_did": "did:agt:cr",
             }
         )
@@ -178,19 +183,19 @@ def test_session_route_exact_and_list(tmp_path) -> None:
 
         # Exact lookup with no identity → the legacy "" slot.
         resp = client.get(
-            "/api/sessions", params={"task_id": "chat-1", "provider": "claude"}
+            "/api/sessions", params={"job_id": "chat-1", "provider": "claude"}
         )
         assert resp.status_code == 200
         assert resp.json()["session_id"] == "legacy-sess"
 
         # Unknown provider → 404.
         resp = client.get(
-            "/api/sessions", params={"task_id": "chat-1", "provider": "codex"}
+            "/api/sessions", params={"job_id": "chat-1", "provider": "codex"}
         )
         assert resp.status_code == 404
 
-        # Task-wide list → both slots.
-        resp = client.get("/api/sessions", params={"task_id": "chat-1"})
+        # Job-wide list → both slots.
+        resp = client.get("/api/sessions", params={"job_id": "chat-1"})
         assert resp.status_code == 200
         sessions = resp.json()["sessions"]
         assert {(s["identity_did"], s["provider"]) for s in sessions} == {

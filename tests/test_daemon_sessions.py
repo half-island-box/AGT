@@ -29,7 +29,7 @@ from agt.server.config import ServerConfig
 from agt.server.database import make_engine, make_session_factory
 from agt.server.main import create_app
 from agt.server.migrate_schema import ensure_schema
-from agt.server.models import Base, TaskModel
+from agt.server.models import Base, JobModel, SessionModel, TaskModel
 
 
 SECRET = "daemon-sessions-test-secret"
@@ -69,8 +69,19 @@ async def _seed_task(
 ) -> None:
     now = _now()
     async with factory() as session:
+        session.add(JobModel(
+            job_id=task_id, status="done", job_type="task",
+            provider=provider, identity_did=identity_did,
+            agent_cwd=agent_cwd, work_dir=work_dir,
+            created_at=now, updated_at=now,
+        ))
+        if session_id is not None:
+            session.add(SessionModel(
+                job_id=task_id, identity_did=identity_did or "", provider=provider,
+                session_id=session_id, created_at=now, updated_at=now,
+            ))
         session.add(TaskModel(
-            task_id=task_id, provider=provider, prompt=prompt,
+            task_id=task_id, job_id=task_id, provider=provider, prompt=prompt,
             status="completed", daemon_id=daemon_id, session_id=session_id,
             agent_cwd=agent_cwd, work_dir=work_dir, identity_did=identity_did,
             created_at=now, updated_at=now,
@@ -310,12 +321,12 @@ class TestPrintRemoteSessionList:
 
 
 class TestChatRemoteResumeWiring:
-    def test_resume_reuses_task_id(self, tmp_path, monkeypatch) -> None:
+    def test_resume_reuses_job_id(self, tmp_path, monkeypatch) -> None:
         from agt.cli import main as cli_mod
         monkeypatch.chdir(tmp_path)
 
-        rec = {"task_id": "reused-t1", "session_id": "s9",
-               "provider": "claude", "identity_did": None,
+        rec = {"job_id": "reused-job-1", "task_id": "reused-t1",
+               "session_id": "s9", "provider": "claude", "identity_did": None,
                "daemon_id": "d1", "dir": str(tmp_path)}
 
         captured = {}
@@ -333,9 +344,10 @@ class TestChatRemoteResumeWiring:
                 input="hi\n",
             )
         assert result.exit_code == 0, result.output
-        # The resolved task_id is reused (not a fresh chat-xxxx id) so the
-        # Server reopens the task and keeps the session pointer alive.
-        assert captured["task_id"] == "reused-t1"
+        # The resolved job_id is reused (not a fresh chat-xxxx id) so the
+        # Server appends the next turn to the same Job and keeps the
+        # session pointer alive.
+        assert captured["job_id"] == "reused-job-1"
         assert captured["agent_cwd"] == Path(str(tmp_path))
 
     def test_resume_resolves_provider_when_omitted(
@@ -344,9 +356,10 @@ class TestChatRemoteResumeWiring:
         from agt.cli import main as cli_mod
         monkeypatch.chdir(tmp_path)
 
-        rec = {"task_id": "reused-t1", "session_id": "s9",
-               "provider": "codex", "identity_did": "did:agt:r",
-               "daemon_id": "d1", "dir": str(tmp_path)}
+        rec = {"job_id": "reused-job-1", "task_id": "reused-t1",
+               "session_id": "s9", "provider": "codex",
+               "identity_did": "did:agt:r", "daemon_id": "d1",
+               "dir": str(tmp_path)}
 
         captured = {}
 
@@ -362,7 +375,8 @@ class TestChatRemoteResumeWiring:
                 input="hi\n",
             )
         assert result.exit_code == 0, result.output
-        # Provider + identity recovered from the Server, not the CLI flags.
+        # Provider + identity + job_id recovered from the Server, not the
+        # CLI flags.
         assert captured["provider"] == "codex"
         assert captured["identity_did"] == "did:agt:r"
-        assert captured["task_id"] == "reused-t1"
+        assert captured["job_id"] == "reused-job-1"

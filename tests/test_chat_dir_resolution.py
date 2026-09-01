@@ -25,14 +25,19 @@ from agt.daemon.config import AGT_DAEMON_NAMESPACE
 # ── Helpers ────────────────────────────────────────────────────────
 
 
-def _stub_submit(calls):
+def _stub_server(calls):
     class _Stub:
         def __init__(self, *a, **k): pass
         async def __aenter__(self): return self
         async def __aexit__(self, *a): return False
-        async def submit_task(self, **kw):
-            calls["submit"] = kw
-            return "t1"
+        async def create_job(self, **kw):
+            calls["create_job"] = kw
+            return {"job_id": "j1", "task_id": "t1", "status": "queued"}
+        async def job_input(self, job_id, prompt):
+            return {"job_id": job_id, "task_id": "t2", "status": "queued"}
+        async def stream_task(self, task_id):
+            yield {"type": "done", "status": "completed", "stdout": "",
+                   "stderr": "", "session_id": None, "exit_code": 0}
         async def wait_task(self, tid, **kw):
             return {"task_id": tid, "provider": kw.get("provider", "claude"),
                     "status": "completed", "stdout": "", "stderr": "",
@@ -79,11 +84,12 @@ def _invoke(*args):
     return CliRunner().invoke(cli, list(args), input="hi\n")
 
 
-# ── agent_cwd wiring through _chat_turn_remote ──────────────────────
+# ── agent_cwd wiring through _remote_chat_step_id ───────────────────
 #
 # The full chat loop is hard to drive from a unit test (interactivity +
-# stdin EOF). We test the dispatch layer (``_chat_turn_remote``) directly
-# so the agent_cwd forwarding is observable.
+# stdin EOF). We test the Job/Step creation dispatch layer
+# (``_remote_chat_step_id``) directly so the agent_cwd forwarding is
+# observable.
 
 
 class TestChatTurnRemoteAgentCwd:
@@ -92,16 +98,14 @@ class TestChatTurnRemoteAgentCwd:
             def __init__(self, *a, **k): pass
             async def __aenter__(self): return self
             async def __aexit__(self, *a): return False
-            async def submit_task(self, **kw):
+            async def create_job(self, **kw):
                 captured["kw"] = kw
-                return "t1"
-            async def wait_task(self, tid, **kw):
-                return {"status": "completed", "stdout": "", "stderr": "",
-                        "task_id": tid, "exit_code": 0, "duration": 0.0,
-                        "session_id": None}
+                return {"job_id": "j1", "task_id": "t1", "status": "queued"}
+            async def job_input(self, job_id, prompt):
+                return {"job_id": job_id, "task_id": "t2", "status": "queued"}
         return _Stub
 
-    def test_agent_cwd_forwarded_to_submit(self, tmp_path) -> None:
+    def test_agent_cwd_forwarded_to_create_job(self, tmp_path) -> None:
         from agt.cli import main as cli_mod
 
         captured: dict = {}
@@ -109,10 +113,10 @@ class TestChatTurnRemoteAgentCwd:
         target.mkdir()
 
         with patch("agt.cli.main.ServerClient", self._stub(captured)):
-            cli_mod._chat_turn_remote(
-                provider="claude", prompt="hi", task_id="t1",
-                target_daemon_id="d1", server_url="http://x",
-                work_dir_str=None,
+            cli_mod._remote_chat_step_id(
+                "http://x",
+                job_id=None, prompt="hi", provider="claude",
+                target_daemon_id="d1", work_dir_str=None,
                 identity_did="did:agt:reviewer",
                 agent_cwd=target,
             )
@@ -123,11 +127,12 @@ class TestChatTurnRemoteAgentCwd:
 
         captured: dict = {}
         with patch("agt.cli.main.ServerClient", self._stub(captured)):
-            cli_mod._chat_turn_remote(
-                provider="claude", prompt="hi", task_id="t1",
-                target_daemon_id="d1", server_url="http://x",
-                work_dir_str=None,
-                # agent_cwd omitted (default None).
+            cli_mod._remote_chat_step_id(
+                "http://x",
+                job_id=None, prompt="hi", provider="claude",
+                target_daemon_id="d1", work_dir_str=None,
+                identity_did=None,
+                agent_cwd=None,
             )
         assert captured["kw"].get("agent_cwd") is None
 
@@ -138,7 +143,7 @@ class TestChatTurnRemoteAgentCwd:
 class TestChatCmdResolution:
     def _run_chat(self, args, monkeypatch, tmp_path, *, stub=True):
         calls: dict = {}
-        ctx = patch("agt.cli.main.ServerClient", _stub_submit(calls)) if stub else patch.dict("sys.modules", {})
+        ctx = patch("agt.cli.main.ServerClient", _stub_server(calls)) if stub else patch.dict("sys.modules", {})
         with ctx, patch("agt.cli.main._pick_provider", return_value="claude"), \
              patch("agt.cli.main._pid_is_agt_daemon", return_value=True):
             result = _invoke(*args)
@@ -165,7 +170,7 @@ class TestChatCmdResolution:
             monkeypatch, tmp_path,
         )
         assert result.exit_code in (0, 1), result.output
-        assert calls["submit"]["agent_cwd"] == str(tmp_path.resolve())
+        assert calls["create_job"]["agent_cwd"] == str(tmp_path.resolve())
 
     def test_cloud_only_file_errors_even_when_port_matches(
         self, tmp_path, monkeypatch
@@ -246,7 +251,7 @@ class TestChatCmdResolution:
             monkeypatch, tmp_path,
         )
         assert result.exit_code in (0, 1), result.output
-        assert calls["submit"]["agent_cwd"] == str(tmp_path.resolve())
+        assert calls["create_job"]["agent_cwd"] == str(tmp_path.resolve())
 
     def test_explicit_dir_skips_local_detection(
         self, tmp_path, monkeypatch
@@ -262,7 +267,7 @@ class TestChatCmdResolution:
             monkeypatch, tmp_path,
         )
         assert result.exit_code in (0, 1), result.output
-        assert calls["submit"]["agent_cwd"] == str(target.resolve())
+        assert calls["create_job"]["agent_cwd"] == str(target.resolve())
 
     def test_dir_nonexistent_forwarded_verbatim(
         self, tmp_path, monkeypatch
@@ -279,7 +284,7 @@ class TestChatCmdResolution:
             monkeypatch, tmp_path,
         )
         assert result.exit_code in (0, 1), result.output
-        assert calls["submit"]["agent_cwd"] == str(target)
+        assert calls["create_job"]["agent_cwd"] == str(target)
 
     def test_dir_file_path_not_rejected(self, tmp_path, monkeypatch) -> None:
         """No local file/dir check either — the path is interpreted on the
@@ -295,7 +300,7 @@ class TestChatCmdResolution:
             monkeypatch, tmp_path,
         )
         assert result.exit_code in (0, 1), result.output
-        assert calls["submit"]["agent_cwd"] == str(f)
+        assert calls["create_job"]["agent_cwd"] == str(f)
 
     def test_no_dir_no_daemon_flag_ok(self, tmp_path, monkeypatch) -> None:
         """No --daemon and no --dir → local-controller path; no exit error."""

@@ -241,6 +241,7 @@ class ServerClient:
         status: str,
         session_id: str | None = None,
         resume_rejected: bool = False,
+        outcome: str | None = None,
     ) -> bool:
         payload = {
             "daemon_id": self._daemon_id,
@@ -252,6 +253,7 @@ class ServerClient:
             "status": status,
             "session_id": session_id,
             "resume_rejected": resume_rejected,
+            "outcome": outcome,
         }
         resp = await self._post(f"/api/tasks/{task_id}/report", payload)
         return bool(resp.get("recorded", False))
@@ -357,20 +359,73 @@ class ServerClient:
                     payload.setdefault("type", event_type)
                     yield payload
 
+    # ── Jobs ──────────────────────────────────────────────────────
+
+    async def create_job(
+        self,
+        prompt: str,
+        provider: str = "claude",
+        target_daemon_id: str | None = None,
+        work_dir: str | None = None,
+        identity_did: str | None = None,
+        agent_cwd: str | None = None,
+    ) -> dict:
+        """Create a Job with its first Step. Returns {"job_id", "task_id", "status"}."""
+        payload: dict[str, Any] = {"prompt": prompt, "provider": provider}
+        if target_daemon_id is not None:
+            payload["target_daemon_id"] = target_daemon_id
+        if work_dir is not None:
+            payload["work_dir"] = work_dir
+        if identity_did is not None:
+            payload["identity_did"] = identity_did
+        if agent_cwd is not None:
+            payload["agent_cwd"] = agent_cwd
+        return await self._post("/api/jobs", payload)
+
+    async def job_input(self, job_id: str, prompt: str) -> dict:
+        """Append a new Step to an existing Job."""
+        return await self._post(f"/api/jobs/{job_id}/input", {"prompt": prompt})
+
+    async def job_status(self, job_id: str) -> dict:
+        return await self._get(f"/api/jobs/{job_id}/status")
+
+    async def job_cancel(self, job_id: str) -> bool:
+        resp = await self._post(f"/api/jobs/{job_id}/cancel", {})
+        return bool(resp.get("cancelled", False))
+
+    async def wait_job(
+        self,
+        job_id: str,
+        timeout: float = 300.0,
+        poll_interval: float = 1.0,
+    ) -> dict:
+        """Poll a Job until it leaves pending/running/waiting_input, or timeout."""
+        deadline = time.monotonic() + timeout
+        while True:
+            status = await self.job_status(job_id)
+            if status.get("status") not in ("pending", "running", "waiting_input"):
+                return status
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"job {job_id} did not settle within {timeout:.0f}s "
+                    f"(status={status.get('status')})"
+                )
+            await asyncio.sleep(poll_interval)
+
     # ── Sessions ──────────────────────────────────────────────────
 
     async def get_session(
         self,
-        task_id: str,
+        job_id: str,
         provider: str,
         identity_did: str | None = None,
     ) -> str | None:
-        """Return session_id for the given task+provider (+identity), or None.
+        """Return session_id for the given job+provider (+identity), or None.
 
         ``identity_did`` omitted (or None) means the identity-less slot —
         matching the server's ``""`` sentinel for legacy sessions.
         """
-        params: dict[str, Any] = {"task_id": task_id, "provider": provider}
+        params: dict[str, Any] = {"job_id": job_id, "provider": provider}
         if identity_did is not None:
             params["identity_did"] = identity_did
         try:

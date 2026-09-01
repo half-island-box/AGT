@@ -659,7 +659,7 @@ async def _poll_fallback(
 def _chat_turn_remote(
     provider: str,
     prompt: str,
-    task_id: str,
+    step_id: str,
     target_daemon_id: str,
     server_url: str,
     work_dir_str: str | None,
@@ -668,28 +668,19 @@ def _chat_turn_remote(
 ) -> None:
     """Run one chat turn pinned to a remote daemon via the Server.
 
+    The caller has already created the Step (via Job creation or
+    ``/input``); this function only streams/waits for ``step_id`` to
+    finish.
+
     Remote session state belongs to the daemon, not this cwd — the session
     index is written on the daemon's machine (``<agent_cwd>/.agt/
     sessions.json``) and by the Server (``TaskModel``); the local cwd store
     is deliberately left untouched. Use ``agt chat --list --daemon=X`` to
     read it back from the Server.
-
-    ``agent_cwd`` is the agent subprocess's working directory on the
-    daemon machine (also the IDENTITY.md / AGENTS.md injection point).
-    Forwarded via ``submit_task(agent_cwd=...)`` when not None.
     """
     async def _remote() -> dict | None:
         async with ServerClient(base_url=server_url, daemon_id="cli-direct") as client:
-            await client.submit_task(
-                prompt=prompt,
-                provider=provider,
-                task_id=task_id,
-                target_daemon_id=target_daemon_id,
-                work_dir=work_dir_str,
-                identity_did=identity_did,
-                agent_cwd=str(agent_cwd) if agent_cwd is not None else None,
-            )
-            return await _stream_and_wait(client, task_id, target_daemon_id)
+            return await _stream_and_wait(client, step_id, target_daemon_id)
 
     try:
         asyncio.run(_remote())
@@ -792,11 +783,10 @@ def chat(
             err=True,
         )
         sys.exit(2)
-    identity_did = _coerce_identity_did(identity_did)
     """Interactive chat mode with session continuity.
 
     With ``--daemon`` each turn is submitted to the Server, pinned to that
-    daemon, and polled to completion; the shared ``task_id`` keeps the
+    daemon, and polled to completion; the shared ``job_id`` keeps the
     remote agent's session alive across turns. Without it, the local agent
     runs directly.
 
@@ -817,6 +807,7 @@ def chat(
     Without either flag, a **new** session is started and recorded on
     exit.
     """
+    identity_did = _coerce_identity_did(identity_did)
     cwd = Path(os.getcwd())
 
     if list_mode:
@@ -830,13 +821,15 @@ def chat(
     # session index for remote daemons — it records every task a daemon
     # executed with its session_id + provider + identity + agent cwd. We
     # resolve once up front so the recovered values can drive provider,
-    # identity, the reused task_id, and the agent cwd auto-fill below.
+    # identity, the reused job_id, and the agent cwd auto-fill below.
+    resume_job_id: str | None = None
     resume_task_id: str | None = None
     resume_dir: str | None = None
     if resume_session_id is not None and target_daemon_id is not None:
         _res = _resolve_remote_session(resume_session_id, target_daemon_id, server_url)
         if _res is None:
             sys.exit(2)
+        resume_job_id = _res.get("job_id")
         resume_task_id = _res["task_id"]
         resume_dir = _res.get("dir")
         if provider is None:
@@ -930,9 +923,11 @@ def chat(
     provider = _pick_provider(
         provider, target_daemon_id, server_url, local_controller=controller,
     )
-    # Remote resume reuses the recorded task_id so the Server reopens the
-    # task (keeping the SessionModel pointer) and the daemon truly resumes
-    # the same session; otherwise start a fresh chat task.
+    # Remote resume reuses the recorded job_id so the Server appends the
+    # next turn to the same Job (keeping the SessionModel pointer) and the
+    # daemon truly resumes the same session; otherwise start a fresh chat
+    # task id for local bookkeeping / banner display.
+    job_id = resume_job_id
     task_id = resume_task_id or f"chat-{uuid.uuid4().hex[:8]}"
     # Bare ``agt chat`` no longer creates a per-task meta subdir under
     # ``<cwd>/.agt/tasks/chat-xxx/`` — that directory was always empty
@@ -970,7 +965,7 @@ def chat(
     _chat_loop(
         controller=controller,
         provider=provider,
-        task_id=task_id,
+        job_id=job_id,
         cwd=cwd,
         agt_meta_dir=agt_meta_dir,
         work_dir_str=work_dir_str,
@@ -986,7 +981,7 @@ def _chat_loop(
     *,
     controller: DaemonController | None,
     provider: str,
-    task_id: str,
+    job_id: str | None,
     cwd: Path,
     agt_meta_dir: Path,
     work_dir_str: str | None,
@@ -996,11 +991,17 @@ def _chat_loop(
     identity_did: str | None,
     agent_cwd: Path | None,
 ) -> None:
-    """Read-eval-print loop. Only the first turn carries the explicit
-    ``resume_session_id``; subsequent turns let the agent subprocess
-    drive continuity via its own in-memory state."""
+    """Read-eval-print loop.
+
+    Local path: each turn spawns a fresh Step (new task_id) and relies on
+    the agent's ``--resume session_id`` for continuity.
+
+    Remote path: a Job is created on the first turn (unless resuming) and
+    each turn appends a new Step via ``POST /api/jobs/{job_id}/input``.
+    """
     turn_index = 0
     first_prompt: str | None = None
+    current_job_id = job_id
     while True:
         line = _read_chat_prompt()
         if line is None:
@@ -1016,11 +1017,11 @@ def _chat_loop(
         is_first = turn_index == 1
         if is_first and first_prompt is None:
             first_prompt = line
-        _run_chat_turn(
+        current_job_id = _run_chat_turn(
             controller=controller,
             provider=provider,
             line=line,
-            task_id=task_id,
+            job_id=current_job_id,
             cwd=cwd,
             agt_meta_dir=agt_meta_dir,
             work_dir_str=work_dir_str,
@@ -1043,12 +1044,61 @@ def _read_chat_prompt() -> str | None:
         return None
 
 
+def _remote_chat_step_id(
+    server_url: str,
+    *,
+    job_id: str | None,
+    prompt: str,
+    provider: str,
+    target_daemon_id: str | None,
+    work_dir_str: str | None,
+    identity_did: str | None,
+    agent_cwd: Path | None,
+) -> tuple[str | None, str | None]:
+    """Resolve the Step id for one remote chat turn.
+
+    If ``job_id`` is None, creates a new Job with ``prompt`` as the first
+    Step. Otherwise appends a new Step via ``POST /api/jobs/{job_id}/input``.
+
+    Returns ``(step_id, job_id)`` so the caller can keep the Job id for
+    subsequent turns.
+    """
+
+    async def _create_or_input() -> dict:
+        async with ServerClient(base_url=server_url, daemon_id="cli-direct") as client:
+            if job_id is None:
+                return await client.create_job(
+                    prompt=prompt,
+                    provider=provider,
+                    target_daemon_id=target_daemon_id,
+                    work_dir=work_dir_str,
+                    identity_did=identity_did,
+                    agent_cwd=str(agent_cwd) if agent_cwd is not None else None,
+                )
+            return await client.job_input(job_id, prompt)
+
+    try:
+        resp = asyncio.run(_create_or_input())
+    except Exception as exc:
+        click.echo(f"Error submitting chat turn: {exc}", err=True)
+        return None, job_id
+
+    status = resp.get("status")
+    if status not in ("queued", "running"):
+        click.echo(
+            f"Error: job is {status}; cannot append input.",
+            err=True,
+        )
+        return None, job_id
+    return resp.get("task_id"), resp.get("job_id", job_id)
+
+
 def _run_chat_turn(
     *,
     controller: DaemonController | None,
     provider: str,
     line: str,
-    task_id: str,
+    job_id: str | None,
     cwd: Path,
     agt_meta_dir: Path,
     work_dir_str: str | None,
@@ -1060,24 +1110,46 @@ def _run_chat_turn(
     agent_cwd: Path | None,
     turn_index: int,
     identity_did: str | None,
-) -> None:
-    """Dispatch one chat turn to the local daemon or the remote Server."""
+) -> str | None:
+    """Dispatch one chat turn to the local daemon or the remote Server.
+
+    Returns the (possibly new) ``job_id`` for the remote path, or the
+    unchanged value for the local path.
+    """
     resume_for_turn = initial_resume if is_first else None
     if controller is not None:
+        # Local path: each turn is a fresh Step; continuity is via the
+        # agent's session resume, not a reused task_id.
+        step_id = f"chat-{uuid.uuid4().hex[:8]}"
         _chat_turn_local(
-            controller, provider, line, task_id, cwd, agt_meta_dir,
+            controller, provider, line, step_id, cwd, agt_meta_dir,
             resume_session_id=resume_for_turn,
             first_prompt=first_prompt if is_first else None,
             turn_index=turn_index,
         )
-    else:
-        _chat_turn_remote(
-            provider, line, task_id,
-            target_daemon_id,  # type: ignore[arg-type]
-            server_url, work_dir_str,
-            identity_did=identity_did,
-            agent_cwd=agent_cwd,
-        )
+        return job_id
+
+    # Remote path: create the Job on the first turn, then append Steps.
+    step_id, current_job_id = _remote_chat_step_id(
+        server_url,
+        job_id=job_id,
+        prompt=line,
+        provider=provider,
+        target_daemon_id=target_daemon_id,
+        work_dir_str=work_dir_str,
+        identity_did=identity_did,
+        agent_cwd=agent_cwd,
+    )
+    if step_id is None:
+        return current_job_id
+    _chat_turn_remote(
+        provider, line, step_id,
+        target_daemon_id,  # type: ignore[arg-type]
+        server_url, work_dir_str,
+        identity_did=identity_did,
+        agent_cwd=agent_cwd,
+    )
+    return current_job_id
 
 
 def _print_chat_session_list(

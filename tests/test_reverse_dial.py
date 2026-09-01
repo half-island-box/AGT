@@ -32,7 +32,7 @@ from agt.server.config import ServerConfig
 from agt.server.database import make_engine, make_session_factory, session_scope
 from agt.server.main import create_app
 from agt.server.migrate_schema import ensure_schema, migrate_identities_and_sessions
-from agt.server.models import Base, TaskModel
+from agt.server.models import Base, JobModel, TaskModel
 from agt.server.services.auth_service import TaskToken
 
 
@@ -210,9 +210,14 @@ def test_reverse_dial_claim_round_trip() -> None:
         factory = make_session_factory(engine)
         async with session_scope(factory) as db:
             await db.execute(delete(TaskModel))
+            await db.execute(delete(JobModel))
             now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            db.add(JobModel(
+                job_id="t-claim", status="queued", job_type="task",
+                provider="claude", created_at=now, updated_at=now,
+            ))
             db.add(TaskModel(
-                task_id="t-claim", provider="claude", prompt="x",
+                task_id="t-claim", job_id="t-claim", provider="claude", prompt="x",
                 status="pending", created_at=now, updated_at=now,
             ))
             await db.commit()

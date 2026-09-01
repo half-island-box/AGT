@@ -140,56 +140,33 @@ async def submit_task(
             )
 
     task_id = payload.task_id or _new_task_id()
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
     existing = await db.get(TaskModel, task_id)
     if existing is not None:
-        if existing.status in ("pending", "running"):
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=f"task_id '{task_id}' is already active",
-            )
-        # Terminal task → reopen for a resume turn. Reset execution fields
-        # but keep the session pointer (SessionModel) so the next claim
-        # resumes the same agent session.
-        existing.provider = effective_provider
-        existing.prompt = payload.prompt
-        existing.status = "pending"
-        existing.target_daemon_id = effective_target
-        existing.daemon_id = None
-        existing.exit_code = None
-        existing.stdout = None
-        existing.stderr = None
-        existing.duration = None
-        # Phase 4 workdir: refresh work_dir the same way as a fresh submit
-        # (NULL for remote targets, persisted for local/free).
-        existing.work_dir = _server_work_dir(payload)
-        # cwd injection: forward the user-supplied agent_cwd verbatim —
-        # it's a path the *daemon* will resolve, not the server.
-        existing.agent_cwd = payload.agent_cwd
-        existing.identity_did = payload.identity_did
-        existing.updated_at = now
-        await db.commit()
-        await _notify_daemons(request, effective_target, effective_provider)
-        return SubmitTaskResponse(task_id=task_id, status="pending")
-
-    db.add(
-        TaskModel(
-            task_id=task_id,
-            provider=effective_provider,
-            prompt=payload.prompt,
-            status="pending",
-            target_daemon_id=effective_target,
-            work_dir=_server_work_dir(payload),
-            agent_cwd=payload.agent_cwd,
-            identity_did=payload.identity_did,
-            created_at=now,
-            updated_at=now,
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"task_id '{task_id}' already exists",
         )
+
+    # Phase 1: every submitted task is a single-step Job. The supplied
+    # task_id doubles as the job_id for this backward-compat path.
+    from ..services.job_service import create_job
+
+    job = await create_job(
+        db,
+        provider=effective_provider,
+        prompt=payload.prompt,
+        target_daemon_id=effective_target,
+        work_dir=_server_work_dir(payload),
+        agent_cwd=payload.agent_cwd,
+        identity_did=payload.identity_did,
+        job_id=task_id,
+        task_id=task_id,
+        job_type="task",
     )
     await db.commit()
     await _notify_daemons(request, effective_target, effective_provider)
-    return SubmitTaskResponse(task_id=task_id, status="pending")
+    return SubmitTaskResponse(task_id=task_id, status=job.status)
 
 
 async def _notify_daemons(
@@ -291,6 +268,7 @@ async def report_task(
             status=payload.status,
             session_id=payload.session_id,
             resume_rejected=payload.resume_rejected,
+            outcome=payload.outcome,
         )
         return ReportResponse(**result)
     except ValueError as exc:

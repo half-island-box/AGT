@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...comm.errors import RPCRejected, WSRPCUnavailable, WSRPCUncertain
 from ..database import get_db
-from ..models import SessionModel, TaskModel
+from ..models import JobModel, SessionModel, TaskModel
 from ..schemas import SessionHistoryOut, SessionResolveOut
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
@@ -26,19 +26,19 @@ router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
 @router.get("")
 async def get_session(
-    task_id: str = Query(..., min_length=1),
+    job_id: str = Query(..., min_length=1),
     provider: str | None = Query(None),
     identity_did: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Exact session lookup (provider given) or task-wide list (provider omitted)."""
+    """Exact session lookup (provider given) or job-wide list (provider omitted)."""
     ctx = identity_did or ""
 
     if provider is not None:
         rec = (
             await db.execute(
                 select(SessionModel).where(
-                    SessionModel.task_id == task_id,
+                    SessionModel.job_id == job_id,
                     SessionModel.identity_did == ctx,
                     SessionModel.provider == provider,
                 )
@@ -46,10 +46,10 @@ async def get_session(
         ).scalars().first()
         if rec is None:
             raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="no session for task"
+                status_code=status.HTTP_404_NOT_FOUND, detail="no session for job"
             )
         return {
-            "task_id": task_id,
+            "job_id": job_id,
             "identity_did": rec.identity_did,
             "provider": provider,
             "session_id": rec.session_id,
@@ -57,13 +57,13 @@ async def get_session(
 
     recs = (
         await db.execute(
-            select(SessionModel).where(SessionModel.task_id == task_id)
+            select(SessionModel).where(SessionModel.job_id == job_id)
         )
     ).scalars().all()
     return {
         "sessions": [
             {
-                "task_id": r.task_id,
+                "job_id": r.job_id,
                 "identity_did": r.identity_did,
                 "provider": r.provider,
                 "session_id": r.session_id,
@@ -78,32 +78,51 @@ async def resolve_session(
     session_id: str,
     db: AsyncSession = Depends(get_db),
 ) -> SessionResolveOut:
-    """Reverse-lookup a session by id → task / provider / identity / dir.
+    """Reverse-lookup a session by id → job / provider / identity / dir.
 
     Backs remote ``agt chat --resume <sid> --daemon=X``. ``session_id`` is
-    not the primary key (the SessionModel is keyed by task_id), so this
-    reads the ``TaskModel`` row whose ``session_id`` matches, newest first
-    as a defense against a reused id.
+    not the primary key (the SessionModel is keyed by job_id), so this
+    reads the ``SessionModel`` row whose ``session_id`` matches, newest
+    first as a defense against a reused id, then resolves the owning Job.
     """
-    row = (
+    sess = (
         await db.execute(
-            select(TaskModel)
-            .where(TaskModel.session_id == session_id)
-            .order_by(TaskModel.updated_at.desc())
+            select(SessionModel)
+            .where(SessionModel.session_id == session_id)
+            .order_by(SessionModel.updated_at.desc())
         )
     ).scalars().first()
-    if row is None:
+    if sess is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="no session for id",
         )
+
+    job = await db.get(JobModel, sess.job_id)
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="session job not found",
+        )
+
+    # Return the most recent Step task_id as the canonical task_id for
+    # backward-compatible callers; the CLI resume path uses job_id.
+    latest_step = (
+        await db.execute(
+            select(TaskModel)
+            .where(TaskModel.job_id == job.job_id)
+            .order_by(TaskModel.updated_at.desc())
+        )
+    ).scalars().first()
+
     return SessionResolveOut(
-        task_id=row.task_id,
-        session_id=row.session_id,
-        provider=row.provider,
-        identity_did=row.identity_did,
-        daemon_id=row.daemon_id,
-        dir=row.agent_cwd or row.work_dir,
+        job_id=job.job_id,
+        task_id=latest_step.task_id if latest_step else "",
+        session_id=sess.session_id,
+        provider=job.provider,
+        identity_did=job.identity_did,
+        daemon_id=latest_step.daemon_id if latest_step else None,
+        dir=job.agent_cwd or job.work_dir,
     )
 
 
@@ -124,19 +143,28 @@ async def get_session_history(
     Error mapping: 404 = unknown session id; 503 = no owning daemon / link
     offline; 502 = daemon answered but rejected the history RPC.
     """
-    row = (
+    sess = (
         await db.execute(
-            select(TaskModel)
-            .where(TaskModel.session_id == session_id)
-            .order_by(TaskModel.updated_at.desc())
+            select(SessionModel)
+            .where(SessionModel.session_id == session_id)
+            .order_by(SessionModel.updated_at.desc())
         )
     ).scalars().first()
-    if row is None:
+    if sess is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="no session for id"
         )
 
-    daemon_id = row.daemon_id
+    latest_step = (
+        await db.execute(
+            select(TaskModel)
+            .where(TaskModel.job_id == sess.job_id)
+            .order_by(TaskModel.updated_at.desc())
+        )
+    ).scalars().first()
+    provider = latest_step.provider if latest_step else sess.provider
+    daemon_id = latest_step.daemon_id if latest_step else None
+
     if not daemon_id:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -151,7 +179,7 @@ async def get_session_history(
         )
 
     try:
-        result = await link.get_session_history(session_id, row.provider)
+        result = await link.get_session_history(session_id, provider)
     except (WSRPCUnavailable, WSRPCUncertain):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

@@ -37,12 +37,60 @@ class RuntimeModel(Base):
     last_seen: Mapped[str] = mapped_column(String(32), nullable=False, default="")
 
 
+class JobModel(Base):
+    """A complete job/event tracked by the server.
+
+    A Job is the lifecycle owner for a multi-step task. Each Job contains
+    one or more Step rows (``TaskModel``), each Step representing a single
+    immutable subprocess execution.
+    """
+
+    __tablename__ = "jobs"
+
+    job_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="queued", index=True
+    )
+    # "chat" or "task". Chat jobs derive needs_input from a clean exit so
+    # the conversation can continue via /input; task jobs derive done.
+    job_type: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="task", index=True
+    )
+    # Denormalized from the first Step for convenient querying.
+    provider: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    identity_did: Mapped[str | None] = mapped_column(
+        String(256), nullable=True, index=True
+    )
+    target_daemon_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    work_dir: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    agent_cwd: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    created_at: Mapped[str] = mapped_column(String(32), nullable=False)
+    updated_at: Mapped[str] = mapped_column(String(32), nullable=False)
+
+    steps: Mapped[list["TaskModel"]] = relationship(
+        "TaskModel",
+        back_populates="job",
+        cascade="all, delete-orphan",
+        order_by="TaskModel.created_at",
+        # Async sessions can't lazily load a relationship (MissingGreenlet),
+        # so load Steps eagerly whenever a Job is fetched. ``create_job``
+        # also wires the first Step into this collection in-memory.
+        lazy="selectin",
+    )
+
+
 class TaskModel(Base):
-    """A task tracked by the server."""
+    """A single Step (immutable subprocess execution) tracked by the server."""
 
     __tablename__ = "tasks"
 
     task_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    job_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("jobs.job_id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     provider: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     prompt: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(
@@ -61,6 +109,9 @@ class TaskModel(Base):
     stdout: Mapped[str | None] = mapped_column(Text, nullable=True)
     stderr: Mapped[str | None] = mapped_column(Text, nullable=True)
     duration: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Structured outcome reported by the daemon (or derived by the server
+    # for legacy daemons). Values: done, needs_input, error, spawn_subjob.
+    outcome: Mapped[str | None] = mapped_column(Text, nullable=True)
     parent_task_id: Mapped[str | None] = mapped_column(
         String(64),
         ForeignKey("tasks.task_id", ondelete="SET NULL"),
@@ -85,6 +136,7 @@ class TaskModel(Base):
     created_at: Mapped[str] = mapped_column(String(32), nullable=False)
     updated_at: Mapped[str] = mapped_column(String(32), nullable=False)
 
+    job: Mapped[JobModel | None] = relationship("JobModel", back_populates="steps")
     children: Mapped[list[TaskModel]] = relationship(
         "TaskModel",
         back_populates="parent",
@@ -98,24 +150,28 @@ class TaskModel(Base):
 
 
 class SessionModel(Base):
-    """A pointer mapping (task_id, identity_did, provider) → session_id.
+    """A pointer mapping (job_id, identity_did, provider) → session_id.
 
-    Phase 4: the PK gains ``identity_did`` so the same ``task_id`` under
+    Phase 4: the PK gains ``identity_did`` so the same ``job_id`` under
     different identities (or with no identity at all) is treated as
     distinct conversations. ``identity_did`` is ``""`` for identity-less
     (legacy) sessions — SQLite treats NULL as distinct in UNIQUE
     constraints, so the empty string is the sentinel that keeps
-    ``(task_id, "", provider)`` unique.
+    ``(job_id, "", provider)`` unique.
     """
 
     __tablename__ = "sessions"
 
-    task_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    job_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("jobs.job_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
     identity_did: Mapped[str] = mapped_column(
         String(256), primary_key=True, default=""
     )
     provider: Mapped[str] = mapped_column(String(32), primary_key=True)
-    session_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    session_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     created_at: Mapped[str] = mapped_column(String(32), nullable=False)
     updated_at: Mapped[str] = mapped_column(String(32), nullable=False)
 
@@ -159,6 +215,7 @@ class IdentityBindingModel(Base):
 __all__ = [
     "Base",
     "RuntimeModel",
+    "JobModel",
     "TaskModel",
     "SessionModel",
     "IdentityModel",

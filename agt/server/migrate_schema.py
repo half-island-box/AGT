@@ -27,6 +27,15 @@ def _column_names(conn: Connection, table: str) -> set[str]:
     return {row[1] for row in rows}
 
 
+def _table_exists(conn: Connection, table: str) -> bool:
+    """Return True when ``table`` already exists in the database."""
+    rows = conn.exec_driver_sql(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    ).fetchall()
+    return bool(rows)
+
+
 def _table_pk(conn: Connection, table: str) -> list[str]:
     """Return the PK column names of ``table`` in declaration order.
 
@@ -40,42 +49,58 @@ def _table_pk(conn: Connection, table: str) -> list[str]:
     return [r[1] for r in pk_rows]
 
 
-_SESSIONS_PK = ["task_id", "identity_did", "provider"]
+_SESSIONS_PK = ["job_id", "identity_did", "provider"]
 
 
 def _rebuild_sessions_table(conn: Connection) -> None:
-    """Rebuild ``sessions`` with the Phase 4 composite PK, preserving data.
+    """Rebuild ``sessions`` with the Job-based composite PK, preserving data.
 
     SQLite cannot alter a PRIMARY KEY in place, so we create a new table,
-    copy every row across (stamping ``identity_did=''`` for legacy rows
-    and ``updated_at=created_at``), then swap it in. Idempotent: a no-op
-    when the table already has the new PK (or doesn't exist yet).
+    copy every row across (stamping ``identity_did=''`` for legacy rows,
+    ``updated_at=created_at``, and resolving ``task_id → job_id`` via the
+    ``tasks`` table), then swap it in. Idempotent: a no-op when the table
+    already has the new PK (or doesn't exist yet).
     """
     if _table_pk(conn, "sessions") in ([], _SESSIONS_PK):
         return
+
+    # Determine which columns the old sessions table has.
+    old_cols = _column_names(conn, "sessions")
+    has_identity_did = "identity_did" in old_cols
+    has_updated_at = "updated_at" in old_cols
+
     conn.exec_driver_sql("""
         CREATE TABLE sessions_new (
-            task_id TEXT NOT NULL,
+            job_id TEXT NOT NULL,
             identity_did TEXT NOT NULL DEFAULT '',
             provider TEXT NOT NULL,
             session_id TEXT NOT NULL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
-            PRIMARY KEY (task_id, identity_did, provider)
+            PRIMARY KEY (job_id, identity_did, provider),
+            FOREIGN KEY (job_id) REFERENCES jobs(job_id) ON DELETE CASCADE
         )
     """)
-    conn.exec_driver_sql("""
+
+    identity_expr = "s.identity_did" if has_identity_did else "''"
+    updated_at_expr = "s.updated_at" if has_updated_at else "s.created_at"
+
+    conn.exec_driver_sql(f"""
         INSERT INTO sessions_new
-            (task_id, identity_did, provider, session_id, created_at, updated_at)
-        SELECT task_id, '', provider, session_id, created_at, created_at
-        FROM sessions
+            (job_id, identity_did, provider, session_id, created_at, updated_at)
+        SELECT t.job_id, {identity_expr}, s.provider, s.session_id, s.created_at, {updated_at_expr}
+        FROM sessions s
+        JOIN tasks t ON t.task_id = s.task_id
     """)
     conn.exec_driver_sql("DROP TABLE sessions")
     conn.exec_driver_sql("ALTER TABLE sessions_new RENAME TO sessions")
     conn.exec_driver_sql(
-        "CREATE INDEX IF NOT EXISTS idx_sessions_task ON sessions(task_id)"
+        "CREATE INDEX IF NOT EXISTS idx_sessions_job ON sessions(job_id)"
     )
-    log.info("Rebuilt sessions table with (task_id, identity_did, provider) PK")
+    conn.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS idx_sessions_session ON sessions(session_id)"
+    )
+    log.info("Rebuilt sessions table with (job_id, identity_did, provider) PK")
 
 
 def ensure_schema(conn: Connection) -> None:
@@ -83,7 +108,7 @@ def ensure_schema(conn: Connection) -> None:
     # Step 3.6: daemon-targeted routing. A NULL target means "free task"
     # (any matching daemon may claim); a non-NULL target pins the task to
     # one daemon.
-    if "target_daemon_id" not in _column_names(conn, "tasks"):
+    if _table_exists(conn, "tasks") and "target_daemon_id" not in _column_names(conn, "tasks"):
         conn.exec_driver_sql(
             "ALTER TABLE tasks ADD COLUMN target_daemon_id VARCHAR(64)"
         )
@@ -93,7 +118,7 @@ def ensure_schema(conn: Connection) -> None:
     # the user's cwd at submit time. NULL for legacy tasks (daemon falls
     # back to work_dir_root / provider / task_id) and for remote-daemon
     # tasks (the receiving daemon supplies its own fallback path).
-    if "work_dir" not in _column_names(conn, "tasks"):
+    if _table_exists(conn, "tasks") and "work_dir" not in _column_names(conn, "tasks"):
         conn.exec_driver_sql(
             "ALTER TABLE tasks ADD COLUMN work_dir VARCHAR(512)"
         )
@@ -102,7 +127,7 @@ def ensure_schema(conn: Connection) -> None:
     # Remote chat parity: whether the agent refused to resume a prior
     # session on its last report. Exposed via task status so the CLI can
     # drop a stale cwd-store session entry.
-    if "resume_rejected" not in _column_names(conn, "tasks"):
+    if _table_exists(conn, "tasks") and "resume_rejected" not in _column_names(conn, "tasks"):
         conn.exec_driver_sql(
             "ALTER TABLE tasks ADD COLUMN resume_rejected BOOLEAN"
         )
@@ -111,7 +136,7 @@ def ensure_schema(conn: Connection) -> None:
     # cwd injection (Phase 4 workdir supplement): the agent subprocess's
     # working directory on the daemon machine. Distinct from ``work_dir``
     # (which is AGT metadata). NULL = daemon-side default fallback.
-    if "agent_cwd" not in _column_names(conn, "tasks"):
+    if _table_exists(conn, "tasks") and "agent_cwd" not in _column_names(conn, "tasks"):
         conn.exec_driver_sql(
             "ALTER TABLE tasks ADD COLUMN agent_cwd VARCHAR(1024)"
         )
@@ -120,7 +145,7 @@ def ensure_schema(conn: Connection) -> None:
     # Phase 4 daemon identity: human-readable label for a daemon, stored
     # on each runtime row alongside the stable ``daemon_id`` (uuid5 of the
     # daemon URL). NULL for legacy rows / daemons that don't send it.
-    if "daemon_name" not in _column_names(conn, "runtimes"):
+    if _table_exists(conn, "runtimes") and "daemon_name" not in _column_names(conn, "runtimes"):
         conn.exec_driver_sql(
             "ALTER TABLE runtimes ADD COLUMN daemon_name VARCHAR(128)"
         )
@@ -128,19 +153,26 @@ def ensure_schema(conn: Connection) -> None:
 
 
 def migrate_identities_and_sessions(conn: Connection, root_dir: Path | None = None) -> None:
-    """Apply Phase 4 identity + session schema migrations. Idempotent.
+    """Apply Phase 4 identity + Job/Step + session schema migrations. Idempotent.
 
     Creates:
     - identities table (did PK, daemon_id, name, description, capabilities, status, visibility, created_by, timestamps)
     - identity_bindings table (m:n relationship for Step 2, created now for schema)
-    - tasks.identity_did column (NULLable, indexed)
-    - sessions table rebuilt with the (task_id, identity_did, provider) PK
+    - jobs table (job_id PK, status, provider, identity_did, target_daemon_id, work_dir, agent_cwd, timestamps)
+    - tasks.job_id column (NULLable FK to jobs, indexed)
+    - tasks.outcome column (NULLable JSON/text)
+    - sessions table rebuilt with the (job_id, identity_did, provider) PK
 
     Args:
         conn: SQLAlchemy connection
         root_dir: Optional root directory for AGENTS.md files (typically ~/.agt)
     """
     root_dir = root_dir or Path.home()
+
+    # Bring in any Phase 4 columns (target_daemon_id, work_dir, agent_cwd,
+    # resume_rejected, daemon_name) that may be missing on legacy DBs, so the
+    # backfill below can safely read them.
+    ensure_schema(conn)
 
     # 1. Create identities table
     conn.exec_driver_sql("""
@@ -187,7 +219,36 @@ def migrate_identities_and_sessions(conn: Connection, root_dir: Path | None = No
     )
     log.info("Idempotent: identity_bindings table and indexes ready")
 
-    # 3. Add identity_did column to tasks table
+    # 3. Create jobs table (Phase 1 Job/Step split)
+    conn.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS jobs (
+            job_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL DEFAULT 'queued',
+            job_type TEXT NOT NULL DEFAULT 'task',
+            provider TEXT NOT NULL,
+            identity_did TEXT,
+            target_daemon_id TEXT,
+            work_dir TEXT,
+            agent_cwd TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    conn.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)"
+    )
+    conn.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS idx_jobs_job_type ON jobs(job_type)"
+    )
+    conn.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS idx_jobs_provider ON jobs(provider)"
+    )
+    conn.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS idx_jobs_identity ON jobs(identity_did)"
+    )
+    log.info("Idempotent: jobs table and indexes ready")
+
+    # 4. Add identity_did, job_id, outcome columns to tasks table
     if "identity_did" not in _column_names(conn, "tasks"):
         conn.exec_driver_sql(
             "ALTER TABLE tasks ADD COLUMN identity_did TEXT DEFAULT NULL"
@@ -195,6 +256,22 @@ def migrate_identities_and_sessions(conn: Connection, root_dir: Path | None = No
         log.info("Migrated tasks table: added identity_did column")
     else:
         log.info("Tasks table already has identity_did column")
+
+    if "job_id" not in _column_names(conn, "tasks"):
+        conn.exec_driver_sql(
+            "ALTER TABLE tasks ADD COLUMN job_id TEXT DEFAULT NULL"
+        )
+        log.info("Migrated tasks table: added job_id column")
+    conn.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS idx_tasks_job ON tasks(job_id)"
+    )
+
+    if "outcome" not in _column_names(conn, "tasks"):
+        conn.exec_driver_sql(
+            "ALTER TABLE tasks ADD COLUMN outcome TEXT DEFAULT NULL"
+        )
+        log.info("Migrated tasks table: added outcome column")
+
     # The index must exist on BOTH paths: legacy DBs (column just added)
     # and fresh DBs where create_all already created the column — in the
     # fresh path the ALTER above is skipped, so create it unconditionally.
@@ -202,12 +279,31 @@ def migrate_identities_and_sessions(conn: Connection, root_dir: Path | None = No
         "CREATE INDEX IF NOT EXISTS idx_tasks_identity ON tasks(identity_did)"
     )
 
-    # 4. Rebuild sessions with the composite (task_id, identity_did,
-    #    provider) PK (Phase 4 Step 3). No-op on fresh DBs (create_all
+    # 5. Backfill jobs for legacy tasks that don't have a job_id yet.
+    #    Each legacy task becomes a single-step job; job_id == task_id keeps
+    #    the migration simple and preserves any external references.
+    cursor = conn.exec_driver_sql(
+        "SELECT COUNT(*) FROM tasks WHERE job_id IS NULL"
+    )
+    missing_jobs = cursor.fetchone()[0]
+    if missing_jobs:
+        conn.exec_driver_sql("""
+            INSERT OR IGNORE INTO jobs (job_id, status, job_type, provider, identity_did, target_daemon_id, work_dir, agent_cwd, created_at, updated_at)
+            SELECT task_id, status, 'task', provider, identity_did, target_daemon_id, work_dir, agent_cwd, created_at, updated_at
+            FROM tasks
+            WHERE job_id IS NULL
+        """)
+        conn.exec_driver_sql("""
+            UPDATE tasks SET job_id = task_id WHERE job_id IS NULL
+        """)
+        log.info("Migrated %d legacy tasks into Job + Step pairs", missing_jobs)
+
+    # 6. Rebuild sessions with the composite (job_id, identity_did,
+    #    provider) PK (Phase 1 Job/Step split). No-op on fresh DBs (create_all
     #    already produced the new schema) and on already-migrated DBs.
     _rebuild_sessions_table(conn)
 
-    # 5. Ensure ~/.agt/identities directory exists (for AGENTS.md files)
+    # 7. Ensure ~/.agt/identities directory exists (for AGENTS.md files)
     identities_dir = root_dir / ".agt" / "identities"
     identities_dir.mkdir(parents=True, exist_ok=True)
     log.info(f"Idempotent: ensured identities directory exists at {identities_dir}")

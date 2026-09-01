@@ -22,7 +22,7 @@ from agt.server.config import ServerConfig
 from agt.server.database import make_engine, make_session_factory, session_scope
 from agt.server.main import create_app
 from agt.server.migrate_schema import ensure_schema, migrate_identities_and_sessions
-from agt.server.models import Base, TaskModel
+from agt.server.models import Base, JobModel, TaskModel
 
 
 SECRET = "step-3-4-test-secret"
@@ -52,10 +52,15 @@ def _build_app_with_tasks(
         factory = make_session_factory(engine)
         async with session_scope(factory) as db:
             await db.execute(delete(TaskModel))
+            await db.execute(delete(JobModel))
             now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
             for tid, provider in tasks:
+                db.add(JobModel(
+                    job_id=tid, status="queued", job_type="task",
+                    provider=provider, created_at=now, updated_at=now,
+                ))
                 db.add(TaskModel(
-                    task_id=tid, provider=provider, prompt="x",
+                    task_id=tid, job_id=tid, provider=provider, prompt="x",
                     status="pending", created_at=now, updated_at=now,
                 ))
             await db.commit()
