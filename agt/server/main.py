@@ -24,6 +24,7 @@ from .routes.daemons import router as daemons_router
 from .routes.heartbeat import router as heartbeat_router
 from .routes.identities import router as identities_router
 from .routes.jobs import router as jobs_router
+from .routes.artifacts import router as artifacts_router
 from .routes.runtimes import router as runtimes_router
 from .routes.sessions import router as sessions_router
 from .routes.tasks import router as tasks_router
@@ -136,6 +137,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                 secret=cfg.secret,
                 session_factory=session_factory,
                 name=target.name,
+                db_path=cfg.db_path,
             )
             daemon_links[target.daemon_id] = link
             daemon_link_tasks.append(
@@ -193,6 +195,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     app.include_router(daemons_router)
     app.include_router(tasks_router)
     app.include_router(jobs_router)
+    app.include_router(artifacts_router)
     app.include_router(sessions_router)
     app.include_router(heartbeat_router)
     app.include_router(identities_router)

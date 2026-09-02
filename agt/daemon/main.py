@@ -346,6 +346,63 @@ async def _execute_one(
             _resolve_ws_source(ws_server) if ws_server is not None else None
         )
 
+        # Phase 2: structured input rendering. Legacy prompt-only tasks
+        # (``message`` absent) use the wire prompt verbatim — zero change.
+        # A structured message is rendered here, resolving FileParts to
+        # readable paths; an unresolvable reference fails the Step
+        # loudly (reported as failed, never silently degraded).
+        effective_prompt = task_payload["prompt"]
+        raw_message = task_payload.get("message")
+        if raw_message:
+            from ..task.message_render import render_task_message
+
+            async def _artifact_resolver(artifact_id: str):
+                cur_ws = (
+                    _resolve_ws_source(ws_server) if ws_server is not None else None
+                )
+                if cur_ws is not None and cur_ws.supports_rpc_v1:
+                    try:
+                        return await cur_ws.call(
+                            "artifacts.get",
+                            {"artifact_id": artifact_id},
+                            timeout_ms=8000,
+                        )
+                    except Exception as exc:
+                        log.warning("artifacts.get over WS failed: %s", exc)
+                        return None
+                try:
+                    content = await client.get_artifact_content(artifact_id)
+                    import base64
+
+                    return {"content_b64": base64.b64encode(content).decode()}
+                except Exception as exc:
+                    log.warning("artifact content fetch failed: %s", exc)
+                    return None
+
+            try:
+                effective_prompt = await render_task_message(
+                    raw_message,
+                    agent_cwd=agent_cwd or Path.cwd(),
+                    resolver=_artifact_resolver,
+                )
+            except Exception as exc:
+                log.exception("task %s input rendering failed", task_id)
+                await _safe_report(
+                    client,
+                    task_id=task_id,
+                    exit_code=-1,
+                    stdout="",
+                    stderr=f"input rendering failed: {exc}",
+                    duration=0.0,
+                    status="failed",
+                    session_id=None,
+                    resume_rejected=False,
+                    ws_source=ws_source,
+                    claim_state=claim_state,
+                    artifacts=[],
+                )
+                return
+
         # Phase 5 remote streaming: report incremental stdout prefixes to
         # the Server while the agent runs. Re-resolves the WS source on
         # every sample (the link may have rotated mid-execution); failures
@@ -375,7 +432,7 @@ async def _execute_one(
         try:
             result = await daemon.run(
                 provider=task_payload["provider"],
-                prompt=task_payload["prompt"],
+                prompt=effective_prompt,
                 task_id=task_id,
                 resume_session_id=task_payload.get("resume_session_id"),
                 agent_cwd=agent_cwd,
@@ -401,8 +458,42 @@ async def _execute_one(
                 resume_rejected=False,
                 ws_source=ws_source,
                 claim_state=claim_state,
+                artifacts=[],
             )
             return
+
+        from ..task.artifact_scan import scanned_to_report_item
+
+        artifacts = [
+            scanned_to_report_item(a) for a in getattr(result, "artifacts", [])
+        ]
+
+        # Phase 2 transport (HTTP-fallback topology): with no reverse-dial
+        # WS link there is no server→daemon lazy-fetch channel, so large
+        # (non-inline) content must reach the server eagerly before the
+        # report. Registration is idempotent on (step, name, sha256), so
+        # the report's metadata entry will simply re-attach to the row
+        # created here. A failed upload degrades to metadata-only — the
+        # report itself must always go through.
+        if artifacts and ws_source is None:
+            import base64
+
+            for item, scanned in zip(artifacts, result.artifacts):
+                if item.get("inline_b64") is None and scanned.local_path:
+                    try:
+                        content = Path(scanned.local_path).read_bytes()
+                        await client.upload_artifact(
+                            task_id=task_id,
+                            artifact=item,
+                            content_b64=base64.b64encode(content).decode(),
+                        )
+                    except Exception as exc:
+                        log.warning(
+                            "eager artifact upload failed for %s/%s: %s",
+                            task_id,
+                            item.get("name"),
+                            exc,
+                        )
 
         await _safe_report(
             client,
@@ -416,6 +507,7 @@ async def _execute_one(
             resume_rejected=result.resume_rejected,
             ws_source=ws_source,
             claim_state=claim_state,
+            artifacts=artifacts,
         )
 
 
@@ -432,6 +524,7 @@ async def _safe_report(
     resume_rejected: bool,
     ws_source: WsRpcLink | None = None,
     claim_state: ClaimStateMachine | None = None,
+    artifacts: list | None = None,
 ) -> None:
     """Best-effort result write. WS-first in reverse-dial mode; HTTP otherwise.
 
@@ -454,6 +547,7 @@ async def _safe_report(
                 status=status,
                 session_id=session_id,
                 resume_rejected=resume_rejected,
+                artifacts=artifacts,
             )
         else:
             await client.report_task(
@@ -465,6 +559,7 @@ async def _safe_report(
                 status=status,
                 session_id=session_id,
                 resume_rejected=resume_rejected,
+                artifacts=artifacts,
             )
     except Exception as exc:
         log.warning("report failed for task %s: %s", task_id, exc)

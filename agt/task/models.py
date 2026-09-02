@@ -70,6 +70,11 @@ class TaskResult:
     # ── Session-related fields ─────────────────────────────────
     session_id: str | None = None  # Session id produced/used by this run
     resume_rejected: bool = False  # True if resume was attempted but refused
+    # Phase 2: declared deliverables scanned from ``.agt/outputs/``
+    # post-exit. Empty for legacy behavior (no scan / no outputs dir
+    # content). Registration is a server-side concern; local runs simply
+    # carry the list (the CLI may surface where the files live).
+    artifacts: list = field(default_factory=list)
 
 
 __all__ = ["Task", "TaskResult"]

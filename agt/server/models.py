@@ -7,6 +7,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -112,6 +113,11 @@ class TaskModel(Base):
     # Structured outcome reported by the daemon (or derived by the server
     # for legacy daemons). Values: done, needs_input, error, spawn_subjob.
     outcome: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Phase 2 artifact foundation: this Step's structured input as an
+    # A2A-shaped Message JSON (role + parts). Always normalized at
+    # persistence time — a plain prompt-only submission is stored as a
+    # single-TextPart Message. NULL only on rows written before Phase 2.
+    input_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     parent_task_id: Mapped[str | None] = mapped_column(
         String(64),
         ForeignKey("tasks.task_id", ondelete="SET NULL"),
@@ -176,6 +182,66 @@ class SessionModel(Base):
     updated_at: Mapped[str] = mapped_column(String(32), nullable=False)
 
 
+class ArtifactModel(Base):
+    """A declared deliverable produced by one Step (Phase 2).
+
+    An artifact is *explicitly declared* output (a file the agent placed
+    in ``.agt/outputs/``), never an automatic capture of stdout, chat
+    replies, or repo mutations. The DB row is the registry of record:
+    lineage (job/step/identity), typing (mime), declared semantics
+    (summary/status_flag), content addressing (sha256), and availability
+    state. Bytes live either inline (<4KB), on the server disk
+    (``storage_path``), or remain on the producing daemon
+    (``local_path`` + ``origin_daemon_id``) for lazy cross-daemon fetch.
+
+    Status lifecycle: ``registered`` → ``ready`` → ``lost``. ``ready``
+    means the bytes are believed available (inline, server disk, or
+    producer-local); ``lost`` is set when a fetch finds the producer's
+    local file gone.
+    """
+
+    __tablename__ = "artifacts"
+
+    artifact_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    job_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("jobs.job_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    step_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("tasks.task_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    producer_identity_id: Mapped[str | None] = mapped_column(
+        String(256), nullable=True
+    )
+    name: Mapped[str] = mapped_column(String(512), nullable=False)
+    mime_type: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Declared pass/fail flag from the agent's manifest ("pass"/"fail"/...).
+    # Carries no Job/Step semantics — step success is TaskModel.status.
+    status_flag: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    size: Mapped[int] = mapped_column(Integer, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Server-side materialized storage (>=4KB fetched/uploaded blobs).
+    storage_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    # Small content stored directly in the DB (<4KB).
+    inline_bytes: Mapped[bytes | None] = mapped_column(
+        LargeBinary, nullable=True
+    )
+    # INTERNAL: producer-daemon local path. Never exposed in public
+    # payloads — the public reference is agt-artifact://<artifact_id>.
+    local_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    origin_daemon_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="registered", index=True
+    )
+    created_at: Mapped[str] = mapped_column(String(32), nullable=False)
+
+
 class IdentityModel(Base):
     """An identity (role) that can be bound to multiple runtimes."""
 
@@ -220,4 +286,5 @@ __all__ = [
     "SessionModel",
     "IdentityModel",
     "IdentityBindingModel",
+    "ArtifactModel",
 ]

@@ -29,6 +29,7 @@ import logging
 import os
 import re
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from ..daemon.config import DaemonConfig
@@ -230,9 +231,36 @@ class TaskExecutor:
         adapter = get_adapter(self._runtime.agent_entry.provider)
         sink = adapter.stream_sink_factory()
         stream_args = _stream_args_for(sink)
-        cmd = adapter.command_builder.build(binary, task, stream_args)
 
         work_dir = self._ensure_work_dir(task)
+
+        # Phase 2 artifact foundation: pre-create the whitelist outputs
+        # directory and snapshot it before spawn. The convention reaches
+        # the agent through the identity channel when present (AGENTS.md
+        # injection), else through a prompt suffix — identity-less tasks
+        # must learn the contract too.
+        from .artifact_scan import (
+            OUTPUTS_INSTRUCTION,
+            ensure_outputs_dir,
+            scan_outputs,
+            snapshot_outputs,
+        )
+
+        outputs_dir = ensure_outputs_dir(work_dir)
+        outputs_snapshot = snapshot_outputs(outputs_dir)
+        if task.identity_did and task.identity_md:
+            task = replace(
+                task,
+                identity_md=f"{task.identity_md}\n\n{OUTPUTS_INSTRUCTION}\n",
+            )
+        else:
+            task = replace(task, prompt=f"{task.prompt}\n\n{OUTPUTS_INSTRUCTION}")
+
+        # Permission flags come from the provider adapter (empty for
+        # non-Claude-Code CLIs); they go ahead of streaming flags so the
+        # argv reads ``<bin> [--permission-mode ...] [stream-json ...]``.
+        cli_args = [*adapter.permission_args, *stream_args]
+        cmd = adapter.command_builder.build(binary, task, cli_args)
         env = self._build_env(task, work_dir)
 
         # Phase 4 Step 4: stack the agent's AGENTS.md into the spawn cwd
@@ -254,15 +282,19 @@ class TaskExecutor:
             )
 
         start = time.monotonic()
+        result: TaskResult | None = None
         try:
             if interactive:
-                return await self._execute_interactive(task, cmd, work_dir, env, start)
+                result = await self._execute_interactive(task, cmd, work_dir, env, start)
+                return result
             if not isinstance(sink, NoopSink):
-                return await self._execute_streaming(
+                result = await self._execute_streaming(
                     task, cmd, work_dir, env, start, sink, adapter,
                     progress_cb=progress_cb,
                 )
-            return await self._execute_pipe_text(task, cmd, work_dir, env, start)
+                return result
+            result = await self._execute_pipe_text(task, cmd, work_dir, env, start)
+            return result
         finally:
             # Phase 4 Step 4: always reclaim the injected identity
             # files, regardless of exit path (timeout, crash, normal,
@@ -271,6 +303,17 @@ class TaskExecutor:
             # marker block, so it's safe even when ``inject`` didn't run.
             if task.identity_did:
                 _reclaim_identity(work_dir, did=task.identity_did)
+            # Phase 2: post-exit whitelist scan, AFTER identity files are
+            # reclaimed so they can never be picked up. Runs on every
+            # exit path (normal, timeout, crash) and for all three
+            # execution modes — partial deliverables of a failed Step
+            # are still worth registering. Best-effort: a scan failure
+            # must never break the terminal report path.
+            if result is not None:
+                try:
+                    result.artifacts = scan_outputs(outputs_dir, outputs_snapshot)
+                except Exception as exc:
+                    log.warning("artifact scan failed: %s", exc)
 
     # ── Mode: interactive ───────────────────────────────────────
 

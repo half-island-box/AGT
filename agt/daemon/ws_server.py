@@ -159,14 +159,56 @@ class DaemonWsServer:
         Handles ``tasks.available`` — a latency hint from the Server that
         task(s) may be claimable — and ``session.history``, which reads a
         session's transcript from this machine's provider store (the CLI's
-        remote ``--resume`` history echo). Other methods are unsupported.
+        remote ``--resume`` history echo) — and ``artifacts.fetch`` (Phase
+        2), the lazy pull of a declared deliverable's bytes. Other methods
+        are unsupported.
         """
         if method == "tasks.available":
             self.wake_claim_loop()
             return {"ok": True}
         if method == "session.history":
             return await self._handle_session_history(body)
+        if method == "artifacts.fetch":
+            return await self._handle_artifacts_fetch(body)
         raise ValueError({"type": "unknown_method", "message": method})
+
+    async def _handle_artifacts_fetch(self, body: dict) -> dict:
+        """Serve one artifact's bytes from this daemon's local disk.
+
+        The server relays back the ``local_path`` this daemon itself
+        reported at registration time, so the path is trusted input from
+        an HMAC-authenticated server. A missing/unreadable file answers
+        ``artifact_missing`` so the server can mark the row ``lost``.
+        """
+        local_path = body.get("local_path")
+        if not isinstance(local_path, str) or not local_path:
+            raise ValueError({
+                "type": "validation_error",
+                "message": "artifacts.fetch requires local_path",
+            })
+        import base64
+        import hashlib
+        from pathlib import Path
+
+        path = Path(local_path)
+        try:
+            content = await asyncio.to_thread(path.read_bytes)
+        except OSError:
+            raise ValueError({
+                "type": "artifact_missing",
+                "reason": "artifact_missing",
+                "message": f"local file gone: {local_path}",
+            }) from None
+        expected = body.get("sha256")
+        if isinstance(expected, str) and expected:
+            digest = hashlib.sha256(content).hexdigest()
+            if digest != expected:
+                raise ValueError({
+                    "type": "artifact_hash_mismatch",
+                    "reason": "artifact_missing",
+                    "message": f"sha256 mismatch: {digest}",
+                })
+        return {"content_b64": base64.b64encode(content).decode()}
 
     async def _handle_session_history(self, body: dict) -> dict:
         """Read a session transcript from this daemon's local provider store.

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..a2a import Message
+
 
 # ── Runtime ─────────────────────────────────────────────────────────
 
@@ -44,6 +46,10 @@ class ListRuntimesResponse(BaseModel):
 
 class SubmitTaskRequest(BaseModel):
     prompt: str
+    # Phase 2: structured (A2A-shaped) input. When set, ``prompt`` is
+    # treated as the rendered fallback; when omitted, behavior is
+    # byte-identical to the legacy prompt-only path.
+    message: Message | None = None
     provider: str = "claude"
     task_id: str | None = None  # if provided, server resumes that task's session
     # Step 3.6: pin this task to a specific daemon. None = free task.
@@ -107,6 +113,11 @@ class TaskPayload(BaseModel):
     # on the daemon. NULL = daemon picks (``work_dir_root / provider /
     # task_id`` legacy fallback).
     agent_cwd: str | None = None
+    # Phase 2: the Step's structured input (Message.model_dump). FileParts
+    # may carry server-injected resolution hints: ``inline_b64`` for small
+    # content, or ``local_path`` when the claiming daemon IS the producer
+    # (same-daemon zero-copy). ``None`` = legacy prompt-only task.
+    message: dict | None = None
 
 
 class ReportRequest(BaseModel):
@@ -122,10 +133,71 @@ class ReportRequest(BaseModel):
     # Phase 1: structured outcome reported by the daemon. Server derives
     # from exit_code when omitted for backward compatibility.
     outcome: str | None = None
+    # Phase 2: declared deliverables scanned from ``.agt/outputs/``.
+    # Absent for legacy daemons — behavior is then byte-identical to
+    # Phase 1 (the field is purely additive).
+    artifacts: list["ArtifactReportItem"] = []
 
 
 class ReportResponse(BaseModel):
     recorded: bool
+    # Phase 2: ids assigned to the registered artifacts, in report order.
+    artifacts: list[str] = []
+
+
+# ── Artifacts (Phase 2) ─────────────────────────────────────────────
+
+
+class ArtifactReportItem(BaseModel):
+    """One declared deliverable reported by a daemon for a Step.
+
+    ``inline_b64`` carries content <4KB directly in the report; larger
+    content stays on the daemon (``local_path``) for lazy cross-daemon
+    fetch, or is uploaded eagerly via ``POST /api/artifacts``.
+    """
+
+    name: str
+    mime_type: str | None = None
+    summary: str | None = None
+    status_flag: str | None = None
+    size: int
+    sha256: str
+    local_path: str | None = None
+    inline_b64: str | None = None
+
+
+class ArtifactOut(BaseModel):
+    """Public artifact metadata. ``uri`` is the only reference form —
+    producer-local paths are never exposed."""
+
+    artifact_id: str
+    job_id: str
+    step_id: str
+    producer_identity_id: str | None = None
+    name: str
+    mime_type: str
+    summary: str | None = None
+    status_flag: str | None = None
+    size: int
+    sha256: str
+    status: str
+    uri: str
+    created_at: str
+
+
+class ArtifactUploadRequest(BaseModel):
+    """Eager upload from an HTTP-reachable daemon (pre-report).
+
+    The daemon POSTs one artifact's bytes; the server materializes them
+    (inline <4KB / server disk) and returns the registered row. Ownership
+    mirrors the report path: only the daemon that claimed the Step may
+    upload for it.
+    """
+
+    daemon_id: str
+    task_id: str
+    artifact: ArtifactReportItem
+    content_b64: str
 
 
 class ProgressRequest(BaseModel):
@@ -163,6 +235,8 @@ class TaskStatusResponse(BaseModel):
     # cwd injection (Phase 4 workdir supplement): the agent subprocess's
     # working directory on the daemon machine. None = daemon's default.
     agent_cwd: str | None = None
+    # Phase 2: declared deliverables of this Step (public metadata only).
+    artifacts: list[ArtifactOut] = []
 
 
 # ── Stream (SSE) events — Phase 5 remote streaming ──────────────────
@@ -197,6 +271,8 @@ class StreamDoneEvent(BaseModel):
     exit_code: int | None = None
     resume_rejected: bool | None = None
     stderr: str | None = None
+    # Phase 2: declared deliverables of this Step.
+    artifacts: list[ArtifactOut] = []
 
 
 # ── Session ─────────────────────────────────────────────────────────

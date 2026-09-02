@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import JobModel, SessionModel, TaskModel
 from ..stream_hub import default_hub
+from .artifact_service import artifact_to_out, artifacts_for_steps, register_step_artifacts
 
 
 async def record_task_result_for_daemon(
@@ -45,6 +46,7 @@ async def record_task_result_for_daemon(
     session_id: str | None,
     resume_rejected: bool,
     outcome: str | None = None,
+    artifacts: list | None = None,
 ) -> dict:
     """Record execution results on a claimed task (Step).
 
@@ -57,6 +59,11 @@ async def record_task_result_for_daemon(
     Phase 1: ``outcome`` drives the parent Job state machine. Legacy
     daemons that don't send ``outcome`` have it derived from
     ``exit_code`` (0 -> done, otherwise error).
+
+    Phase 2: ``artifacts`` (optional ``ArtifactReportItem`` list) is
+    persisted via ``register_step_artifacts`` AFTER the ownership check —
+    only the daemon that claimed this Step can register its deliverables.
+    Registration failures never fail the report (best-effort by design).
 
     On success returns ``{"recorded": True}``. On business failure
     raises ``ValueError({"type": "task_not_found"|"task_not_owned",
@@ -95,6 +102,16 @@ async def record_task_result_for_daemon(
     task.outcome = outcome
 
     task.updated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+    # Phase 2: register declared deliverables. Runs after the ownership
+    # check above; per-item problems are skipped inside the service so a
+    # scan issue can never break the terminal report.
+    artifact_ids = await register_step_artifacts(
+        db,
+        task=task,
+        daemon_id=daemon_id,
+        items=artifacts or [],
+    )
 
     # Phase 1: session rows are keyed by (job_id, identity_did, provider).
     # ``identity_did`` normalizes to "" for identity-less tasks so the
@@ -171,9 +188,23 @@ async def record_task_result_for_daemon(
             "exit_code": task.exit_code,
             "resume_rejected": task.resume_rejected,
             "outcome": task.outcome,
+            "artifacts": await _step_artifacts_out(db, task_id),
         },
     )
-    return {"recorded": True}
+    return {"recorded": True, "artifacts": artifact_ids}
+
+
+async def _step_artifacts_out(db, task_id: str) -> list:
+    """Read back one Step's artifacts for the SSE terminal payload.
+
+    Failure-tolerant: the SSE done event must not fail because of an
+    artifact read-back problem (an empty list is an acceptable degrade).
+    """
+    try:
+        by_step = await artifacts_for_steps(db, [task_id])
+        return [artifact_to_out(r) for r in by_step.get(task_id, [])]
+    except Exception:
+        return []
 
 
 async def record_task_progress_for_daemon(

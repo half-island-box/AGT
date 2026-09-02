@@ -242,6 +242,7 @@ class ServerClient:
         session_id: str | None = None,
         resume_rejected: bool = False,
         outcome: str | None = None,
+        artifacts: list[dict[str, Any]] | None = None,
     ) -> bool:
         payload = {
             "daemon_id": self._daemon_id,
@@ -255,8 +256,47 @@ class ServerClient:
             "resume_rejected": resume_rejected,
             "outcome": outcome,
         }
+        if artifacts:
+            # Phase 2: declared deliverables. Omitted (not []) when
+            # empty so legacy payloads stay byte-identical.
+            payload["artifacts"] = artifacts
         resp = await self._post(f"/api/tasks/{task_id}/report", payload)
         return bool(resp.get("recorded", False))
+
+    async def upload_artifact(
+        self,
+        *,
+        task_id: str,
+        artifact: dict[str, Any],
+        content_b64: str,
+    ) -> dict[str, Any]:
+        """Eager-upload one artifact's bytes (HTTP-reachable daemon path).
+
+        Phase 2: used before the terminal report when no reverse-dial WS
+        link exists — large content reaches the server in one step and
+        the report can then reference it metadata-only (registration is
+        idempotent on ``(step, name, sha256)``).
+        """
+        return await self._post(
+            "/api/artifacts",
+            {
+                "daemon_id": self._daemon_id,
+                "task_id": task_id,
+                "artifact": artifact,
+                "content_b64": content_b64,
+            },
+        )
+
+    async def get_artifact_content(self, artifact_id: str) -> bytes:
+        """Fetch an artifact's bytes over HTTP (input-side resolution)."""
+        assert self._client is not None, "ServerClient must be used as async context manager"
+        resp = await self._client.get(
+            f"/api/artifacts/{artifact_id}/content",
+            headers=self._headers(),
+        )
+        if resp.status_code >= 300:
+            raise RPCRejected(resp.status_code, {"raw": resp.text})
+        return resp.content
 
     async def report_progress(self, task_id: str, stdout_prefix: str) -> bool:
         """Report an incremental stdout prefix (Phase 5 remote streaming).

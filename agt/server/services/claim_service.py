@@ -190,16 +190,70 @@ async def _claim_candidate(
     # matches the pre-Option-D silent-skip semantics.
     identity_md = await _render_identity_md(db, candidate)
 
+    message_dict, rendered_prompt = await _build_step_message(
+        db, candidate, daemon_id=daemon_id
+    )
+
     return TaskPayload(
         task_id=candidate.task_id,
         provider=candidate.provider,
-        prompt=candidate.prompt,
+        prompt=rendered_prompt,
         resume_session_id=resume_session_id,
         work_dir=None,
         identity_did=candidate.identity_did,
         identity_md=identity_md,
         agent_cwd=candidate.agent_cwd,
+        message=message_dict,
     )
+
+
+async def _build_step_message(
+    db: AsyncSession,
+    candidate: TaskModel,
+    *,
+    daemon_id: str,
+) -> tuple[dict | None, str]:
+    """Materialize the Step's structured input for the claiming daemon.
+
+    Returns ``(message_dict, rendered_prompt)``. ``message_dict`` is
+    ``None`` for legacy rows without ``input_message`` (prompt used
+    verbatim). FileParts gain resolution hints where cheap:
+
+    - inline content (<4KB, from the artifact row) → ``inline_b64``;
+    - the claiming daemon IS the producer → ``local_path`` (zero-copy,
+      the daemon reads its own disk, no transfer at all).
+
+    Large cross-daemon references carry only the URI — the daemon
+    resolves them on demand via ``artifacts.get``.
+    """
+    from ...a2a import Message, parse_artifact_uri, render_message
+    from ..models import ArtifactModel
+
+    if not candidate.input_message:
+        return None, candidate.prompt
+
+    message = Message.model_validate_json(candidate.input_message)
+    # Work on raw dicts so server-injected hint keys survive.
+    raw = message.model_dump(mode="json")
+    for part in raw.get("parts", []):
+        if part.get("type") != "file":
+            continue
+        artifact_id = parse_artifact_uri(part.get("uri", ""))
+        if not artifact_id:
+            continue
+        artifact = await db.get(ArtifactModel, artifact_id)
+        if artifact is None:
+            continue
+        if artifact.inline_bytes is not None:
+            import base64
+
+            part["inline_b64"] = base64.b64encode(artifact.inline_bytes).decode()
+        elif artifact.origin_daemon_id == daemon_id and artifact.local_path:
+            part["local_path"] = artifact.local_path
+        if artifact.mime_type:
+            part.setdefault("mime_type", artifact.mime_type)
+
+    return raw, render_message(message)
 
 
 async def _render_identity_md(

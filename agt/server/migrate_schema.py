@@ -151,6 +151,16 @@ def ensure_schema(conn: Connection) -> None:
         )
         log.info("Migrated runtimes table: added daemon_name column")
 
+    # Phase 2 artifact foundation: this Step's structured input as an
+    # A2A-shaped Message JSON. New rows are always populated (normalized
+    # from prompt-only submissions); legacy rows keep NULL. The
+    # ``artifacts`` table itself is created by ``create_all``.
+    if _table_exists(conn, "tasks") and "input_message" not in _column_names(conn, "tasks"):
+        conn.exec_driver_sql(
+            "ALTER TABLE tasks ADD COLUMN input_message TEXT"
+        )
+        log.info("Migrated tasks table: added input_message column")
+
 
 def migrate_identities_and_sessions(conn: Connection, root_dir: Path | None = None) -> None:
     """Apply Phase 4 identity + Job/Step + session schema migrations. Idempotent.

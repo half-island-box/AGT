@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..database import get_db, session_scope
 from ..models import RuntimeModel, TaskModel
 from ..schemas import (
+    ArtifactOut,
     ClaimRequest,
     ClaimResponse,
     ProgressRequest,
@@ -33,12 +34,14 @@ from ..services.claim_service import (
     claim_tasks_for_daemon,
     notify_task_available,
 )
+from ..services.artifact_service import artifact_to_out, artifacts_for_steps
 from ..services.report_service import (
     record_task_progress_for_daemon,
     record_task_result_for_daemon,
 )
 from ..services.runtime_service import is_stale
 from ..services.selection_service import SelectionError, select_runtime
+from ...a2a import render_message
 from ..stream_hub import default_hub
 from .identities import _selection_error_to_http
 
@@ -96,6 +99,11 @@ async def submit_task(
     """
     effective_provider = payload.provider
     effective_target = payload.target_daemon_id
+    # Phase 2: structured input — the rendered text is persisted as the
+    # Step prompt (render of a prompt-only Message is byte-identical).
+    prompt = (
+        render_message(payload.message) if payload.message else payload.prompt
+    )
 
     # Phase 4 Step 4: identity resolves the runtime + validates binding.
     # MUST run before the target_daemon live-runtime check, because the
@@ -155,7 +163,7 @@ async def submit_task(
     job = await create_job(
         db,
         provider=effective_provider,
-        prompt=payload.prompt,
+        prompt=prompt,
         target_daemon_id=effective_target,
         work_dir=_server_work_dir(payload),
         agent_cwd=payload.agent_cwd,
@@ -163,6 +171,7 @@ async def submit_task(
         job_id=task_id,
         task_id=task_id,
         job_type="task",
+        message=payload.message,
     )
     await db.commit()
     await _notify_daemons(request, effective_target, effective_provider)
@@ -269,6 +278,8 @@ async def report_task(
             session_id=payload.session_id,
             resume_rejected=payload.resume_rejected,
             outcome=payload.outcome,
+            # Phase 2: declared deliverables ride the report payload.
+            artifacts=payload.artifacts,
         )
         return ReportResponse(**result)
     except ValueError as exc:
@@ -315,6 +326,7 @@ async def list_tasks(
         if wanted:
             stmt = stmt.where(TaskModel.status.in_(wanted))
     rows = (await db.execute(stmt)).scalars().all()
+    artifact_map = await artifacts_for_steps(db, [t.task_id for t in rows])
     return [
         TaskStatusResponse(
             task_id=t.task_id,
@@ -332,6 +344,10 @@ async def list_tasks(
             target_daemon_id=t.target_daemon_id,
             work_dir=t.work_dir,
             agent_cwd=t.agent_cwd,
+            artifacts=[
+                ArtifactOut(**artifact_to_out(r))
+                for r in artifact_map.get(t.task_id, [])
+            ],
         )
         for t in rows
     ]
@@ -362,6 +378,10 @@ async def task_status(
         target_daemon_id=task.target_daemon_id,
         work_dir=task.work_dir,
         agent_cwd=task.agent_cwd,
+        artifacts=[
+            ArtifactOut(**artifact_to_out(r))
+            for r in (await artifacts_for_steps(db, [task_id])).get(task_id, [])
+        ],
     )
 
 
@@ -401,6 +421,7 @@ async def stream_task(
         is_terminal = task.status in _TERMINAL_STATUSES
 
         # Captured now (session open) for the terminal shortcut below.
+        artifact_rows = (await artifacts_for_steps(db, [task_id])).get(task_id, [])
         done_payload = {
             "status": task.status,
             "stdout": task.stdout or "",
@@ -408,6 +429,7 @@ async def stream_task(
             "session_id": task.session_id,
             "exit_code": task.exit_code,
             "resume_rejected": task.resume_rejected,
+            "artifacts": [artifact_to_out(r) for r in artifact_rows],
         }
 
     async def event_generator():

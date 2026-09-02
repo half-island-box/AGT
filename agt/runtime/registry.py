@@ -48,6 +48,16 @@ from .streaming import (
 )
 
 
+# Claude Code-specific argv additions so the spawned headless ``-p``
+# process can write deliverables without pausing on its permission gate.
+# ``-p`` is non-interactive: ungated tool calls are *denied*, not
+# prompted, so the agent CLI must start already authorized.
+CLAUDE_BYPASS_PERMISSION_ARGS: tuple[str, ...] = (
+    "--permission-mode",
+    "bypassPermissions",
+)
+
+
 @dataclass(frozen=True)
 class ProviderAdapter:
     """Bundle of provider-specific collaborators.
@@ -55,12 +65,18 @@ class ProviderAdapter:
     Each field is a small protocol/concrete class so callers can compose
     or override individual pieces (e.g. point ``stream_sink_factory`` at
     a custom sink in tests).
+
+    ``permission_args`` are provider-specific CLI flags spliced into the
+    spawned argv ahead of ``stream_args``. Empty for providers that are
+    not Claude Code CLIs (their flags differ) — the executor composes
+    ``[*permission_args, *stream_args]`` without inspecting names.
     """
 
     command_builder: CommandBuilder
     session_locator: SessionLocator | None
     stream_sink_factory: Callable[[], StreamingSink]
     resume_rejection_detector: ResumeRejectionDetector
+    permission_args: tuple[str, ...] = ()
 
 
 # Built-in adapters. New providers should be added here.
@@ -70,6 +86,7 @@ def _claude_adapter() -> ProviderAdapter:
         session_locator=claude_session_locator(),
         stream_sink_factory=ClaudeStreamSink,
         resume_rejection_detector=ClaudeResumeRejectionDetector(),
+        permission_args=CLAUDE_BYPASS_PERMISSION_ARGS,
     )
 
 

@@ -132,6 +132,7 @@ async def report_task_ws_first(
     status: str,
     session_id: str | None,
     resume_rejected: bool,
+    artifacts: list | None = None,
 ) -> bool:
     """Write a task result via WS first; HTTP fallback when not safe.
 
@@ -164,6 +165,12 @@ async def report_task_ws_first(
         "session_id": session_id,
         "resume_rejected": resume_rejected,
     }
+    if artifacts:
+        # Phase 2: declared deliverables ride the report body. Omitted
+        # entirely for legacy scans with no artifacts (older servers
+        # ignore unknown fields anyway, but absence keeps the payload
+        # byte-identical to Phase 1).
+        body["artifacts"] = artifacts
 
     if wsrpc is not None and wsrpc.supports_rpc_v1 and not state.blocked:
         try:
@@ -207,6 +214,7 @@ async def report_task_ws_first(
             status=status,
             session_id=session_id,
             resume_rejected=resume_rejected,
+            artifacts=artifacts,
         )
         return True
     except Exception as exc:

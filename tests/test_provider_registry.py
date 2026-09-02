@@ -73,3 +73,29 @@ def test_unknown_provider_does_not_grant_streaming():
     from agt.runtime.streaming import NoopSink
 
     assert isinstance(adapter.stream_sink_factory(), NoopSink)
+
+
+def test_claude_adapter_carries_bypass_permission_args():
+    """Claude spawns with ``--permission-mode bypassPermissions`` so the
+    headless ``-p`` process can write deliverables without a TTY prompt."""
+    from agt.runtime.registry import CLAUDE_BYPASS_PERMISSION_ARGS
+
+    adapter = get_adapter("claude")
+    assert adapter.permission_args == CLAUDE_BYPASS_PERMISSION_ARGS
+    assert adapter.permission_args == ("--permission-mode", "bypassPermissions")
+
+
+def test_non_claude_adapters_have_empty_permission_args():
+    """Non-Claude-Code CLIs MUST NOT receive Claude's permission flags.
+
+    cursor/copilot/qwen/... reuse ``ClaudeCommandBuilder`` for their ``-p``
+    shape but are not Claude Code — injecting ``--permission-mode`` would
+    make them fail to start.
+    """
+    for provider in ("codex", "cursor", "copilot", "qwen", "kimi", "opencode", "openclaw"):
+        assert get_adapter(provider).permission_args == (), provider
+
+
+def test_unknown_provider_has_empty_permission_args():
+    """The fallback adapter must not inject Claude-only flags either."""
+    assert get_adapter("not-a-real-provider-xyz").permission_args == ()

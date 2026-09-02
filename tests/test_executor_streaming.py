@@ -304,6 +304,72 @@ def test_streaming_args_injected_for_claude(tmp_path):
     assert "--verbose" in argv
 
 
+def test_claude_spawn_includes_bypass_permission_args(tmp_path):
+    """Claude's argv MUST carry ``--permission-mode bypassPermissions`` ahead
+    of the streaming flags, so the headless ``-p`` process writes files
+    without a TTY permission prompt."""
+    executor = TaskExecutor(runtime=_runtime_with_provider("claude"), config=_config())
+    task = Task(
+        prompt="hi",
+        provider="claude",
+        task_id="t1",
+        work_dir=tmp_path,
+        agent_cwd=tmp_path,
+    )
+
+    captured_cmd: list[list[str]] = []
+
+    async def go():
+        def make_fake(*a, **k):
+            fake = _FakeProcess(
+                stdout_text='{"type":"result","is_error":false,"session_id":"x"}',
+                returncode=0,
+            )
+            fake.attach()
+            captured_cmd.append(list(a))
+            return fake
+
+        with _patched_subprocess(make_fake):
+            return await executor.execute(task, interactive=False)
+
+    asyncio.run(go())
+
+    argv = captured_cmd[0]
+    assert "--permission-mode" in argv
+    assert argv[argv.index("--permission-mode") + 1] == "bypassPermissions"
+    # Permission flags precede streaming flags.
+    assert argv.index("--permission-mode") < argv.index("--output-format")
+
+
+def test_non_claude_spawn_has_no_permission_args(tmp_path):
+    """Non-Claude-Code providers (codex here) MUST NOT receive ``--permission-mode``."""
+    executor = TaskExecutor(runtime=_runtime_with_provider("codex"), config=_config())
+    task = Task(
+        prompt="hi",
+        provider="codex",
+        task_id="t1",
+        work_dir=tmp_path,
+        agent_cwd=tmp_path,
+    )
+
+    captured_cmd: list[list[str]] = []
+
+    async def go():
+        def make_fake(*a, **k):
+            fake = _FakeProcess(stdout_text="session id: abc-123\n", returncode=0)
+            fake.attach()
+            captured_cmd.append(list(a))
+            return fake
+
+        with _patched_subprocess(make_fake):
+            return await executor.execute(task, interactive=False)
+
+    asyncio.run(go())
+
+    assert captured_cmd, "subprocess was never spawned"
+    assert "--permission-mode" not in captured_cmd[0]
+
+
 # ── Phase 5: remote-streaming progress sampler ──────────────────────
 
 

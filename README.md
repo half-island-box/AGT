@@ -13,6 +13,7 @@ It is an experimental Python foundation for a future multi-agent desktop client.
 - Queue tasks through a local FastAPI server and execute them on one or more daemons.
 - Route tasks by provider, daemon, identity, and runtime binding.
 - Protect agent-to-server callbacks with task-scoped HMAC tokens.
+- Collect declared agent deliverables as addressable artifacts (`agt-artifact://<id>`): agents place files in `.agt/outputs/` (optionally described by `manifest.json`), the server registers lineage/mime/summary, and later steps can consume them by reference — bytes only move cross-daemon, on demand.
 
 ## Requirements
 

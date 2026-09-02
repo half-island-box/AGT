@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ...a2a import Message, message_from_prompt
 from ..models import JobModel, SessionModel, TaskModel
 
 _VALID_STATUSES = {"queued", "running", "waiting_input", "done", "failed", "cancelled"}
@@ -44,8 +45,14 @@ async def create_job(
     job_id: str | None = None,
     task_id: str | None = None,
     job_type: str = "task",
+    message: Message | None = None,
 ) -> JobModel:
-    """Create a Job and its first pending Step."""
+    """Create a Job and its first pending Step.
+
+    ``message`` is the structured (A2A-shaped) input; when omitted the
+    plain ``prompt`` is normalized into a single-TextPart Message so every
+    new Step row carries a canonical ``input_message``.
+    """
     now = _now()
     j_id = job_id or _new_id()
     s_id = task_id or _new_id()
@@ -74,6 +81,7 @@ async def create_job(
         work_dir=work_dir,
         agent_cwd=agent_cwd,
         identity_did=identity_did,
+        input_message=(message or message_from_prompt(prompt)).model_dump_json(),
         created_at=now,
         updated_at=now,
     )
@@ -91,6 +99,7 @@ async def append_step(
     prompt: str,
     *,
     resume_session_id: str | None = None,
+    message: Message | None = None,
 ) -> TaskModel:
     """Append a new pending Step to a Job.
 
@@ -118,6 +127,7 @@ async def append_step(
         work_dir=job.work_dir,
         agent_cwd=job.agent_cwd,
         identity_did=job.identity_did,
+        input_message=(message or message_from_prompt(prompt)).model_dump_json(),
         created_at=now,
         updated_at=now,
     )

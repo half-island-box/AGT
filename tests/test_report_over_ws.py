@@ -117,7 +117,7 @@ def test_service_writes_result_to_task() -> None:
                 exit_code=0, stdout="ok\n", stderr="", duration=1.23,
                 status="completed", session_id="sess-1", resume_rejected=False,
             )
-            assert result == {"recorded": True}
+            assert result == {"recorded": True, "artifacts": []}
         row = await _row(factory, "t1")
         assert row.status == "completed"
         assert row.exit_code == 0
@@ -390,7 +390,7 @@ def test_http_report_route_still_works() -> None:
             "session_id": "sess-http", "resume_rejected": False,
         })
         assert resp.status_code == 200, resp.text
-        assert resp.json() == {"recorded": True}
+        assert resp.json() == {"recorded": True, "artifacts": []}
         # 404 case
         resp = client.post("/api/tasks/nope/report", json={
             "daemon_id": "d-http",
@@ -641,7 +641,7 @@ def test_report_end_to_end_over_reverse_dial() -> None:
                     },
                     timeout_ms=5000,
                 )
-                assert result == {"recorded": True}
+                assert result == {"recorded": True, "artifacts": []}
 
                 # Server's tasks row must reflect the report.
                 row = await _row(factory, "t-e2e")

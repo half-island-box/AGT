@@ -54,12 +54,14 @@ class DaemonLink:
         secret: str,
         session_factory: Any,
         name: str | None = None,
+        db_path: str | None = None,
     ) -> None:
         self.daemon_id = daemon_id
         self.url = url
         self.name = name
         self._secret = secret
         self._session_factory = session_factory
+        self._db_path = db_path
 
         self._link: WsRpcLink | None = None
         self._active = False  # True once a connection has been accepted at least once
@@ -67,6 +69,11 @@ class DaemonLink:
     @property
     def connected(self) -> bool:
         return self._link is not None and not self._link.closed
+
+    @property
+    def supports_rpc_v1(self) -> bool:
+        """Whether the current link negotiated rpc_v1 (frame handshake)."""
+        return self._link is not None and self._link.supports_rpc_v1
 
     async def notify_available(self, provider: str | None = None) -> bool:
         """Best-effort hint to the remote daemon that task(s) may be available.
@@ -112,6 +119,45 @@ class DaemonLink:
             {"session_id": session_id, "provider": provider},
             timeout_ms=8000,
         )
+
+    async def fetch_artifact(
+        self, artifact_id: str, local_path: str | None, sha256: str
+    ) -> bytes:
+        """Lazily fetch an artifact's bytes from this daemon (Phase 2).
+
+        Server→daemon counterpart of the eager upload: the daemon reads
+        ``local_path`` (a path this daemon itself reported at registration
+        time, relayed back by the server) and returns the content for a
+        sha256 check. Mirrors the ``session.history`` pull shape.
+
+        Raises ``RPCRejected``-style exceptions with a ``reason`` attribute
+        of ``artifact_missing`` when the daemon's local file is gone (the
+        caller marks the row ``lost``).
+        """
+        import base64
+
+        link = self._link
+        if link is None or link.closed or not link.supports_rpc_v1:
+            raise WSRPCUnavailable("daemon offline")
+        from .services.artifact_service import ArtifactFetchError
+
+        try:
+            result = await link.call(
+                "artifacts.fetch",
+                {"artifact_id": artifact_id, "local_path": local_path, "sha256": sha256},
+                timeout_ms=8000,
+            )
+        except RPCRejected as exc:
+            body = exc.body if isinstance(exc.body, dict) else {}
+            reason = body.get("reason") or body.get("type", "")
+            if reason == "artifact_missing":
+                raise ArtifactFetchError(
+                    "artifact_missing", body.get("message", "local file gone")
+                ) from None
+            raise ArtifactFetchError(
+                "producer_offline", body.get("message", str(body))
+            ) from None
+        return base64.b64decode(result["content_b64"])
 
     async def run(self, shutdown: asyncio.Event) -> None:
         """Dial + read-loop + reconnect. Runs until ``shutdown`` is set.
@@ -206,7 +252,96 @@ class DaemonLink:
             return await self._handle_tasks_report(body)
         if method == "tasks.progress":
             return await self._handle_tasks_progress(body)
+        if method == "artifacts.get":
+            return await self._handle_artifacts_get(body)
         raise ValueError({"type": "unknown_method", "message": method})
+
+    async def _handle_artifacts_get(self, body: dict) -> dict:
+        """Daemon→server input-side artifact resolution (Phase 2).
+        ``artifact_id`` in, content or same-daemon zero-copy hint out.
+
+        When the requesting daemon IS the origin, return its own
+        ``local_path`` so bytes never leave the machine (design D1).
+        Otherwise resolve server-side (inline/blob, triggering a lazy
+        fetch from the origin when needed) and stream back base64.
+        """
+        artifact_id = body.get("artifact_id")
+        if not isinstance(artifact_id, str) or not artifact_id:
+            raise ValueError({
+                "type": "validation_error",
+                "message": "artifacts.get requires artifact_id",
+            })
+        import base64
+
+        from .services.artifact_service import (
+            ArtifactFetchError,
+            get_artifact,
+            resolve_artifact_content,
+        )
+
+        async with session_scope(self._session_factory) as db:
+            artifact = await get_artifact(db, artifact_id)
+            if artifact is None:
+                raise ValueError({
+                    "type": "artifact_not_found",
+                    "reason": "artifact_missing",
+                    "message": artifact_id,
+                })
+            if artifact.origin_daemon_id == self.daemon_id and artifact.local_path:
+                return {
+                    "local_path": artifact.local_path,
+                    "mime_type": artifact.mime_type,
+                    "sha256": artifact.sha256,
+                }
+            try:
+                content, _ = await resolve_artifact_content(
+                    db,
+                    artifact,
+                    artifacts_dir=self._artifacts_dir(),
+                    fetch_hook=self._fetch_hook(artifact),
+                )
+            except ArtifactFetchError as exc:
+                raise ValueError({
+                    "type": "artifact_not_materialized",
+                    "reason": exc.reason,
+                    "message": exc.message,
+                }) from None
+            if content is None:
+                raise ValueError({
+                    "type": "artifact_not_materialized",
+                    "reason": "producer_offline",
+                    "message": "no content available",
+                })
+            return {
+                "content_b64": base64.b64encode(content).decode(),
+                "mime_type": artifact.mime_type,
+                "sha256": artifact.sha256,
+            }
+
+    def _artifacts_dir(self) -> "Path":
+        from pathlib import Path
+
+        return Path(self._db_path or "agt.db").expanduser().parent / "artifacts"
+
+    def _fetch_hook(self, artifact):
+        """Lazy-fetch callable for artifacts.get's cross-daemon resolve."""
+        async def _hook(model):
+            link = self._link
+            if link is None or link.closed or not link.supports_rpc_v1:
+                from .services.artifact_service import ArtifactFetchError
+
+                return ArtifactFetchError("producer_offline", "origin daemon offline")
+            try:
+                return await self.fetch_artifact(
+                    model.artifact_id, model.local_path, model.sha256
+                )
+            except Exception as exc:
+                from .services.artifact_service import ArtifactFetchError
+
+                reason = getattr(exc, "reason", None) or "producer_offline"
+                return ArtifactFetchError(reason, str(exc))
+
+        return _hook
 
     async def _handle_claim(self, body: dict) -> dict:
         # Body may include runtime_ids (provider filter from Step 3.4) and
@@ -287,6 +422,10 @@ class DaemonLink:
                     session_id=body.get("session_id"),
                     resume_rejected=bool(body.get("resume_rejected", False)),
                     outcome=body.get("outcome"),
+                    # Phase 2: declared deliverables ride the report body;
+                    # malformed items are dropped so the report always
+                    # goes through (best-effort by design).
+                    artifacts=_parse_artifact_items(body.get("artifacts")),
                 )
         except ValueError as exc:
             payload = (
@@ -336,6 +475,26 @@ class DaemonLink:
             if err_type == "task_not_owned":
                 raise RPCRejected(403, payload) from None
             raise
+
+
+def _parse_artifact_items(raw: Any) -> list:
+    """Validate the optional ``artifacts`` list of a WS report body.
+
+    Malformed items are dropped (not fatal): the report itself must
+    always go through. Legacy daemons omit the field entirely.
+    """
+    if not raw:
+        return []
+    from ..schemas import ArtifactReportItem
+
+    items: list = []
+    if isinstance(raw, list):
+        for entry in raw:
+            try:
+                items.append(ArtifactReportItem.model_validate(entry))
+            except Exception:
+                log.warning("dropping malformed artifact report item: %r", entry)
+    return items
 
 
 __all__ = ["DaemonLink"]

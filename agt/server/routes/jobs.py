@@ -8,12 +8,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db
 from ..models import JobModel, TaskModel
-from ..schemas import SubmitTaskRequest, SubmitTaskResponse
+from ..schemas import ArtifactOut, SubmitTaskRequest, SubmitTaskResponse
+from ..services.artifact_service import artifact_to_out, artifacts_for_steps
 from ..services.claim_service import notify_task_available
 from ..services.job_service import append_step, cancel_job, create_job, get_job
 from ..services.selection_service import SelectionError, select_runtime
 from .identities import _selection_error_to_http
 from .tasks import _notify_daemons
+from ...a2a import Message, render_message
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
@@ -30,12 +32,16 @@ class CreateJobResponse(SubmitTaskResponse):
 
 class JobInputRequest(BaseModel):
     prompt: str
+    # Phase 2: optional structured input for this turn.
+    message: Message | None = None
 
 
 class JobStatusResponse(BaseModel):
     job_id: str
     status: str
     current_step_id: str | None = None
+    # Phase 2: declared deliverables of the current Step (public form).
+    artifacts: list[ArtifactOut] = []
 
 
 @router.post("", response_model=CreateJobResponse, status_code=status.HTTP_201_CREATED)
@@ -47,6 +53,9 @@ async def create_job_route(
     """Create a Job with its first pending Step."""
     effective_provider = payload.provider
     effective_target = payload.target_daemon_id
+    prompt = (
+        render_message(payload.message) if payload.message else payload.prompt
+    )
 
     if payload.identity_did:
         try:
@@ -64,12 +73,13 @@ async def create_job_route(
     job = await create_job(
         db,
         provider=effective_provider,
-        prompt=payload.prompt,
+        prompt=prompt,
         target_daemon_id=effective_target,
         work_dir=payload.work_dir,
         agent_cwd=payload.agent_cwd,
         identity_did=payload.identity_did,
         job_type="chat",
+        message=payload.message,
     )
     await db.commit()
     await _notify_daemons(request, effective_target, effective_provider)
@@ -98,7 +108,10 @@ async def job_input(
             detail=f"job is {job.status}, expected waiting_input",
         )
 
-    step = await append_step(db, job_id, payload.prompt)
+    prompt = (
+        render_message(payload.message) if payload.message else payload.prompt
+    )
+    step = await append_step(db, job_id, prompt, message=payload.message)
     await db.commit()
     await _notify_daemons(request, job.target_daemon_id, job.provider)
     return CreateJobResponse(
@@ -142,10 +155,17 @@ async def job_status(
             current = step.task_id
             break
 
+    artifact_rows = (
+        await artifacts_for_steps(db, [current] if current else [])
+    ).get(current or "", [])
+
     return JobStatusResponse(
         job_id=job.job_id,
         status=job.status,
         current_step_id=current,
+        artifacts=[
+            ArtifactOut(**artifact_to_out(r)) for r in artifact_rows
+        ],
     )
 
 
