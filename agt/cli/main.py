@@ -13,6 +13,7 @@ without the Server, preserving the no-daemon-required workflow.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import signal
@@ -2775,6 +2776,313 @@ def token_issue(
         ttl_hours=ttl_hours,
     )
     click.echo(issued)
+
+
+# ── artifact (Phase 2/3: retrieval chain) ─────────────────────────
+
+
+def _parse_artifact_ref(ref: str) -> str:
+    """Accept ``agt-artifact://<id>`` or a bare id; return the id."""
+    return ref.removeprefix("agt-artifact://").removeprefix("agt-artifact:")
+
+
+def _rpc_rejected_detail(exc: RPCRejected) -> str:
+    """Pull the server's ``detail`` out of an RPCRejected, else the raw body.
+
+    ``_get`` wraps non-JSON error bodies as ``{"raw": resp.text}``, so a
+    403's ``detail`` (e.g. "session does not belong to daemon …") arrives
+    as a JSON string we have to unwrap for a clean CLI message.
+    """
+    body = exc.body
+    if isinstance(body, dict):
+        raw = body.get("raw")
+        if isinstance(raw, str):
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict) and parsed.get("detail"):
+                    return str(parsed["detail"])
+            except (ValueError, TypeError):
+                pass
+        if body.get("detail"):
+            return str(body["detail"])
+    return str(body)
+
+
+@cli.group()
+def artifact() -> None:
+    """View and download registered artifacts (talk to the Server)."""
+
+
+@artifact.command("list")
+@click.option(
+    "--session", "session_id", default=None,
+    help="Session id whose artifacts to list. Omit to list every artifact "
+         "on the daemon (cross-session, with a SESSION column).",
+)
+@click.option(
+    "--daemon", "daemon_id", default=None,
+    help="Target daemon. Defaults to this machine's daemon; errors if none "
+         "is found. With --session, ownership is enforced server-side.",
+)
+@click.option(
+    "--server-url",
+    default="http://127.0.0.1:8420",
+    show_default=True,
+    envvar="AGT_SERVER_URL",
+)
+def artifact_list(session_id: str | None, daemon_id: str | None, server_url: str) -> None:
+    """List registered artifacts.
+
+    With ``--session``: that session's artifacts (must belong to --daemon).
+    Without ``--session``: every artifact on --daemon, each with a SESSION id.
+    """
+    if daemon_id is None:
+        daemon_id = _local_daemon_id()
+        if daemon_id is None:
+            click.echo(
+                "Error: no local daemon found; pass --daemon <id>.",
+                err=True,
+            )
+            sys.exit(2)
+
+    if session_id is not None:
+        _print_session_artifacts(session_id, daemon_id, server_url)
+    else:
+        _print_daemon_artifacts(daemon_id, server_url)
+
+
+def _print_session_artifacts(session_id: str, daemon_id: str, server_url: str) -> None:
+    """List one session's artifacts (the session must belong to ``daemon_id``)."""
+
+    async def _run() -> list[dict]:
+        async with ServerClient(
+            base_url=server_url, daemon_id="cli-direct"
+        ) as client:
+            return await client.list_session_artifacts(session_id, daemon_id)
+
+    try:
+        artifacts = asyncio.run(_run())
+    except RPCRejected as exc:
+        click.echo(f"Error: {_rpc_rejected_detail(exc)}", err=True)
+        sys.exit(1)
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    if not artifacts:
+        click.echo(
+            f"No artifacts for session {session_id[:8]}… on daemon '{daemon_id}'."
+        )
+        return
+
+    click.echo(f"📦 {len(artifacts)} artifact(s) for session {session_id[:8]}…\n")
+    click.echo(
+        f"  {'NAME':<32} {'STATUS':<10} {'SIZE':<10} {'MIME':<24} URI"
+    )
+    click.echo("  " + "─" * 100)
+    for a in artifacts:
+        size = a.get("size")
+        size_str = str(size) if size is not None else "—"
+        click.echo(
+            f"  {a['name'][:32]:<32} {a['status']:<10} {size_str:<10} "
+            f"{(a.get('mime_type') or '—')[:24]:<24} {a['uri']}"
+        )
+
+
+def _print_daemon_artifacts(daemon_id: str, server_url: str) -> None:
+    """List every artifact on a daemon, each with its producing SESSION id."""
+
+    async def _run() -> list[dict]:
+        async with ServerClient(
+            base_url=server_url, daemon_id="cli-direct"
+        ) as client:
+            return await client.list_daemon_artifacts(daemon_id)
+
+    try:
+        artifacts = asyncio.run(_run())
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    if not artifacts:
+        click.echo(f"No artifacts on daemon '{daemon_id}'.")
+        return
+
+    click.echo(f"📦 {len(artifacts)} artifact(s) on daemon '{daemon_id}'\n")
+    rows = []
+    for a in artifacts:
+        size = a.get("size")
+        rows.append((
+            a.get("session_id") or "—",
+            a.get("name") or "",
+            a.get("status") or "",
+            str(size) if size is not None else "—",
+            a.get("uri") or "",
+        ))
+    widths = [
+        max(len(r[0]) for r in rows),
+        max(len(r[1]) for r in rows),
+        max(len(r[2]) for r in rows),
+        max(len(r[3]) for r in rows),
+    ]
+    header = (
+        f"  {'SESSION':<{widths[0]}}  {'NAME':<{widths[1]}}  "
+        f"{'STATUS':<{widths[2]}}  {'SIZE':<{widths[3]}}  URI"
+    )
+    click.echo(header)
+    click.echo("  " + "─" * (sum(widths) + 2 * 4 + 3))
+    for r in rows:
+        click.echo(
+            f"  {r[0]:<{widths[0]}}  {r[1]:<{widths[1]}}  "
+            f"{r[2]:<{widths[2]}}  {r[3]:<{widths[3]}}  {r[4]}"
+        )
+
+
+def _single_dest(meta: dict, output: str | None) -> Path:
+    """Destination path for a single download: -o wins, else the artifact's
+    basename in the cwd."""
+    if output:
+        return Path(output)
+    name = meta.get("name") or meta["artifact_id"]
+    return Path(Path(name).name)
+
+
+async def _download_one(
+    client: ServerClient, artifact_id: str, output: str | None
+) -> int:
+    """Download one artifact's bytes; returns the process exit code."""
+    meta = await client.get_artifact(artifact_id)
+    if meta is None:
+        click.echo(f"Error: artifact not found: {artifact_id}", err=True)
+        return 2
+    dest = _single_dest(meta, output)
+    content = await client.get_artifact_content(artifact_id)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(content)
+    click.echo(f"📥 {meta['uri']} → {dest} ({len(content)} bytes)")
+    return 0
+
+
+async def _download_batch(
+    client: ServerClient, session_id: str, daemon_id: str, out_dir: str
+) -> int:
+    """Download every artifact in a session into ``out_dir`` (best-effort
+    per artifact); returns the process exit code."""
+    artifacts = await client.list_session_artifacts(session_id, daemon_id)
+    if not artifacts:
+        click.echo(
+            f"No artifacts for session {session_id[:8]}… on daemon '{daemon_id}'."
+        )
+        return 0
+
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    ok = 0
+    failed = 0
+    for a in artifacts:
+        artifact_id = a["artifact_id"]
+        # ``name`` is a server-validated relative path inside outputs/;
+        # preserve its subdirs but guard against traversal defensively.
+        rel = Path(a.get("name") or artifact_id)
+        if rel.is_absolute() or ".." in rel.parts:
+            rel = Path(artifact_id)
+        dest = out / rel
+        try:
+            content = await client.get_artifact_content(artifact_id)
+        except RPCRejected as exc:
+            click.echo(f"⚠️  {a['uri']}: {_rpc_rejected_detail(exc)}", err=True)
+            failed += 1
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(content)
+        click.echo(f"📥 {a['uri']} → {dest} ({len(content)} bytes)")
+        ok += 1
+
+    if failed:
+        click.echo(f"{ok} downloaded, {failed} failed.", err=True)
+        return 1
+    click.echo(f"✅ {ok} artifact(s) → {out}")
+    return 0
+
+
+@artifact.command("get")
+@click.argument("ref", required=False)
+@click.option(
+    "-o", "--output", default=None, type=click.Path(),
+    help="Write the artifact bytes to this path (single mode).",
+)
+@click.option(
+    "--session", "session_id", default=None,
+    help="Batch: download every artifact in this session.",
+)
+@click.option(
+    "--daemon", "daemon_id", default=None,
+    help="Batch: daemon that owns the session.",
+)
+@click.option(
+    "--out-dir", default=None, type=click.Path(),
+    help="Batch: directory to write files into.",
+)
+@click.option(
+    "--server-url",
+    default="http://127.0.0.1:8420",
+    show_default=True,
+    envvar="AGT_SERVER_URL",
+)
+def artifact_get(
+    ref: str | None,
+    output: str | None,
+    session_id: str | None,
+    daemon_id: str | None,
+    out_dir: str | None,
+    server_url: str,
+) -> None:
+    """Download artifact bytes.
+
+    Single: ``agt artifact get <id|agt-artifact://…> [-o PATH]``.
+    Batch: ``agt artifact get --session <sid> --daemon <id> --out-dir DIR``.
+    """
+    batch = session_id is not None
+    if batch:
+        if ref is not None:
+            click.echo("Error: pass either a REF or --session, not both.", err=True)
+            sys.exit(2)
+        if not daemon_id:
+            click.echo("Error: --session requires --daemon.", err=True)
+            sys.exit(2)
+        if not out_dir:
+            click.echo("Error: --session requires --out-dir.", err=True)
+            sys.exit(2)
+        if output is not None:
+            click.echo(
+                "Error: -o/--output is single-mode; use --out-dir in batch.",
+                err=True,
+            )
+            sys.exit(2)
+    elif ref is None:
+        click.echo(
+            "Error: provide a REF (id or agt-artifact://…) or use --session.",
+            err=True,
+        )
+        sys.exit(2)
+
+    async def _run() -> int:
+        async with ServerClient(
+            base_url=server_url, daemon_id="cli-direct"
+        ) as client:
+            if batch:
+                return await _download_batch(client, session_id, daemon_id, out_dir)
+            return await _download_one(client, _parse_artifact_ref(ref), output)
+
+    try:
+        code = asyncio.run(_run())
+    except RPCRejected as exc:
+        click.echo(f"Error: {_rpc_rejected_detail(exc)}", err=True)
+        sys.exit(1)
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+    sys.exit(code)
 
 
 __all__ = ["cli"]

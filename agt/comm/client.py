@@ -292,6 +292,15 @@ class ServerClient:
             },
         )
 
+    async def get_artifact(self, artifact_id: str) -> dict | None:
+        """Fetch one artifact's public metadata, or None on 404."""
+        try:
+            return await self._get(f"/api/artifacts/{artifact_id}")
+        except RPCRejected as exc:
+            if exc.status == 404:
+                return None
+            raise
+
     async def get_artifact_content(self, artifact_id: str) -> bytes:
         """Fetch an artifact's bytes over HTTP (input-side resolution)."""
         assert self._client is not None, "ServerClient must be used as async context manager"
@@ -480,6 +489,29 @@ class ServerClient:
                 return None
             raise
         return resp.get("session_id")
+
+    async def list_session_artifacts(
+        self, session_id: str, daemon_id: str | None = None
+    ) -> list[dict]:
+        """List a session's registered artifacts via the Server.
+
+        ``daemon_id`` enforces ownership: the session must belong to that
+        daemon, otherwise the Server 403s (never a silent cross-daemon
+        leak). Returns the public metadata rows (``uri`` = agt-artifact://id).
+        """
+        params: dict[str, Any] = {}
+        if daemon_id is not None:
+            params["daemon_id"] = daemon_id
+        resp = await self._get(
+            f"/api/sessions/{session_id}/artifacts", params=params or None
+        )
+        return list(resp) if isinstance(resp, list) else []
+
+    async def list_daemon_artifacts(self, daemon_id: str) -> list[dict]:
+        """List every artifact a daemon produced, each annotated with
+        ``session_id`` (the cross-session view)."""
+        resp = await self._get(f"/api/daemons/{daemon_id}/artifacts")
+        return list(resp) if isinstance(resp, list) else []
 
     # ── Heartbeat ─────────────────────────────────────────────────
 

@@ -96,6 +96,7 @@ Remote `--daemon` / `--identity` chat streams agent output live: the daemon samp
 | `agt task`         | Submit tasks and inspect or clean task state.            |
 | `agt runtime list` | List runtimes registered with the server.                |
 | `agt identity`     | Manage identities, identity files, and runtime bindings. |
+| `agt artifact`     | List and download a session's declared deliverables.     |
 | `agt token issue`  | Issue a task-scoped token for API testing.               |
 
 Full option descriptions are in the [CLI reference](<docs/guide%20docs/commands.md>).

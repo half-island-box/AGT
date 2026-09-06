@@ -236,6 +236,45 @@ async def artifacts_for_steps(
     return by_step
 
 
+async def artifacts_for_job(db: AsyncSession, job_id: str) -> list[ArtifactModel]:
+    """All artifacts produced by a Job (across its Steps).
+
+    Backs the CLI ``agt artifact list --session`` / ``--job`` view — a
+    session resolves to one Job, and every Step under it contributes its
+    registered deliverables.
+    """
+    rows = (
+        await db.execute(select(ArtifactModel).where(ArtifactModel.job_id == job_id))
+    ).scalars().all()
+    return list(rows)
+
+
+async def artifacts_for_daemon(db: AsyncSession, daemon_id: str) -> list[dict]:
+    """Every artifact a daemon produced, each annotated with ``session_id``.
+
+    Backs ``agt artifact list --daemon X`` (no ``--session``) — the
+    cross-session view. ``origin_daemon_id`` is the claim-time daemon that
+    reported the artifact, so this is "what did this daemon actually
+    produce". ``session_id`` comes from the producing Step's
+    ``TaskModel.session_id`` (the same source ``list_daemon_sessions``
+    uses).
+    """
+    rows = (
+        await db.execute(
+            select(ArtifactModel, TaskModel.session_id)
+            .join(TaskModel, ArtifactModel.step_id == TaskModel.task_id)
+            .where(ArtifactModel.origin_daemon_id == daemon_id)
+            .order_by(ArtifactModel.created_at.desc())
+        )
+    ).all()
+    out: list[dict] = []
+    for artifact, session_id in rows:
+        item = artifact_to_out(artifact)
+        item["session_id"] = session_id
+        out.append(item)
+    return out
+
+
 def artifact_to_out(row: ArtifactModel) -> dict:
     """Public metadata dict. NEVER includes ``local_path``."""
     return {
@@ -398,6 +437,8 @@ __all__ = [
     "register_step_artifacts",
     "get_artifact",
     "artifacts_for_steps",
+    "artifacts_for_job",
+    "artifacts_for_daemon",
     "artifact_to_out",
     "materialize_content",
     "resolve_artifact_content",

@@ -20,6 +20,7 @@ from ...comm.errors import RPCRejected, WSRPCUnavailable, WSRPCUncertain
 from ..database import get_db
 from ..models import JobModel, SessionModel, TaskModel
 from ..schemas import SessionHistoryOut, SessionResolveOut
+from ..services.artifact_service import artifact_to_out, artifacts_for_job
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
@@ -124,6 +125,60 @@ async def resolve_session(
         daemon_id=latest_step.daemon_id if latest_step else None,
         dir=job.agent_cwd or job.work_dir,
     )
+
+
+@router.get("/{session_id}/artifacts")
+async def list_session_artifacts(
+    session_id: str,
+    daemon_id: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict]:
+    """List a session's registered artifacts (Phase 2/3 deliverables).
+
+    Backs ``agt artifact list --session <sid> --daemon <id>``. When
+    ``daemon_id`` is given, the session MUST belong to that daemon —
+    a mismatch is a hard 403 (never a silent cross-daemon leak). The
+    owning daemon is the Job's pinned target, else the daemon that ran
+    its latest Step.
+    """
+    sess = (
+        await db.execute(
+            select(SessionModel)
+            .where(SessionModel.session_id == session_id)
+            .order_by(SessionModel.updated_at.desc())
+        )
+    ).scalars().first()
+    if sess is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="no session for id",
+        )
+
+    job = await db.get(JobModel, sess.job_id)
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="session job not found",
+        )
+
+    latest_step = (
+        await db.execute(
+            select(TaskModel)
+            .where(TaskModel.job_id == job.job_id)
+            .order_by(TaskModel.updated_at.desc())
+        )
+    ).scalars().first()
+    owning_daemon = job.target_daemon_id or (
+        latest_step.daemon_id if latest_step else None
+    )
+
+    if daemon_id is not None and owning_daemon != daemon_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"session {session_id} does not belong to daemon {daemon_id}",
+        )
+
+    return [artifact_to_out(r) for r in await artifacts_for_job(db, job.job_id)]
 
 
 @router.get("/{session_id}/history")

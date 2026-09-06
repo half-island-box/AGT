@@ -21,6 +21,7 @@ from ..schemas import (
     ListDaemonSessionsResponse,
     ListDaemonsResponse,
 )
+from ..services.artifact_service import artifacts_for_daemon
 from ..services.binding_service import list_bindings_by_daemon
 from ..services.daemon_service import get_daemon, list_daemons
 
@@ -110,6 +111,20 @@ async def list_daemon_sessions_route(
             )
         )
     return ListDaemonSessionsResponse(sessions=sessions)
+
+
+@router.get("/{daemon_id}/artifacts")
+async def list_daemon_artifacts_route(
+    daemon_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> list[dict]:
+    """List every artifact the daemon produced, each with its ``session_id``.
+
+    Backs ``agt artifact list --daemon X`` (no ``--session``) — the
+    cross-session view. Each row carries the standard public artifact
+    metadata plus the producing session's id.
+    """
+    return await artifacts_for_daemon(db, daemon_id)
 
 
 __all__ = ["router"]
