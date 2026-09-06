@@ -353,6 +353,43 @@ def test_handler_missing_field_raises_validation_error() -> None:
     asyncio.run(engine.dispose())
 
 
+def test_handler_registers_artifacts_over_ws() -> None:
+    """A WS report carrying declared deliverables must register them.
+
+    Regression guard: ``_parse_artifact_items`` lazy-imports
+    ``ArtifactReportItem``; a wrong relative import there
+    (``from ..schemas`` instead of ``from .schemas``) only fires when the
+    list is non-empty, silently turning every remote artifact report into
+    a ``handler_error`` and leaving the task stuck in ``running``.
+    """
+    engine, _ = _fresh_db()
+    factory = make_session_factory(engine)
+
+    async def _run() -> None:
+        await _seed_task(factory, "t-art", "d1")
+        handler = _make_handler("d1", factory)
+        result = await handler._handle_tasks_report({
+            "task_id": "t-art", "exit_code": 0,
+            "stdout": "done", "stderr": "", "duration": 0.5,
+            "status": "completed",
+            "artifacts": [{
+                "name": "report.txt",
+                "mime_type": "text/plain",
+                "summary": None,
+                "status_flag": "pass",
+                "size": 5,
+                "sha256": "a" * 64,
+                "local_path": "/tmp/report.txt",
+                "inline_b64": None,
+            }],
+        })
+        assert result["recorded"] is True
+        assert len(result["artifacts"]) == 1
+
+    asyncio.run(_run())
+    asyncio.run(engine.dispose())
+
+
 # ── HTTP route regression guard ───────────────────────────────────
 
 

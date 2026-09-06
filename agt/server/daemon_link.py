@@ -486,7 +486,7 @@ def _parse_artifact_items(raw: Any) -> list:
     """
     if not raw:
         return []
-    from ..schemas import ArtifactReportItem
+    from .schemas import ArtifactReportItem
 
     items: list = []
     if isinstance(raw, list):
