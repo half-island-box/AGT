@@ -57,6 +57,17 @@ CLAUDE_BYPASS_PERMISSION_ARGS: tuple[str, ...] = (
     "bypassPermissions",
 )
 
+# Codex counterpart: ``codex exec`` is non-interactive and defaults to a
+# *read-only* sandbox, which denies every model-initiated file write —
+# including deliverables placed in ``.agt/outputs/``. ``workspace-write``
+# lets it write inside its cwd (where ``.agt/outputs/`` lives) while
+# keeping everything outside the workspace read-only. Unlike Claude's
+# ``bypassPermissions`` this is a sandbox policy, not a prompt gate.
+CODEX_SANDBOX_ARGS: tuple[str, ...] = (
+    "--sandbox",
+    "workspace-write",
+)
+
 
 @dataclass(frozen=True)
 class ProviderAdapter:
@@ -67,8 +78,9 @@ class ProviderAdapter:
     a custom sink in tests).
 
     ``permission_args`` are provider-specific CLI flags spliced into the
-    spawned argv ahead of ``stream_args``. Empty for providers that are
-    not Claude Code CLIs (their flags differ) — the executor composes
+    spawned argv ahead of ``stream_args``. Claude carries its permission
+    gate bypass and Codex its sandbox policy; other providers leave it
+    empty (their flags differ). The executor composes
     ``[*permission_args, *stream_args]`` without inspecting names.
     """
 
@@ -98,6 +110,7 @@ def _codex_adapter() -> ProviderAdapter:
         # factory to CodexStreamSink in Phase B once that sink lands.
         stream_sink_factory=NoopSink,
         resume_rejection_detector=GenericResumeRejectionDetector(),
+        permission_args=CODEX_SANDBOX_ARGS,
     )
 
 

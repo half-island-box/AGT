@@ -85,14 +85,26 @@ def test_claude_adapter_carries_bypass_permission_args():
     assert adapter.permission_args == ("--permission-mode", "bypassPermissions")
 
 
+def test_codex_adapter_carries_sandbox_args():
+    """Codex spawns with ``--sandbox workspace-write`` so the non-interactive
+    ``exec`` process can write deliverables (``.agt/outputs/``) instead of
+    being stuck in its default read-only sandbox."""
+    from agt.runtime.registry import CODEX_SANDBOX_ARGS
+
+    adapter = get_adapter("codex")
+    assert adapter.permission_args == CODEX_SANDBOX_ARGS
+    assert adapter.permission_args == ("--sandbox", "workspace-write")
+
+
 def test_non_claude_adapters_have_empty_permission_args():
-    """Non-Claude-Code CLIs MUST NOT receive Claude's permission flags.
+    """Providers without a headless write-bypass need MUST NOT receive any
+    permission/sandbox flags.
 
     cursor/copilot/qwen/... reuse ``ClaudeCommandBuilder`` for their ``-p``
     shape but are not Claude Code — injecting ``--permission-mode`` would
     make them fail to start.
     """
-    for provider in ("codex", "cursor", "copilot", "qwen", "kimi", "opencode", "openclaw"):
+    for provider in ("cursor", "copilot", "qwen", "kimi", "opencode", "openclaw"):
         assert get_adapter(provider).permission_args == (), provider
 
 
