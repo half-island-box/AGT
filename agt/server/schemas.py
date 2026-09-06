@@ -118,6 +118,12 @@ class TaskPayload(BaseModel):
     # content, or ``local_path`` when the claiming daemon IS the producer
     # (same-daemon zero-copy). ``None`` = legacy prompt-only task.
     message: dict | None = None
+    # Phase 3: server-computed artifact whitelist subdirectory (relative
+    # to ``agent_cwd``). Child jobs get ``.agt/outputs/<job_id>/`` so
+    # parallel siblings never cross-attribute files; root jobs get None
+    # (shared ``.agt/outputs/``, Phase 2 behavior). The daemon consumes
+    # this verbatim — no lineage knowledge on its side (design D9).
+    outputs_subdir: str | None = None
 
 
 class ReportRequest(BaseModel):
@@ -137,6 +143,9 @@ class ReportRequest(BaseModel):
     # Absent for legacy daemons — behavior is then byte-identical to
     # Phase 1 (the field is purely additive).
     artifacts: list["ArtifactReportItem"] = []
+    # Phase 3: structured-outcome sidecar (e.g. spawn intent envelopes
+    # ``{"children": [...]}``). Absent for legacy daemons — pure addition.
+    outcome_payload: dict | None = None
 
 
 class ReportResponse(BaseModel):

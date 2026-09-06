@@ -161,6 +161,33 @@ def ensure_schema(conn: Connection) -> None:
         )
         log.info("Migrated tasks table: added input_message column")
 
+    # Phase 3: Job-tree lineage + spawn payload sidecar. ``root_job_id``
+    # needs NOT NULL + backfill for existing depth-1 rows (a root's root
+    # is itself). ``outcome_payload`` carries spawn intent envelopes.
+    if _table_exists(conn, "jobs") and "parent_job_id" not in _column_names(conn, "jobs"):
+        conn.exec_driver_sql(
+            "ALTER TABLE jobs ADD COLUMN parent_job_id VARCHAR(64)"
+        )
+        conn.exec_driver_sql(
+            "ALTER TABLE jobs ADD COLUMN root_job_id VARCHAR(64) NOT NULL DEFAULT ''"
+        )
+        conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_jobs_parent ON jobs (parent_job_id)"
+        )
+        conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_jobs_root ON jobs (root_job_id)"
+        )
+        conn.exec_driver_sql(
+            "UPDATE jobs SET root_job_id = job_id WHERE root_job_id = ''"
+        )
+        log.info("Migrated jobs table: added parent_job_id/root_job_id columns")
+
+    if _table_exists(conn, "tasks") and "outcome_payload" not in _column_names(conn, "tasks"):
+        conn.exec_driver_sql(
+            "ALTER TABLE tasks ADD COLUMN outcome_payload TEXT"
+        )
+        log.info("Migrated tasks table: added outcome_payload column")
+
 
 def migrate_identities_and_sessions(conn: Connection, root_dir: Path | None = None) -> None:
     """Apply Phase 4 identity + Job/Step + session schema migrations. Idempotent.

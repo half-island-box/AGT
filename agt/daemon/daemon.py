@@ -79,6 +79,7 @@ class Daemon:
         turn_index: int = 1,
         identity_did: str | None = None,
         identity_md: str | None = None,
+        outputs_subdir: str | None = None,
         progress_cb=None,
     ) -> TaskResult:
         """Execute one prompt against the named provider.
@@ -187,6 +188,7 @@ class Daemon:
             resume_session_id=resume_session_id,
             identity_did=identity_did,
             identity_md=identity_md,
+            outputs_subdir=outputs_subdir,
         )
 
         executor = TaskExecutor(runtime=runtime, config=self.config)

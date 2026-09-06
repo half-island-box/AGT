@@ -71,9 +71,14 @@ def outputs_dir_for(agent_cwd: Path) -> Path:
     return agent_cwd / ".agt" / "outputs"
 
 
-def ensure_outputs_dir(agent_cwd: Path) -> Path:
-    """Pre-create the whitelist directory (idempotent)."""
-    outputs = outputs_dir_for(agent_cwd)
+def ensure_outputs_dir(agent_cwd: Path, *, subdir: str | None = None) -> Path:
+    """Pre-create the whitelist directory (idempotent).
+
+    ``subdir`` is the server-computed per-job isolation path (Phase 3,
+    relative to ``agent_cwd``, e.g. ``.agt/outputs/<job_id>/``). None
+    keeps the shared root directory (Phase 2 behavior).
+    """
+    outputs = (agent_cwd / subdir) if subdir else outputs_dir_for(agent_cwd)
     outputs.mkdir(parents=True, exist_ok=True)
     return outputs
 

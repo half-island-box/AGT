@@ -243,6 +243,7 @@ class ServerClient:
         resume_rejected: bool = False,
         outcome: str | None = None,
         artifacts: list[dict[str, Any]] | None = None,
+        outcome_payload: dict | None = None,
     ) -> bool:
         payload = {
             "daemon_id": self._daemon_id,
@@ -260,6 +261,10 @@ class ServerClient:
             # Phase 2: declared deliverables. Omitted (not []) when
             # empty so legacy payloads stay byte-identical.
             payload["artifacts"] = artifacts
+        if outcome is not None:
+            payload["outcome"] = outcome
+        if outcome_payload is not None:
+            payload["outcome_payload"] = outcome_payload
         resp = await self._post(f"/api/tasks/{task_id}/report", payload)
         return bool(resp.get("recorded", False))
 

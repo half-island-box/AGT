@@ -38,6 +38,12 @@ class RuntimeModel(Base):
     last_seen: Mapped[str] = mapped_column(String(32), nullable=False, default="")
 
 
+def _root_job_id_default(context) -> str:
+    """Default ``root_job_id`` to the row's own ``job_id`` (a root's root
+    is itself). Only fires when the field is omitted at construction."""
+    return context.get_current_parameters()["job_id"]
+
+
 class JobModel(Base):
     """A complete job/event tracked by the server.
 
@@ -49,6 +55,27 @@ class JobModel(Base):
     __tablename__ = "jobs"
 
     job_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # Phase 3: parent-child lineage (A2A referenceTaskIds). NULL for root
+    # jobs. Deletion cascades children (consistent with cancel semantics).
+    parent_job_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("jobs.job_id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    # Phase 3: denormalized root id for O(1) subtree queries (cancel
+    # cascade, per-root fan-out budget). Plain indexed string, no FK —
+    # avoids FK ordering issues on backfill; lineage CASCADE rides on
+    # parent_job_id only. Root jobs carry their own job_id here.
+    #
+    # Python-side default (a root's root is itself) so direct
+    # ``JobModel(...)`` constructions that omit the field — test fixtures,
+    # one-off seeds — still satisfy NOT NULL. ``create_job`` always sets it
+    # explicitly (child jobs inherit the parent's root), so the default
+    # only ever fires for root jobs.
+    root_job_id: Mapped[str] = mapped_column(
+        String(64), nullable=False, index=True, default=_root_job_id_default
+    )
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, default="queued", index=True
     )
@@ -113,6 +140,11 @@ class TaskModel(Base):
     # Structured outcome reported by the daemon (or derived by the server
     # for legacy daemons). Values: done, needs_input, error, spawn_subjob.
     outcome: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Phase 3: sidecar JSON for structured outcomes. Carries
+    # ``{"children": [...]}`` spawn-intent envelopes when
+    # ``outcome == "spawn_subjob"``. Kept separate from the enum-style
+    # ``outcome`` column for backward compatibility.
+    outcome_payload: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Phase 2 artifact foundation: this Step's structured input as an
     # A2A-shaped Message JSON (role + parts). Always normalized at
     # persistence time — a plain prompt-only submission is stored as a

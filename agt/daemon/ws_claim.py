@@ -133,6 +133,8 @@ async def report_task_ws_first(
     session_id: str | None,
     resume_rejected: bool,
     artifacts: list | None = None,
+    outcome: str | None = None,
+    outcome_payload: dict | None = None,
 ) -> bool:
     """Write a task result via WS first; HTTP fallback when not safe.
 
@@ -171,6 +173,10 @@ async def report_task_ws_first(
         # ignore unknown fields anyway, but absence keeps the payload
         # byte-identical to Phase 1).
         body["artifacts"] = artifacts
+    if outcome is not None:
+        body["outcome"] = outcome
+    if outcome_payload is not None:
+        body["outcome_payload"] = outcome_payload
 
     if wsrpc is not None and wsrpc.supports_rpc_v1 and not state.blocked:
         try:
@@ -215,6 +221,8 @@ async def report_task_ws_first(
             session_id=session_id,
             resume_rejected=resume_rejected,
             artifacts=artifacts,
+            outcome=outcome,
+            outcome_payload=outcome_payload,
         )
         return True
     except Exception as exc:

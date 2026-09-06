@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models import SessionModel, TaskModel
+from ..models import JobModel, SessionModel, TaskModel
 from ..schemas import TaskPayload
 from .identity_service import _render_agent_md, get_identity
 
@@ -194,6 +194,16 @@ async def _claim_candidate(
         db, candidate, daemon_id=daemon_id
     )
 
+    # Phase 3 (D9): server-computed outputs subdirectory — child jobs
+    # isolate their whitelist dir per job_id; root jobs share the Phase 2
+    # directory (None). The daemon consumes this without any lineage
+    # knowledge of its own.
+    outputs_subdir = None
+    if candidate.job_id is not None:
+        job = await db.get(JobModel, candidate.job_id)
+        if job is not None and job.parent_job_id is not None:
+            outputs_subdir = f".agt/outputs/{job.job_id}/"
+
     return TaskPayload(
         task_id=candidate.task_id,
         provider=candidate.provider,
@@ -204,6 +214,7 @@ async def _claim_candidate(
         identity_md=identity_md,
         agent_cwd=candidate.agent_cwd,
         message=message_dict,
+        outputs_subdir=outputs_subdir,
     )
 
 

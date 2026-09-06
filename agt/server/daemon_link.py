@@ -426,6 +426,7 @@ class DaemonLink:
                     # malformed items are dropped so the report always
                     # goes through (best-effort by design).
                     artifacts=_parse_artifact_items(body.get("artifacts")),
+                    outcome_payload=body.get("outcome_payload"),
                 )
         except ValueError as exc:
             payload = (

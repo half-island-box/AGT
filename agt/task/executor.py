@@ -29,11 +29,15 @@ import logging
 import os
 import re
 import time
-from dataclasses import replace
 from pathlib import Path
 
 from ..daemon.config import DaemonConfig
-from ..daemon.identity_inject import _inject_identity, _reclaim_identity
+from ..daemon.identity_inject import (
+    _inject_identity,
+    _inject_outputs_instruction,
+    _reclaim_identity,
+    _reclaim_outputs_instruction,
+)
 from ..runtime.models import Runtime
 from ..runtime.registry import (
     ProviderAdapter,
@@ -235,26 +239,35 @@ class TaskExecutor:
         work_dir = self._ensure_work_dir(task)
 
         # Phase 2 artifact foundation: pre-create the whitelist outputs
-        # directory and snapshot it before spawn. The convention reaches
-        # the agent through the identity channel when present (AGENTS.md
-        # injection), else through a prompt suffix — identity-less tasks
-        # must learn the contract too.
+        # directory and snapshot it before spawn. The deliverables contract
+        # (+ the Phase 3 spawn protocol) always rides the provider's
+        # project-instructions file (CLAUDE.md / AGENTS.md) so it is visible
+        # to local and remote daemons alike and never pollutes the prompt.
         from .artifact_scan import (
             OUTPUTS_INSTRUCTION,
             ensure_outputs_dir,
             scan_outputs,
             snapshot_outputs,
         )
+        from .spawn_intent import SPAWN_INSTRUCTION, parse_spawn_markers
 
-        outputs_dir = ensure_outputs_dir(work_dir)
-        outputs_snapshot = snapshot_outputs(outputs_dir)
-        if task.identity_did and task.identity_md:
-            task = replace(
-                task,
-                identity_md=f"{task.identity_md}\n\n{OUTPUTS_INSTRUCTION}\n",
+        # Phase 3 (D9): server-computed subdir isolates parallel child
+        # jobs; root jobs share the Phase 2 directory. The instruction
+        # names the exact directory so the agent writes to the right one.
+        outputs_dir = ensure_outputs_dir(work_dir, subdir=task.outputs_subdir)
+        instruction = OUTPUTS_INSTRUCTION
+        if task.outputs_subdir:
+            instruction = OUTPUTS_INSTRUCTION.replace(
+                "'.agt/outputs/'", f"'{task.outputs_subdir}'"
             )
-        else:
-            task = replace(task, prompt=f"{task.prompt}\n\n{OUTPUTS_INSTRUCTION}")
+        instruction = f"{instruction}\n{SPAWN_INSTRUCTION}"
+        outputs_snapshot = snapshot_outputs(outputs_dir)
+        # Deliver the deliverables (+spawn) contract through the provider's
+        # project-instructions file (CLAUDE.md / AGENTS.md) instead of
+        # appending to the prompt. Burying it in IDENTITY.md made agents
+        # read it as identity prose, not a per-task directive — the whole
+        # reason remote `chat --identity` never populated .agt/outputs.
+        _inject_outputs_instruction(work_dir, task.provider, instruction)
 
         # Permission flags come from the provider adapter (empty for
         # non-Claude-Code CLIs); they go ahead of streaming flags so the
@@ -269,11 +282,11 @@ class TaskExecutor:
         # ``AGENTS.md``). Reclaimed in ``finally`` regardless of how the
         # spawn exits (timeout, crash, normal exit, interactive).
         #
-        # Option D: when ``task.identity_md`` is set, the server already
-        # rendered the identity and bundled the body into the claim
-        # payload. We write it verbatim — no fetch from the Server,
-        # which would be unreachable in a reverse-dial setup.
-        if task.identity_did:
+        # Only inject when the server rendered and bundled the identity body
+        # into the claim payload (Option D). In reverse-dial setups the
+        # daemon cannot reach back to the server for identity metadata, so
+        # falling back to disk is deliberately removed.
+        if task.identity_did and task.identity_md:
             _inject_identity(
                 work_dir,
                 task.identity_did,
@@ -296,12 +309,18 @@ class TaskExecutor:
             result = await self._execute_pipe_text(task, cmd, work_dir, env, start)
             return result
         finally:
-            # Phase 4 Step 4: always reclaim the injected identity
-            # files, regardless of exit path (timeout, crash, normal,
-            # interactive). ``_reclaim_identity`` is a no-op when there
-            # is no ``.agt-identity-managed`` sidecar or no AGENTS.md
-            # marker block, so it's safe even when ``inject`` didn't run.
-            if task.identity_did:
+            # Reclaim the outputs/spawn block for every task (it is now
+            # always injected into the provider's instructions file).
+            # Identity reclaim only runs when the identity was actually
+            # injected (Option D). ``_reclaim_identity`` is a no-op when
+            # there is no sidecar or no AGENTS.md marker block, so it's
+            # safe even when ``inject`` didn't run.
+            _reclaim_outputs_instruction(work_dir)
+            if task.identity_did and task.identity_md:
+                # Outputs block first, then identity: identity reclaim
+                # owns the "delete the file we created when it ends up
+                # empty" decision and must run last so it sees the file
+                # after the outputs block is already gone.
                 _reclaim_identity(work_dir, did=task.identity_did)
             # Phase 2: post-exit whitelist scan, AFTER identity files are
             # reclaimed so they can never be picked up. Runs on every
@@ -312,6 +331,16 @@ class TaskExecutor:
             if result is not None:
                 try:
                     result.artifacts = scan_outputs(outputs_dir, outputs_snapshot)
+                    # Phase 3: spawn markers — parse envelopes, strip the
+                    # lines from user-visible stdout, set the structured
+                    # outcome. Runs after the artifact scan so spawn text
+                    # never pollutes stdout-derived anything else.
+                    spawn = parse_spawn_markers(result.stdout)
+                    if spawn.spawned_count:
+                        result.stdout = spawn.cleaned_stdout
+                        if spawn.children:
+                            result.outcome = "spawn_subjob"
+                            result.outcome_payload = {"children": spawn.children}
                 except Exception as exc:
                     log.warning("artifact scan failed: %s", exc)
 

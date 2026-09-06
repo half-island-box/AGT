@@ -55,6 +55,7 @@ class TestForeground:
     def test_foreground_does_not_spawn_popen(self, monkeypatch) -> None:
         from agt.server import main as server_main
         monkeypatch.setattr(server_main, "_read_pidfile", lambda _p: None)
+        monkeypatch.setattr(server_main, "cli_main", lambda _args: 0)
         with patch("subprocess.Popen", _FakePopen):
             _invoke(["start"])
         assert _FakePopen.instances == []

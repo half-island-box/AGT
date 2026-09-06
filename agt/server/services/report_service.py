@@ -47,6 +47,7 @@ async def record_task_result_for_daemon(
     resume_rejected: bool,
     outcome: str | None = None,
     artifacts: list | None = None,
+    outcome_payload: dict | None = None,
 ) -> dict:
     """Record execution results on a claimed task (Step).
 
@@ -64,6 +65,10 @@ async def record_task_result_for_daemon(
     persisted via ``register_step_artifacts`` AFTER the ownership check —
     only the daemon that claimed this Step can register its deliverables.
     Registration failures never fail the report (best-effort by design).
+
+    Phase 3: ``outcome_payload`` persists to the Step's sidecar column,
+    then drives two same-transaction hooks (spawn materialization +
+    parent wakeup).
 
     On success returns ``{"recorded": True}``. On business failure
     raises ``ValueError({"type": "task_not_found"|"task_not_owned",
@@ -102,6 +107,12 @@ async def record_task_result_for_daemon(
     task.outcome = outcome
 
     task.updated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+    # Phase 3: persist the structured-outcome sidecar (spawn envelopes).
+    if outcome_payload is not None:
+        import json as _json
+
+        task.outcome_payload = _json.dumps(outcome_payload, ensure_ascii=False)
 
     # Phase 2: register declared deliverables. Runs after the ownership
     # check above; per-item problems are skipped inside the service so a
@@ -170,6 +181,44 @@ async def record_task_result_for_daemon(
         from .job_service import report_step
 
         await report_step(db, task_id, outcome)
+
+        # Phase 3 hook A: materialize spawn intents as parallel child
+        # Jobs (same transaction — a failed spawn rolls back with the
+        # report). Failed-at-birth children (unknown identity) count as
+        # terminal, so run the wakeup check immediately afterwards.
+        if outcome == "spawn_subjob":
+            from .job_service import on_child_done, spawn_children
+
+            children = []
+            if isinstance(outcome_payload, dict):
+                raw_children = outcome_payload.get("children")
+                if isinstance(raw_children, list):
+                    children = [
+                        c for c in raw_children if isinstance(c, dict) and c.get("goal")
+                    ]
+            parent_job = await db.get(JobModel, job_id)
+            if parent_job is not None:
+                await spawn_children(
+                    db,
+                    parent_job=parent_job,
+                    children=children,
+                    daemon_id=daemon_id,
+                )
+                if children:
+                    await on_child_done(db, job_id, synthesis_daemon_id=daemon_id)
+
+        # Phase 3 hook B: this Step's Job may itself be a child — its
+        # terminal report wakes the parent's wakeup check (synthesis
+        # spawns inline when all siblings are terminal).
+        current_job = await db.get(JobModel, job_id)
+        if current_job is not None and current_job.parent_job_id is not None:
+            from .job_service import on_child_done
+
+            await on_child_done(
+                db,
+                current_job.parent_job_id,
+                synthesis_daemon_id=daemon_id,
+            )
 
     await db.commit()
 

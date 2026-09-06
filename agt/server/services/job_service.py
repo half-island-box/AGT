@@ -9,16 +9,43 @@ Job in an inconsistent state.
 from __future__ import annotations
 
 import uuid
+import json
+import logging
 from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ...a2a import Message, message_from_prompt
-from ..models import JobModel, SessionModel, TaskModel
+from ...a2a import (
+    DataPart,
+    FilePart,
+    Message,
+    TextPart,
+    make_artifact_uri,
+    message_from_prompt,
+    render_message,
+)
+from ..models import (
+    ArtifactModel,
+    IdentityBindingModel,
+    IdentityModel,
+    JobModel,
+    SessionModel,
+    TaskModel,
+)
 
-_VALID_STATUSES = {"queued", "running", "waiting_input", "done", "failed", "cancelled"}
+log = logging.getLogger(__name__)
+
+_VALID_STATUSES = {
+    "queued", "running", "waiting_input", "waiting_children",
+    "done", "failed", "cancelled",
+}
 _TERMINAL_STATUSES = {"done", "failed", "cancelled"}
+
+# Phase 3 spawn budgets (spec: subjob-orchestration / spawn 预算).
+MAX_SPAWN_BATCH = 8
+MAX_TREE_DEPTH = 3
+MAX_ROOT_CHILDREN = 32
 
 
 def _now() -> str:
@@ -46,6 +73,7 @@ async def create_job(
     task_id: str | None = None,
     job_type: str = "task",
     message: Message | None = None,
+    parent_job_id: str | None = None,
 ) -> JobModel:
     """Create a Job and its first pending Step.
 
@@ -57,8 +85,19 @@ async def create_job(
     j_id = job_id or _new_id()
     s_id = task_id or _new_id()
 
+    # Phase 3: lineage — children inherit the parent's root; roots carry
+    # their own id (denormalized for subtree/budget queries).
+    root_job_id = j_id
+    if parent_job_id is not None:
+        parent = await db.get(JobModel, parent_job_id)
+        if parent is None:
+            raise ValueError({"type": "parent_job_not_found", "message": parent_job_id})
+        root_job_id = parent.root_job_id
+
     job = JobModel(
         job_id=j_id,
+        parent_job_id=parent_job_id,
+        root_job_id=root_job_id,
         status="queued",
         job_type=job_type,
         provider=provider,
@@ -100,6 +139,7 @@ async def append_step(
     *,
     resume_session_id: str | None = None,
     message: Message | None = None,
+    target_daemon_id: str | None = None,
 ) -> TaskModel:
     """Append a new pending Step to a Job.
 
@@ -122,7 +162,9 @@ async def append_step(
         provider=job.provider,
         prompt=prompt,
         status="pending",
-        target_daemon_id=job.target_daemon_id,
+        # Phase 3: explicit target wins (synthesis pinning, D10) —
+        # free parents would otherwise let synthesis land anywhere.
+        target_daemon_id=target_daemon_id or job.target_daemon_id,
         session_id=resume_session_id,
         work_dir=job.work_dir,
         agent_cwd=job.agent_cwd,
@@ -132,6 +174,11 @@ async def append_step(
         updated_at=now,
     )
     db.add(step)
+    # Wire the Step into the Job's in-memory collection (mirrors
+    # ``create_job``): with ``expire_on_commit=False`` the identity map
+    # keeps a stale ``job.steps`` after commit, so callers that re-read
+    # the Job in the same session would otherwise miss the new Step.
+    job.steps.append(step)
     await db.flush()
 
     # Moving from waiting_input back to running means a new Step is ready.
@@ -230,17 +277,298 @@ def _next_status(current: str, event: str) -> str:
 
 
 async def cancel_job(db: AsyncSession, job_id: str) -> JobModel:
-    """Cancel a Job and cascade to any running Steps."""
+    """Cancel a Job, cascading to its whole descendant subtree (D15).
+
+    Descendants are found by ``parent_job_id`` closure — NOT by
+    ``root_job_id`` (that would cancel sibling branches too). After the
+    cascade, if the cancelled Job has a parent, the parent's wakeup
+    check runs: server-side terminal transitions must not strand a
+    ``waiting_children`` parent (spec: server 侧终态路径触发唤醒检查).
+    """
     job = await get_job(db, job_id)
     if job is None:
         raise ValueError({"type": "job_not_found", "message": job_id})
 
-    for step in job.steps:
-        if step.status == "running":
-            step.status = "cancelled"
-            step.updated_at = _now()
+    subtree_ids = await _descendant_closure(db, job_id)
+    # Cascade = the job itself + its descendants (D15). ``_descendant_closure``
+    # is exclusive of the root, so prepend it here.
+    for jid in [job_id, *subtree_ids]:
+        target = job if jid == job_id else await get_job(db, jid)
+        if target is None:
+            continue
+        for step in target.steps:
+            if step.status == "running":
+                step.status = "cancelled"
+                step.updated_at = _now()
+        await transition_job(db, jid, "cancel")
 
-    return await transition_job(db, job_id, "cancel")
+    # Wakeup check for the cancelled node's parent (no-op if the parent
+    # is itself terminal — e.g. the cascade came from higher up).
+    if job.parent_job_id is not None:
+        await on_child_done(db, job.parent_job_id)
+
+    return job
+
+
+async def _descendant_closure(db: AsyncSession, job_id: str) -> list[str]:
+    """All descendant job ids of ``job_id`` (exclusive), iteratively
+    expanding ``parent_job_id`` (SQLite-friendly, no recursive CTE)."""
+    seen: list[str] = []
+    frontier = [job_id]
+    while frontier:
+        rows = (
+            await db.execute(
+                select(JobModel.job_id).where(JobModel.parent_job_id.in_(frontier))
+            )
+        ).scalars().all()
+        frontier = [r for r in rows if r not in seen]
+        seen.extend(frontier)
+    return seen
+
+
+async def _job_depth(db: AsyncSession, job: JobModel) -> int:
+    """Depth of ``job`` in the Job tree (root = 1), by parent-chain walk.
+    Bounded by MAX_TREE_DEPTH so the walk is trivially cheap."""
+    depth = 1
+    current = job
+    while current.parent_job_id is not None and depth <= MAX_TREE_DEPTH + 1:
+        parent = await db.get(JobModel, current.parent_job_id)
+        if parent is None:
+            break
+        current = parent
+        depth += 1
+    return depth
+
+
+async def spawn_children(
+    db: AsyncSession,
+    *,
+    parent_job: JobModel,
+    children: list[dict],
+    daemon_id: str,
+) -> list[JobModel]:
+    """Materialize spawn-intent envelopes as parallel child Jobs.
+
+    Budgets (spec: spawn 预算) are enforced best-effort: over-limit
+    batches are truncated and logged, never failing the parent report.
+    Identity resolution is two-state (D13): empty → inherit parent
+    provider; explicitly-unknown → the child is created directly in
+    ``failed`` (never a silent provider swap).
+    """
+    if not children:
+        return []
+
+    # Budget: batch size.
+    if len(children) > MAX_SPAWN_BATCH:
+        log.warning(
+            "spawn batch %d > %d; truncating (parent=%s)",
+            len(children), MAX_SPAWN_BATCH, parent_job.job_id,
+        )
+        children = children[:MAX_SPAWN_BATCH]
+
+    # Budget: tree depth — children would exceed the cap → skip all.
+    depth = await _job_depth(db, parent_job)
+    if depth + 1 > MAX_TREE_DEPTH:
+        log.warning(
+            "spawn rejected: depth %d + 1 > %d (parent=%s)",
+            depth, MAX_TREE_DEPTH, parent_job.job_id,
+        )
+        return []
+
+    # Budget: total children under the root.
+    existing = (
+        await db.execute(
+            select(JobModel).where(
+                JobModel.root_job_id == parent_job.root_job_id,
+                JobModel.parent_job_id.is_not(None),
+            )
+        )
+    ).scalars().all()
+    remaining = MAX_ROOT_CHILDREN - len(existing)
+    if remaining <= 0:
+        log.warning(
+            "spawn rejected: root %s already has %d children",
+            parent_job.root_job_id, len(existing),
+        )
+        return []
+    if len(children) > remaining:
+        log.warning(
+            "spawn truncated to %d (root budget, parent=%s)",
+            remaining, parent_job.job_id,
+        )
+        children = children[:remaining]
+
+    created: list[JobModel] = []
+    for envelope in children:
+        identity = envelope.get("identity") or None
+        provider = parent_job.provider
+        unknown_identity: str | None = None
+        if identity:
+            binding = (
+                await db.execute(
+                    select(IdentityBindingModel)
+                    .where(IdentityBindingModel.identity_did == identity)
+                    .order_by(IdentityBindingModel.priority.desc())
+                    .limit(1)
+                )
+            ).scalars().first()
+            identity_row = await db.get(IdentityModel, identity)
+            if binding is None or identity_row is None:
+                # D13: explicit-but-unknown identity → child fails at
+                # birth; never silently inherit the parent provider.
+                unknown_identity = identity
+                identity = None
+            else:
+                provider = binding.provider
+
+        message = _child_message(envelope)
+        try:
+            child = await create_job(
+                db,
+                provider=provider,
+                prompt=render_message(message),
+                target_daemon_id=daemon_id,
+                work_dir=parent_job.work_dir,
+                agent_cwd=parent_job.agent_cwd,
+                identity_did=identity,
+                job_type="task",
+                message=message,
+                parent_job_id=parent_job.job_id,
+            )
+        except ValueError:
+            raise
+
+        if unknown_identity is not None:
+            # Failed-at-birth child: terminal immediately, message on the
+            # Step. Counts as a terminal child for the wakeup check.
+            child.status = "failed"
+            child.updated_at = _now()
+            step = child.steps[0]
+            step.status = "failed"
+            step.outcome = "error"
+            step.stderr = f"unknown identity: {unknown_identity}"
+            step.updated_at = _now()
+            await db.flush()
+
+        created.append(child)
+
+    if created:
+        await db.flush()
+    return created
+
+
+def _child_message(envelope: dict) -> Message:
+    """Build a child Job's structured input from one spawn envelope."""
+    parts: list = [TextPart(text=str(envelope.get("goal") or ""))]
+    data: dict = {}
+    if envelope.get("identity"):
+        data["identity"] = envelope["identity"]
+    if envelope.get("inputs"):
+        data["inputs"] = list(envelope["inputs"])
+    if envelope.get("return"):
+        data["return"] = envelope["return"]
+    if data:
+        parts.append(DataPart(data=data))
+    inputs = envelope.get("inputs") or []
+    if isinstance(inputs, list):
+        for uri in inputs:
+            if isinstance(uri, str) and uri:
+                parts.append(FilePart(uri=uri))
+    return Message(role="user", parts=parts)
+
+
+async def on_child_done(
+    db: AsyncSession,
+    parent_job_id: str,
+    *,
+    synthesis_daemon_id: str | None = None,
+) -> None:
+    """Wake a ``waiting_children`` parent once all children are terminal.
+
+    No-op when the parent is missing/terminal/not waiting — callers may
+    invoke it liberally from any child-terminal path (report hook,
+    cancel, failed-at-birth spawn). On full completion the parent
+    transitions ``children_done → running`` and a synthesis Step is
+    appended, pinned to the children's executing daemon (D10).
+    """
+    parent = await get_job(db, parent_job_id)
+    if parent is None or parent.status != "waiting_children":
+        return
+
+    children = (
+        await db.execute(
+            select(JobModel).where(JobModel.parent_job_id == parent_job_id)
+        )
+    ).scalars().all()
+    if not children:
+        return
+    if not all(c.status in _TERMINAL_STATUSES for c in children):
+        return
+
+    # Pin synthesis to the children's daemon: explicit hint, else the
+    # daemon that ran the parent's spawn step.
+    daemon_id = synthesis_daemon_id
+    if daemon_id is None:
+        for step in reversed(parent.steps):
+            if step.daemon_id:
+                daemon_id = step.daemon_id
+                break
+
+    await transition_job(db, parent_job_id, "children_done")
+    message = await _synthesis_message(db, children)
+    await append_step(
+        db,
+        parent_job_id,
+        render_message(message),
+        message=message,
+        target_daemon_id=daemon_id,
+    )
+
+
+async def _synthesis_message(db: AsyncSession, children: list[JobModel]) -> Message:
+    """Build the synthesis Step input (spec: synthesis 聚合).
+
+    Per-child entries carry ``job_status`` (source: JobModel.status) —
+    Job-level outcome — while each artifact keeps its own product-level
+    ``status_flag``/``summary``. A failed child with zero artifacts gets
+    a bare ``job_status=failed`` entry (no fabricated flags).
+    """
+    entries: list[dict] = []
+    file_parts: list[FilePart] = []
+    for child in children:
+        artifacts = (
+            await db.execute(
+                select(ArtifactModel).where(ArtifactModel.job_id == child.job_id)
+            )
+        ).scalars().all()
+        artifact_entries = [
+            {
+                "uri": make_artifact_uri(a.artifact_id),
+                "name": a.name,
+                "status_flag": a.status_flag,
+                "summary": a.summary,
+            }
+            for a in artifacts
+        ]
+        entries.append({
+            "job_id": child.job_id,
+            "identity": child.identity_did,
+            "job_status": child.status,
+            "artifacts": artifact_entries,
+        })
+        for a in artifacts:
+            file_parts.append(FilePart(uri=make_artifact_uri(a.artifact_id)))
+
+    return Message(
+        role="user",
+        parts=[
+            TextPart(
+                text="你的子任务已全部完成。请综合下列交付物（含各子任务状态）给出最终结果。"
+            ),
+            DataPart(data={"children": entries}),
+            *file_parts,
+        ],
+    )
 
 
 async def resolve_job_by_session(

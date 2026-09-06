@@ -53,6 +53,10 @@ class Task:
     # legacy ``Path.home()/.agt/identities/<slug>/AGENTS.md`` read, so
     # a daemon running outside the server path still works.
     identity_md: str | None = None
+    # Phase 3: server-computed artifact whitelist subdirectory (relative
+    # to agent_cwd). None = root job, shared ``.agt/outputs/`` (Phase 2
+    # behavior). The daemon consumes this verbatim (design D9).
+    outputs_subdir: str | None = None
 
 
 @dataclass
@@ -75,6 +79,12 @@ class TaskResult:
     # content). Registration is a server-side concern; local runs simply
     # carry the list (the CLI may surface where the files live).
     artifacts: list = field(default_factory=list)
+    # Phase 3: structured terminal outcome. Set only when the agent
+    # expressed an explicit intent (spawn markers); None leaves the
+    # server's legacy derivation in charge.
+    outcome: str | None = None
+    # Phase 3: outcome sidecar (e.g. {"children": [...]} envelopes).
+    outcome_payload: dict | None = None
 
 
 __all__ = ["Task", "TaskResult"]
