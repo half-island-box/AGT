@@ -55,6 +55,7 @@ class DaemonLink:
         session_factory: Any,
         name: str | None = None,
         db_path: str | None = None,
+        daemon_defs: Any | None = None,
     ) -> None:
         self.daemon_id = daemon_id
         self.url = url
@@ -62,6 +63,11 @@ class DaemonLink:
         self._secret = secret
         self._session_factory = session_factory
         self._db_path = db_path
+        # Phase B: ``daemon_id → DaemonTarget`` overlay for the live
+        # catalog. Supplied from the server lifespan (built once from the
+        # static ``~/.agt/daemons`` config); None keeps the catalog's
+        # url/capability metadata empty (tests / no daemons file).
+        self._daemon_defs = daemon_defs
 
         self._link: WsRpcLink | None = None
         self._active = False  # True once a connection has been accepted at least once
@@ -276,7 +282,46 @@ class DaemonLink:
             return await self._handle_tasks_progress(body)
         if method == "artifacts.get":
             return await self._handle_artifacts_get(body)
+        if method == "catalog.list":
+            return await self._handle_catalog_list(body)
         raise ValueError({"type": "unknown_method", "message": method})
+
+    async def _handle_catalog_list(self, body: dict) -> dict:
+        """Serve the live runtime catalog to a remote daemon's proxy MCP.
+
+        Reverse-dial counterpart of the Server-side MCP tool: the remote
+        agent cannot reach the Server's HTTP MCP endpoint (NAT), so its
+        daemon's proxy MCP forwards each tool call over this link. This
+        handler renders the same catalog as the in-process MCP tool —
+        both call :func:`render_runtime_catalog` with the same
+        ``daemon_defs`` — so the two paths can't drift.
+
+        ``capability``/``provider`` are optional filters forwarded verbatim.
+        The catalog is a **global** view, so — like every other inbound
+        handler here — no ``daemon_id`` is read from ``body``; the
+        configured ``self.daemon_id`` is not even needed for a listing.
+        """
+        capability = body.get("capability")
+        provider = body.get("provider")
+        if capability is not None and not isinstance(capability, str):
+            raise ValueError({
+                "type": "validation_error",
+                "message": "capability must be a string",
+            })
+        if provider is not None and not isinstance(provider, str):
+            raise ValueError({
+                "type": "validation_error",
+                "message": "provider must be a string",
+            })
+        from .services.catalog_service import render_runtime_catalog
+
+        async with session_scope(self._session_factory) as db:
+            return await render_runtime_catalog(
+                db,
+                daemon_defs=self._daemon_defs,
+                capability=capability,
+                provider=provider,
+            )
 
     async def _handle_artifacts_get(self, body: dict) -> dict:
         """Daemon→server input-side artifact resolution (Phase 2).

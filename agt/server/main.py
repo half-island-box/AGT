@@ -16,6 +16,7 @@ from fastapi import FastAPI
 from .config import DaemonTarget, ServerConfig
 from .daemon_link import DaemonLink
 from .database import bind_get_db, make_engine, make_session_factory, session_scope
+from .mcp_server import build_catalog_mcp, catalog_mcp_asgi
 from .middleware.auth import bind_verify_task_token
 from .migrate_schema import ensure_schema, migrate_identities_and_sessions
 from .migrate_sessions import migrate_sessions_json
@@ -79,6 +80,11 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     cfg = config or ServerConfig.from_env()
     engine = make_engine(cfg)
     session_factory = make_session_factory(engine)
+    # Phase B: ``daemon_id → DaemonTarget`` lookup, built once here and
+    # shared by the reverse-dial ``catalog.list`` handler and the MCP tool
+    # (mounted below) so their catalog overlays (url/capabilities/name)
+    # can never diverge.
+    daemon_defs = {t.daemon_id: t for t in cfg.daemons}
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -138,6 +144,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                 session_factory=session_factory,
                 name=target.name,
                 db_path=cfg.db_path,
+                daemon_defs=daemon_defs,
             )
             daemon_links[target.daemon_id] = link
             daemon_link_tasks.append(
@@ -151,31 +158,36 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                 ", ".join(t.daemon_id for t in cfg.daemons),
             )
 
-        try:
-            yield
-        finally:
-            log.info("Shutting down daemon-link pool…")
-            shutdown_event.set()
-            if pid_path is not None:
-                # Only remove the pid file if it still names *this* process.
-                # A second server may have since overwritten it (e.g. after a
-                # restart race); deleting it unconditionally would clobber the
-                # other instance's pid file and leave it un-stoppable.
-                try:
-                    if pid_path.read_text(encoding="utf-8").strip() == str(os.getpid()):
-                        pid_path.unlink()
-                except FileNotFoundError:
-                    pass
-            for t in daemon_link_tasks:
-                t.cancel()
-            # Give the tasks a moment to acknowledge shutdown, but don't
-            # block forever — the server should exit promptly.
-            for t in daemon_link_tasks:
-                try:
-                    await asyncio.wait_for(t, timeout=2.0)
-                except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
-                    pass
-            await engine.dispose()
+        # Phase B: run the MCP session manager for the server's lifetime.
+        # Starlette only runs the ROOT app's lifespan, not a mounted
+        # sub-app's — ``/mcp`` is mounted, so we start its session manager
+        # here ourselves (same pattern the SDK documents for FastAPI).
+        async with app.state.mcp.session_manager.run():
+            try:
+                yield
+            finally:
+                log.info("Shutting down daemon-link pool…")
+                shutdown_event.set()
+                if pid_path is not None:
+                    # Only remove the pid file if it still names *this* process.
+                    # A second server may have since overwritten it (e.g. after a
+                    # restart race); deleting it unconditionally would clobber the
+                    # other instance's pid file and leave it un-stoppable.
+                    try:
+                        if pid_path.read_text(encoding="utf-8").strip() == str(os.getpid()):
+                            pid_path.unlink()
+                    except FileNotFoundError:
+                        pass
+                for t in daemon_link_tasks:
+                    t.cancel()
+                # Give the tasks a moment to acknowledge shutdown, but don't
+                # block forever — the server should exit promptly.
+                for t in daemon_link_tasks:
+                    try:
+                        await asyncio.wait_for(t, timeout=2.0)
+                    except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                        pass
+                await engine.dispose()
 
     app = FastAPI(
         title="agt-server",
@@ -190,6 +202,13 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     app.state.config = cfg
     bind_get_db(app, session_factory)
     bind_verify_task_token(app, cfg.secret)
+
+    # Phase B: mount the catalog MCP endpoint on the existing FastAPI app at
+    # ``/mcp`` (Streamable HTTP) — no new listen port. The session manager's
+    # lifespan is run inside our own lifespan (see above) because a mounted
+    # sub-app's lifespan is not auto-run by Starlette.
+    app.state.mcp = build_catalog_mcp(session_factory, daemon_defs)
+    app.mount("/mcp", catalog_mcp_asgi(app.state.mcp))
 
     app.include_router(runtimes_router)
     app.include_router(daemons_router)

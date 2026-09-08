@@ -15,6 +15,7 @@ It is an experimental Python foundation for a future multi-agent desktop client.
 - Protect agent-to-server callbacks with task-scoped HMAC tokens.
 - Route identity-based sub-tasks dynamically across daemons (capability + affinity + load scoring; chat sessions stay pinned to one daemon) and propagate cancellation to running remote subprocesses (`tasks.cancel` push for reverse-dial daemons, claim-response delivery for HTTP daemons).
 - Collect declared agent deliverables as addressable artifacts (`agt-artifact://<id>`): agents place files in `.agt/outputs/` (optionally described by `manifest.json`), the server registers lineage/mime/summary, and later steps can consume them by reference — bytes only move cross-daemon, on demand.
+- Expose a live runtime catalog over MCP so a parent agent can discover which daemons are up (and what providers they run) before spawning a child.
 
 ## Requirements
 
@@ -82,6 +83,8 @@ agt server stop
 By default, the server listens on `127.0.0.1:8420`. Its OpenAPI documentation is available at [http://127.0.0.1:8420/docs](http://127.0.0.1:8420/docs) while the server is running.
 
 Remote daemons can connect over HTTP or reverse-dial WebSocket, allowing execution on machines behind NATs. See the [quick-start guide](<docs/guide%20docs/quick_start.md>) for deployment details.
+
+The server also serves a live **runtime catalog** over MCP (Streamable HTTP) at `http://127.0.0.1:8420/mcp` — it starts automatically with the server, no separate command. It exposes a single `list_runtimes` tool (optional `capability` / `provider` filters) that returns the daemons that are currently online and the providers each can run, so a parent agent can pick a valid `daemon_id`/`provider` before spawning a child. Local agents reach the server endpoint directly; a remote daemon (reverse-dial) serves the same tool through a loopback proxy on `127.0.0.1:8428/mcp` (`AGT_DAEMON_MCP_PORT`), forwarding each call over the reverse-dial link.
 
 Remote `--daemon` / `--identity` chat streams agent output live: the daemon samples stdout prefixes, the server pushes them over SSE, and the CLI renders them incrementally (`snapshot → delta* → done`), with a poll fallback if the stream drops.
 
@@ -156,6 +159,7 @@ The most useful environment variables are:
 | `AGT_AGENT_TIMEOUT`  | `600`                   | Agent subprocess timeout in seconds.                       |
 | `AGT_WORK_DIR`       | `~/.agt/workspaces`     | Fallback task workspace root.                              |
 | `AGT_EXTRA_AGENTS`   | —                        | Extra agent definitions in`cmd:provider:Display` format. |
+| `AGT_DAEMON_MCP_PORT`| `8428`                  | Reverse-dial daemon proxy MCP port (loopback).           |
 
 ### Common files
 

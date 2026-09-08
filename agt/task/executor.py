@@ -38,6 +38,7 @@ from ..daemon.identity_inject import (
     _reclaim_identity,
     _reclaim_outputs_instruction,
 )
+from ..daemon.mcp_inject import inject_mcp_config, reclaim_mcp_config
 from ..runtime.models import Runtime
 from ..runtime.registry import (
     ProviderAdapter,
@@ -191,6 +192,19 @@ def _stream_args_for(sink: StreamingSink) -> list[str]:
     return []
 
 
+def _mcp_url_for(config: DaemonConfig) -> str:
+    """The MCP catalog endpoint a spawned agent should call.
+
+    Reverse-dial (remote) agents cannot reach the Server's HTTP MCP
+    endpoint (NAT), so they hit their daemon's proxy MCP on loopback.
+    Local agents reach the Server's ``/mcp`` directly.
+    """
+    if getattr(config, "listen_mode", False):
+        port = getattr(config, "mcp_port", None) or 8428
+        return f"http://127.0.0.1:{port}/mcp"
+    return config.server_url.rstrip("/") + "/mcp"
+
+
 class AgentNotFoundError(RuntimeError):
     """The binary file referenced by the Runtime is missing."""
 
@@ -294,6 +308,13 @@ class TaskExecutor:
                 identity_md=task.identity_md,
             )
 
+        # Phase B (MCP): register the live runtime catalog as a
+        # project-scoped MCP server so the agent can query it before
+        # spawning children. Reclaimed in ``finally`` alongside identity.
+        # A no-op for providers without a project-scoped MCP config file
+        # (see :mod:`agt.daemon.mcp_inject`).
+        inject_mcp_config(work_dir, task.provider, _mcp_url_for(self._config))
+
         start = time.monotonic()
         result: TaskResult | None = None
         try:
@@ -322,6 +343,9 @@ class TaskExecutor:
                 # empty" decision and must run last so it sees the file
                 # after the outputs block is already gone.
                 _reclaim_identity(work_dir, did=task.identity_did)
+            # Phase B (MCP): undo the catalog MCP config injection. A
+            # no-op for providers without a project-scoped MCP config file.
+            reclaim_mcp_config(work_dir, task.provider)
             # Phase 2: post-exit whitelist scan, AFTER identity files are
             # reclaimed so they can never be picked up. Runs on every
             # exit path (normal, timeout, crash) and for all three

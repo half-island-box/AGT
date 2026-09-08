@@ -26,6 +26,7 @@ from ..server.services.auth_service import TaskToken
 from .config import DaemonConfig
 from .daemon import Daemon
 from .local_server import LocalResourceServer
+from .mcp_proxy import ProxyMcpServer
 from .ws_claim import (
     ClaimStateMachine,
     claim_tasks_ws_first,
@@ -761,6 +762,7 @@ async def run_background(config: DaemonConfig) -> None:
     # When disabled, the daemon claims via plain HTTP (local-daemon path).
     claim_state: ClaimStateMachine | None = None
     ws_server: DaemonWsServer | None = None
+    proxy_mcp: ProxyMcpServer | None = None
     if config.listen_mode:
         # Reverse-dial mode. We always need a state machine for the
         # Uncertain safety window on the claim path.
@@ -792,6 +794,12 @@ async def run_background(config: DaemonConfig) -> None:
             "Reverse-dial mode: listening on 0.0.0.0:%d/daemon",
             config.ws_listen_port,
         )
+        # Phase B: start the proxy MCP server so remote agents can query the
+        # live catalog by forwarding ``catalog.list`` over the reverse-dial
+        # link. Local (non-listen) daemons never start this — their agents
+        # reach the Server's ``/mcp`` directly.
+        proxy_mcp = ProxyMcpServer(ws_server, port=config.mcp_port)
+        await proxy_mcp.start()
 
     async with ServerClient(
         base_url=config.server_url,
@@ -841,6 +849,11 @@ async def run_background(config: DaemonConfig) -> None:
                     await ws_server.stop()
                 except Exception as exc:
                     log.warning("WS server stop failed: %s", exc)
+            if proxy_mcp is not None:
+                try:
+                    await proxy_mcp.stop()
+                except Exception as exc:
+                    log.warning("Proxy MCP stop failed: %s", exc)
             await local_server.stop()
             _clear_pidfile()
 

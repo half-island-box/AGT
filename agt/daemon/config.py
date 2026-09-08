@@ -220,6 +220,12 @@ class DaemonConfig:
     listen_mode: bool = False
     ws_listen_port: int = 8422  # AGT_DAEMON_WS_PORT
 
+    # Phase B: reverse-dial proxy MCP server port (127.0.0.1 only). The
+    # remote daemon serves the catalog proxy here; local agents instead
+    # reach the Server's ``/mcp`` directly, so this is only bound in
+    # ``listen_mode``.
+    mcp_port: int = 8428  # AGT_DAEMON_MCP_PORT
+
     @property
     def server_url(self) -> str:
         """Convenience accessor for the Server base URL.
@@ -266,6 +272,7 @@ class DaemonConfig:
             local_token=os.environ.get("AGT_DAEMON_LOCAL_TOKEN") or secrets.token_urlsafe(32),
             listen_mode=listen_mode,
             ws_listen_port=ws_listen_port,
+            mcp_port=int(os.environ.get("AGT_DAEMON_MCP_PORT", str(default.mcp_port))),
         )
 
 

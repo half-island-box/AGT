@@ -17,10 +17,25 @@ dependencies = [
     "aiosqlite>=0.20.0",
     "alembic>=1.13.0",
     "websockets>=12.0",
+    # Phase B: Model Context Protocol server (catalog tool). Justified: the
+    # parent-agent catalog query is exposed over MCP so every agent CLI can
+    # attach without a bespoke integration per provider; the SDK owns the
+    # protocol/transport (streamable HTTP) correctness instead of hand-rolling it.
+    # Pinned <2: mcp 2.x renamed FastMCP→MCPServer and reshaped the transport
+    # API; our catalog code targets the stable v1 FastMCP surface.
+    "mcp>=1.0.0,<2",
 ]
 
 [project.scripts]
 agt = "agt.cli.main:cli"
+
+[dependency-groups]
+# Test-only dependencies (pytest + coverage). Kept in a group so ``uv sync``
+# installs them for development without shipping them in the wheel.
+dev = [
+    "pytest>=8.0",
+    "coverage>=7.0",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["agt"]
