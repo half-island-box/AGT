@@ -276,19 +276,27 @@ def _next_status(current: str, event: str) -> str:
     return transitions.get(current, {}).get(event, current)
 
 
-async def cancel_job(db: AsyncSession, job_id: str) -> JobModel:
+async def cancel_job(db: AsyncSession, job_id: str) -> tuple[JobModel, list[tuple[str, str]]]:
     """Cancel a Job, cascading to its whole descendant subtree (D15).
 
     Descendants are found by ``parent_job_id`` closure — NOT by
-    ``root_job_id`` (that would cancel sibling branches too). After the
-    cascade, if the cancelled Job has a parent, the parent's wakeup
-    check runs: server-side terminal transitions must not strand a
-    ``waiting_children`` parent (spec: server 侧终态路径触发唤醒检查).
+    ``root_job_id`` (that would cancel sibling branches too). Both
+    running AND pending Steps flip to ``cancelled`` (review fix #8: a
+    pending step that stays pending would still be claimed, run to
+    completion, and its report would bypass the cancelled guard —
+    hollowing out the cancel).
+
+    Returns ``(job, notify_list)`` where notify_list is
+    ``[(daemon_id, task_id)]`` for running steps that were cancelled —
+    the caller (route layer) sends best-effort ``tasks.cancel`` /
+    claim-channel delivery and wakes the long-poll event. After the
+    cascade, a cancelled node's parent gets its wakeup check.
     """
     job = await get_job(db, job_id)
     if job is None:
         raise ValueError({"type": "job_not_found", "message": job_id})
 
+    notify_list: list[tuple[str, str]] = []
     subtree_ids = await _descendant_closure(db, job_id)
     # Cascade = the job itself + its descendants (D15). ``_descendant_closure``
     # is exclusive of the root, so prepend it here.
@@ -297,7 +305,9 @@ async def cancel_job(db: AsyncSession, job_id: str) -> JobModel:
         if target is None:
             continue
         for step in target.steps:
-            if step.status == "running":
+            if step.status in ("running", "pending"):
+                if step.status == "running" and step.daemon_id:
+                    notify_list.append((step.daemon_id, step.task_id))
                 step.status = "cancelled"
                 step.updated_at = _now()
         await transition_job(db, jid, "cancel")
@@ -307,7 +317,7 @@ async def cancel_job(db: AsyncSession, job_id: str) -> JobModel:
     if job.parent_job_id is not None:
         await on_child_done(db, job.parent_job_id)
 
-    return job
+    return job, notify_list
 
 
 async def _descendant_closure(db: AsyncSession, job_id: str) -> list[str]:
@@ -421,15 +431,40 @@ async def spawn_children(
             else:
                 provider = binding.provider
 
+        # Phase 4 dynamic routing (D1/D5): joint (target, provider)
+        # decision. The routed provider overrides the single-value
+        # resolution so target/runtime always match; no candidate falls
+        # back to the parent daemon + Phase 3 single-value resolution.
+        from .selection_service import route_runtime
+
+        routed = await route_runtime(
+            db,
+            identity_did=identity,
+            provider_hint=parent_job.provider,
+        )
+        if routed is not None:
+            target_daemon = routed.daemon_id
+            provider = routed.provider
+        else:
+            target_daemon = daemon_id
+
+        # Cross-daemon children MUST NOT inherit the parent machine's
+        # absolute paths (review fix #3): the receiving daemon uses its
+        # own fallback; context rides the Message. Same-daemon placement
+        # keeps the shared-filesystem zero-copy advantage.
+        same_daemon = target_daemon == daemon_id
+        child_agent_cwd = parent_job.agent_cwd if same_daemon else None
+        child_work_dir = parent_job.work_dir if same_daemon else None
+
         message = _child_message(envelope)
         try:
             child = await create_job(
                 db,
                 provider=provider,
                 prompt=render_message(message),
-                target_daemon_id=daemon_id,
-                work_dir=parent_job.work_dir,
-                agent_cwd=parent_job.agent_cwd,
+                target_daemon_id=target_daemon,
+                work_dir=child_work_dir,
+                agent_cwd=child_agent_cwd,
                 identity_did=identity,
                 job_type="task",
                 message=message,

@@ -232,11 +232,18 @@ async def _claim_loop(
         idle_log.tick_with_link(ws_source is not None)
 
         try:
-            tasks = await _do_claim(client, ws_source, state, rids)
+            tasks, cancelled_ids = await _do_claim(client, ws_source, state, rids)
         except Exception as exc:  # network blip etc.
             log.warning("claim failed: %s", exc)
             await _sleep_or_wake(ws_server, CLAIM_INTERVAL)
             continue
+
+        # Phase 4: claim-channel cancel delivery (HTTP daemons primarily;
+        # the WS path returns the same list). Never blocks claiming.
+        try:
+            await _handle_cancelled_tasks(client, cancelled_ids, ws_server)
+        except Exception as exc:
+            log.warning("cancel delivery failed: %s", exc)
 
         for task_payload in tasks:
             task = asyncio.create_task(
@@ -297,8 +304,13 @@ async def _do_claim(
     ws_source: WsRpcLink | None,
     state: ClaimStateMachine | None,
     rids: list[str],
-) -> list[dict]:
-    """Run one claim attempt — WS via the orchestrator, or HTTP fallback."""
+) -> tuple[list[dict], list[str]]:
+    """One claim attempt — WS via the orchestrator, or HTTP fallback.
+
+    Returns ``(tasks, cancelled_task_ids)``: the second element is the
+    Phase 4 cancel channel for HTTP long-poll daemons (reverse-dial
+    daemons additionally receive ``tasks.cancel`` pushes).
+    """
     if ws_source is not None and state is not None:
         return await claim_tasks_ws_first(
             wsrpc=ws_source,
@@ -311,6 +323,46 @@ async def _do_claim(
         timeout_seconds=30,
         runtime_ids=rids,
     )
+
+
+async def _handle_cancelled_tasks(
+    client: ServerClient,
+    cancelled_ids: list[str],
+    ws_server: "DaemonWsServer | None",
+) -> None:
+    """Deliver claim-channel cancellations to local executions.
+
+    For each id: cancel the running asyncio task if present (the
+    executor then kills the subprocess and reports cancelled through
+    the normal chain). If the id is NOT running locally the step either
+    finished unreported or never started here — report a bare
+    ``cancelled`` anyway so the server's unreported-cancellation list
+    drains (the report sets exit_code).
+    """
+    if not cancelled_ids:
+        return
+    from . import running_tasks
+
+    ws_source = _resolve_ws_source(ws_server) if ws_server is not None else None
+    for tid in cancelled_ids:
+        was_running = running_tasks.cancel(tid)
+        if not was_running:
+            await _safe_report(
+                client,
+                task_id=tid,
+                exit_code=-1,
+                stdout="",
+                stderr="cancelled before local execution",
+                duration=0.0,
+                status="cancelled",
+                session_id=None,
+                resume_rejected=False,
+                ws_source=ws_source,
+                claim_state=None,
+                artifacts=[],
+                outcome=None,
+                outcome_payload=None,
+            )
 
 
 async def _execute_one(
@@ -327,72 +379,143 @@ async def _execute_one(
         if shutdown.is_set():
             return
         task_id = task_payload["task_id"]
-        # Phase 4 workdir supplement: the claim payload carries the
-        # submitter's ``agent_cwd`` — the directory the agent subprocess
-        # should run in on THIS machine (and where IDENTITY.md / AGENTS.md
-        # are injected). It's a daemon-side path passed through verbatim;
-        # the daemon enforces the allowlist and creates it if missing
-        # (see ``Daemon.run`` and the executor). ``None`` → legacy
-        # ``work_dir_root / provider / task_id`` fallback.
-        raw_agent_cwd = task_payload.get("agent_cwd")
-        agent_cwd: Path | None = None
-        agt_meta_dir: Path | None = None
-        if raw_agent_cwd:
-            agent_cwd = Path(raw_agent_cwd)
-        # Resolve the report link: use the same WS source the claim
-        # used (re-resolved at execute time in case the link rotated
-        # between claim and report).
-        ws_source = (
-            _resolve_ws_source(ws_server) if ws_server is not None else None
-        )
+        # Phase 4: index this execution for cancel delivery.
+        from . import running_tasks
 
-        # Phase 2: structured input rendering. Legacy prompt-only tasks
-        # (``message`` absent) use the wire prompt verbatim — zero change.
-        # A structured message is rendered here, resolving FileParts to
-        # readable paths; an unresolvable reference fails the Step
-        # loudly (reported as failed, never silently degraded).
-        effective_prompt = task_payload["prompt"]
-        raw_message = task_payload.get("message")
-        if raw_message:
-            from ..task.message_render import render_task_message
+        running_tasks.register(task_id)
+        try:
+            # Phase 4 workdir supplement: the claim payload carries the
+            # submitter's ``agent_cwd`` — the directory the agent subprocess
+            # should run in on THIS machine (and where IDENTITY.md / AGENTS.md
+            # are injected). It's a daemon-side path passed through verbatim;
+            # the daemon enforces the allowlist and creates it if missing
+            # (see ``Daemon.run`` and the executor). ``None`` → legacy
+            # ``work_dir_root / provider / task_id`` fallback.
+            raw_agent_cwd = task_payload.get("agent_cwd")
+            agent_cwd: Path | None = None
+            agt_meta_dir: Path | None = None
+            if raw_agent_cwd:
+                agent_cwd = Path(raw_agent_cwd)
+            # Resolve the report link: use the same WS source the claim
+            # used (re-resolved at execute time in case the link rotated
+            # between claim and report).
+            ws_source = (
+                _resolve_ws_source(ws_server) if ws_server is not None else None
+            )
 
-            async def _artifact_resolver(artifact_id: str):
+            # Phase 2: structured input rendering. Legacy prompt-only tasks
+            # (``message`` absent) use the wire prompt verbatim — zero change.
+            # A structured message is rendered here, resolving FileParts to
+            # readable paths; an unresolvable reference fails the Step
+            # loudly (reported as failed, never silently degraded).
+            effective_prompt = task_payload["prompt"]
+            raw_message = task_payload.get("message")
+            if raw_message:
+                from ..task.message_render import render_task_message
+
+                async def _artifact_resolver(artifact_id: str):
+                    cur_ws = (
+                        _resolve_ws_source(ws_server) if ws_server is not None else None
+                    )
+                    if cur_ws is not None and cur_ws.supports_rpc_v1:
+                        try:
+                            return await cur_ws.call(
+                                "artifacts.get",
+                                {"artifact_id": artifact_id},
+                                timeout_ms=8000,
+                            )
+                        except Exception as exc:
+                            log.warning("artifacts.get over WS failed: %s", exc)
+                            return None
+                    try:
+                        content = await client.get_artifact_content(artifact_id)
+                        import base64
+
+                        return {"content_b64": base64.b64encode(content).decode()}
+                    except Exception as exc:
+                        log.warning("artifact content fetch failed: %s", exc)
+                        return None
+
+                try:
+                    effective_prompt = await render_task_message(
+                        raw_message,
+                        agent_cwd=agent_cwd or Path.cwd(),
+                        resolver=_artifact_resolver,
+                    )
+                except Exception as exc:
+                    log.exception("task %s input rendering failed", task_id)
+                    await _safe_report(
+                        client,
+                        task_id=task_id,
+                        exit_code=-1,
+                        stdout="",
+                        stderr=f"input rendering failed: {exc}",
+                        duration=0.0,
+                        status="failed",
+                        session_id=None,
+                        resume_rejected=False,
+                        ws_source=ws_source,
+                        claim_state=claim_state,
+                        artifacts=[],
+                    )
+                    return
+
+            # Phase 5 remote streaming: report incremental stdout prefixes to
+            # the Server while the agent runs. Re-resolves the WS source on
+            # every sample (the link may have rotated mid-execution); failures
+            # are swallowed inside ``report_task_progress_ws_first`` and the
+            # executor sampler, so progress can never break the terminal
+            # report path.
+            async def _progress_cb(stdout_prefix: str) -> None:
+                # Phase 3: length-preserving mask — spawn marker JSON must
+                # never leak through live SSE frames; removal would shrink
+                # the cumulative prefix and trip the server's shrink guard.
+                from ..task.spawn_intent import mask_spawn_lines
+
+                stdout_prefix = mask_spawn_lines(stdout_prefix)
                 cur_ws = (
                     _resolve_ws_source(ws_server) if ws_server is not None else None
                 )
-                if cur_ws is not None and cur_ws.supports_rpc_v1:
+                if claim_state is not None:
+                    await report_task_progress_ws_first(
+                        wsrpc=cur_ws,
+                        http_client=client,
+                        state=claim_state,
+                        task_id=task_id,
+                        stdout_prefix=stdout_prefix,
+                    )
+                else:
                     try:
-                        return await cur_ws.call(
-                            "artifacts.get",
-                            {"artifact_id": artifact_id},
-                            timeout_ms=8000,
+                        await client.report_progress(
+                            task_id=task_id, stdout_prefix=stdout_prefix,
                         )
-                    except Exception as exc:
-                        log.warning("artifacts.get over WS failed: %s", exc)
-                        return None
-                try:
-                    content = await client.get_artifact_content(artifact_id)
-                    import base64
-
-                    return {"content_b64": base64.b64encode(content).decode()}
-                except Exception as exc:
-                    log.warning("artifact content fetch failed: %s", exc)
-                    return None
+                    except Exception:
+                        pass
 
             try:
-                effective_prompt = await render_task_message(
-                    raw_message,
-                    agent_cwd=agent_cwd or Path.cwd(),
-                    resolver=_artifact_resolver,
+                result = await daemon.run(
+                    provider=task_payload["provider"],
+                    prompt=effective_prompt,
+                    task_id=task_id,
+                    resume_session_id=task_payload.get("resume_session_id"),
+                    agent_cwd=agent_cwd,
+                    agt_meta_dir=agt_meta_dir,
+                    identity_did=task_payload.get("identity_did"),
+                    # Option D: server-rendered AGENTS.md body, sent in the
+                    # claim payload. The daemon writes it directly to
+                    # ``IDENTITY.md`` without fetching from the Server.
+                    identity_md=task_payload.get("identity_md"),
+                    outputs_subdir=task_payload.get("outputs_subdir"),
+                    progress_cb=_progress_cb,
                 )
             except Exception as exc:
-                log.exception("task %s input rendering failed", task_id)
+                log.exception("task %s execution failed", task_id)
                 await _safe_report(
                     client,
                     task_id=task_id,
                     exit_code=-1,
                     stdout="",
-                    stderr=f"input rendering failed: {exc}",
+                    stderr=str(exc),
                     duration=0.0,
                     status="failed",
                     session_id=None,
@@ -400,127 +523,63 @@ async def _execute_one(
                     ws_source=ws_source,
                     claim_state=claim_state,
                     artifacts=[],
+                    outcome=None,
+                    outcome_payload=None,
                 )
                 return
 
-        # Phase 5 remote streaming: report incremental stdout prefixes to
-        # the Server while the agent runs. Re-resolves the WS source on
-        # every sample (the link may have rotated mid-execution); failures
-        # are swallowed inside ``report_task_progress_ws_first`` and the
-        # executor sampler, so progress can never break the terminal
-        # report path.
-        async def _progress_cb(stdout_prefix: str) -> None:
-            # Phase 3: length-preserving mask — spawn marker JSON must
-            # never leak through live SSE frames; removal would shrink
-            # the cumulative prefix and trip the server's shrink guard.
-            from ..task.spawn_intent import mask_spawn_lines
+            from ..task.artifact_scan import scanned_to_report_item
 
-            stdout_prefix = mask_spawn_lines(stdout_prefix)
-            cur_ws = (
-                _resolve_ws_source(ws_server) if ws_server is not None else None
-            )
-            if claim_state is not None:
-                await report_task_progress_ws_first(
-                    wsrpc=cur_ws,
-                    http_client=client,
-                    state=claim_state,
-                    task_id=task_id,
-                    stdout_prefix=stdout_prefix,
-                )
-            else:
-                try:
-                    await client.report_progress(
-                        task_id=task_id, stdout_prefix=stdout_prefix,
-                    )
-                except Exception:
-                    pass
+            artifacts = [
+                scanned_to_report_item(a) for a in getattr(result, "artifacts", [])
+            ]
 
-        try:
-            result = await daemon.run(
-                provider=task_payload["provider"],
-                prompt=effective_prompt,
-                task_id=task_id,
-                resume_session_id=task_payload.get("resume_session_id"),
-                agent_cwd=agent_cwd,
-                agt_meta_dir=agt_meta_dir,
-                identity_did=task_payload.get("identity_did"),
-                # Option D: server-rendered AGENTS.md body, sent in the
-                # claim payload. The daemon writes it directly to
-                # ``IDENTITY.md`` without fetching from the Server.
-                identity_md=task_payload.get("identity_md"),
-                outputs_subdir=task_payload.get("outputs_subdir"),
-                progress_cb=_progress_cb,
-            )
-        except Exception as exc:
-            log.exception("task %s execution failed", task_id)
+            # Phase 2 transport (HTTP-fallback topology): with no reverse-dial
+            # WS link there is no server→daemon lazy-fetch channel, so large
+            # (non-inline) content must reach the server eagerly before the
+            # report. Registration is idempotent on (step, name, sha256), so
+            # the report's metadata entry will simply re-attach to the row
+            # created here. A failed upload degrades to metadata-only — the
+            # report itself must always go through.
+            if artifacts and ws_source is None:
+                import base64
+
+                for item, scanned in zip(artifacts, result.artifacts):
+                    if item.get("inline_b64") is None and scanned.local_path:
+                        try:
+                            content = Path(scanned.local_path).read_bytes()
+                            await client.upload_artifact(
+                                task_id=task_id,
+                                artifact=item,
+                                content_b64=base64.b64encode(content).decode(),
+                            )
+                        except Exception as exc:
+                            log.warning(
+                                "eager artifact upload failed for %s/%s: %s",
+                                task_id,
+                                item.get("name"),
+                                exc,
+                            )
+
             await _safe_report(
                 client,
                 task_id=task_id,
-                exit_code=-1,
-                stdout="",
-                stderr=str(exc),
-                duration=0.0,
-                status="failed",
-                session_id=None,
-                resume_rejected=False,
+                exit_code=result.exit_code,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                duration=result.duration,
+                status=result.status,
+                session_id=result.session_id,
+                resume_rejected=result.resume_rejected,
                 ws_source=ws_source,
                 claim_state=claim_state,
-                artifacts=[],
-                outcome=None,
-                outcome_payload=None,
+                artifacts=artifacts,
+                outcome=getattr(result, "outcome", None),
+                outcome_payload=getattr(result, "outcome_payload", None),
             )
-            return
 
-        from ..task.artifact_scan import scanned_to_report_item
-
-        artifacts = [
-            scanned_to_report_item(a) for a in getattr(result, "artifacts", [])
-        ]
-
-        # Phase 2 transport (HTTP-fallback topology): with no reverse-dial
-        # WS link there is no server→daemon lazy-fetch channel, so large
-        # (non-inline) content must reach the server eagerly before the
-        # report. Registration is idempotent on (step, name, sha256), so
-        # the report's metadata entry will simply re-attach to the row
-        # created here. A failed upload degrades to metadata-only — the
-        # report itself must always go through.
-        if artifacts and ws_source is None:
-            import base64
-
-            for item, scanned in zip(artifacts, result.artifacts):
-                if item.get("inline_b64") is None and scanned.local_path:
-                    try:
-                        content = Path(scanned.local_path).read_bytes()
-                        await client.upload_artifact(
-                            task_id=task_id,
-                            artifact=item,
-                            content_b64=base64.b64encode(content).decode(),
-                        )
-                    except Exception as exc:
-                        log.warning(
-                            "eager artifact upload failed for %s/%s: %s",
-                            task_id,
-                            item.get("name"),
-                            exc,
-                        )
-
-        await _safe_report(
-            client,
-            task_id=task_id,
-            exit_code=result.exit_code,
-            stdout=result.stdout,
-            stderr=result.stderr,
-            duration=result.duration,
-            status=result.status,
-            session_id=result.session_id,
-            resume_rejected=result.resume_rejected,
-            ws_source=ws_source,
-            claim_state=claim_state,
-            artifacts=artifacts,
-            outcome=getattr(result, "outcome", None),
-            outcome_payload=getattr(result, "outcome_payload", None),
-        )
-
+        finally:
+            running_tasks.unregister(task_id)
 
 async def _safe_report(
     client: ServerClient,

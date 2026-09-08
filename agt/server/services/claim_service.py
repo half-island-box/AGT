@@ -112,6 +112,26 @@ async def claim_tasks_for_daemon(
         await db.rollback()
 
 
+async def cancelled_tasks_for_daemon(db: AsyncSession, daemon_id: str) -> list[str]:
+    """Unreported cancellations for THIS daemon (Phase 4 claim channel).
+
+    Steps the daemon owns that were cancelled server-side and have not
+    been reported since (``exit_code IS NULL``). The daemon kills those
+    subprocesses and reports cancelled — the report sets ``exit_code``,
+    which drops them from this list (self-draining, no ack state).
+    """
+    rows = (
+        await db.execute(
+            select(TaskModel.task_id).where(
+                TaskModel.daemon_id == daemon_id,
+                TaskModel.status == "cancelled",
+                TaskModel.exit_code.is_(None),
+            )
+        )
+    ).scalars().all()
+    return list(rows)
+
+
 def _build_select(
     *,
     daemon_id: str,
@@ -124,6 +144,8 @@ def _build_select(
     provider-filter / LIMIT logic is easy to read and the outer loop
     stays focused on polling.
     """
+    from sqlalchemy import exists
+
     stmt = select(TaskModel).where(
         TaskModel.status == "pending",
         # Step 3.6: daemon targeting. Free tasks (target is NULL) are
@@ -132,6 +154,17 @@ def _build_select(
         or_(
             TaskModel.target_daemon_id.is_(None),
             TaskModel.target_daemon_id == daemon_id,
+        ),
+        # Phase 4 (review fix #8, double insurance): never hand out a
+        # Step whose parent Job is already terminal — cancel_job flips
+        # pending steps to cancelled, this guard catches any other race
+        # that leaves an orphan pending step under a dead job.
+        or_(
+            TaskModel.job_id.is_(None),
+            ~exists().where(
+                JobModel.job_id == TaskModel.job_id,
+                JobModel.status.in_(("done", "failed", "cancelled")),
+            ),
         ),
     )
     # Step 3.4: provider-aware filter. Empty ``runtime_ids`` is handled

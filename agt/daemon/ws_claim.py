@@ -85,17 +85,21 @@ async def claim_tasks_ws_first(
     state: ClaimStateMachine,
     runtime_ids: list[str],
     max_tasks: int,
-) -> list[dict]:
+) -> tuple[list[dict], list[str]]:
     """Try WS claim first; fall back to HTTP only when safe.
+
+    Returns ``(tasks, cancelled_task_ids)`` — the second element is the
+    Phase 4 cancel channel (unreported cancellations for this daemon;
+    the claim response carries it on both WS and HTTP paths).
 
     Branches:
       - ``wsrpc is None`` or ``not wsrpc.supports_rpc_v1`` or ``state.blocked``
         → skip WS, go straight to HTTP.
-      - WS returns tasks → return them, don't call HTTP.
+      - WS returns → return its (tasks, cancelled_task_ids).
       - WS raises ``WSRPCUnavailable`` → call HTTP, return its result.
       - WS raises ``WSRPCUncertain`` → open the safety window
-        (``state.mark_uncertain(sent_at)``) and return ``[]`` for this
-        invocation. HTTP is NOT consulted during the window.
+        (``state.mark_uncertain(sent_at)``) and return ``([], [])`` for
+        this invocation. HTTP is NOT consulted during the window.
       - WS raises ``RPCRejected`` → re-raise; HTTP is NOT a fallback for
         an explicit server rejection.
     """
@@ -108,14 +112,17 @@ async def claim_tasks_ws_first(
             {"runtime_ids": list(runtime_ids), "max_tasks": max_tasks},
             timeout_ms=5000,
         )
-        return list(result.get("tasks", []))
+        return (
+            list(result.get("tasks", [])),
+            list(result.get("cancelled_task_ids", [])),
+        )
     except WSRPCUnavailable:
         # Frame never left the client — HTTP fallback is safe.
         return await http_client.claim_tasks(timeout_seconds=30)
     except WSRPCUncertain as exc:
         # Frame MAY have committed; open the window, skip HTTP this tick.
         state.mark_uncertain(exc.frame_sent_at)
-        return []
+        return [], []
     # RPCRejected propagates unchanged — server's verdict is final.
 
 

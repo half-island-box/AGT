@@ -124,11 +124,18 @@ async def job_input(
 @router.post("/{job_id}/cancel")
 async def job_cancel(
     job_id: str,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Cancel a Job and cascade to running Steps."""
+    """Cancel a Job, cascade the subtree, and propagate cancellation.
+
+    Phase 4 dual-channel delivery: reverse-dial daemons get a
+    best-effort ``tasks.cancel`` RPC; HTTP long-poll daemons get the
+    cancellation delivered via their next claim response (the claim
+    event is woken so that happens promptly, not after the 30s poll).
+    """
     try:
-        await cancel_job(db, job_id)
+        _, notify_list = await cancel_job(db, job_id)
     except ValueError as exc:
         payload = exc.args[0] if exc.args and isinstance(exc.args[0], dict) else {}
         if payload.get("type") == "job_not_found":
@@ -137,6 +144,22 @@ async def job_cancel(
             ) from None
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(payload)) from None
     await db.commit()
+
+    # Best-effort propagation (never blocks the cancel itself):
+    # 1) reverse-dial daemons — tasks.cancel over the WS link;
+    # 2) local long-poll daemons — wake the claim event so the next
+    #    claim response carries cancelled_task_ids immediately.
+    daemon_links: dict = getattr(request.app.state, "daemon_links", {})
+    for notify_daemon, task_id in notify_list:
+        link = daemon_links.get(notify_daemon)
+        if link is None:
+            continue
+        try:
+            await link.notify_cancel(task_id)
+        except Exception:
+            pass  # log-and-continue: the claim channel still delivers
+    notify_task_available()
+    return {"cancelled": True}
     return {"cancelled": True}
 
 

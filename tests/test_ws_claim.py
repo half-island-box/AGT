@@ -96,9 +96,9 @@ class _StubHTTP:
         self._result = result or []
         self.claim_calls = 0
 
-    async def claim_tasks(self, timeout_seconds: int = 30) -> list[dict]:  # noqa: ARG002
+    async def claim_tasks(self, timeout_seconds: int = 30) -> tuple[list[dict], list[str]]:  # noqa: ARG002
         self.claim_calls += 1
-        return list(self._result)
+        return list(self._result), []
 
 
 def test_orchestrator_ws_success_skips_http() -> None:
@@ -112,7 +112,7 @@ def test_orchestrator_ws_success_skips_http() -> None:
             wsrpc=ws, http_client=http, state=state,
             runtime_ids=[], max_tasks=1,
         )
-        assert result == [{"task_id": "t1"}]
+        assert result == ([{"task_id": "t1"}], [])
         assert ws.claim_calls == 1
         assert http.claim_calls == 0
 
@@ -130,7 +130,7 @@ def test_orchestrator_ws_unavailable_falls_back_to_http() -> None:
             wsrpc=ws, http_client=http, state=state,
             runtime_ids=[], max_tasks=1,
         )
-        assert result == [{"task_id": "h1"}]
+        assert result == ([{"task_id": "h1"}], [])
         assert ws.claim_calls == 1
         assert http.claim_calls == 1
         assert state.blocked is False  # Unavailable must NOT open the window
@@ -155,7 +155,7 @@ def test_orchestrator_ws_uncertain_marks_window_returns_empty(
             wsrpc=ws, http_client=http, state=state,
             runtime_ids=[], max_tasks=1,
         )
-        assert result == []
+        assert result == ([], [])
         assert ws.claim_calls == 1
         assert http.claim_calls == 0  # the critical anti-MUL-4257 invariant
         assert state.blocked is True
@@ -200,7 +200,7 @@ def test_orchestrator_skips_ws_when_state_blocked(
             wsrpc=ws, http_client=http, state=state,
             runtime_ids=[], max_tasks=1,
         )
-        assert result == [{"task_id": "h1"}]
+        assert result == ([{"task_id": "h1"}], [])
         assert ws.claim_calls == 0
         assert http.claim_calls == 1
 
@@ -218,7 +218,7 @@ def test_orchestrator_skips_ws_when_not_connected() -> None:
             wsrpc=ws, http_client=http, state=state,
             runtime_ids=[], max_tasks=1,
         )
-        assert result == [{"task_id": "h1"}]
+        assert result == ([{"task_id": "h1"}], [])
         assert ws.claim_calls == 0
         assert http.claim_calls == 1
 
@@ -235,7 +235,7 @@ def test_orchestrator_ws_is_none() -> None:
             wsrpc=None, http_client=http, state=state,
             runtime_ids=[], max_tasks=1,
         )
-        assert result == [{"task_id": "h1"}]
+        assert result == ([{"task_id": "h1"}], [])
         assert http.claim_calls == 1
 
     asyncio.run(_run())

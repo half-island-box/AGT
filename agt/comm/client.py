@@ -218,7 +218,7 @@ class ServerClient:
         self,
         timeout_seconds: int = 30,
         runtime_ids: list[str] | None = None,
-    ) -> list[dict]:
+    ) -> tuple[list[dict], list[str]]:
         """Claim tasks for this daemon. ``runtime_ids`` filters by provider
         (Step 3.4); ``None`` preserves the old "no filter" behavior."""
         payload: dict[str, Any] = {
@@ -229,7 +229,10 @@ class ServerClient:
         if runtime_ids is not None:
             payload["runtime_ids"] = list(runtime_ids)
         resp = await self._post("/api/tasks/claim", payload)
-        return resp.get("tasks", [])
+        # Phase 4: the claim response doubles as the cancel channel for
+        # HTTP daemons — unreported cancellations for THIS daemon ride
+        # along (see ClaimResponse.cancelled_task_ids).
+        return resp.get("tasks", []), resp.get("cancelled_task_ids", [])
 
     async def report_task(
         self,

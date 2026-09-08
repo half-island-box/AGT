@@ -166,6 +166,8 @@ class DaemonWsServer:
         if method == "tasks.available":
             self.wake_claim_loop()
             return {"ok": True}
+        if method == "tasks.cancel":
+            return self._handle_tasks_cancel(body)
         if method == "session.history":
             return await self._handle_session_history(body)
         if method == "artifacts.fetch":
@@ -209,6 +211,27 @@ class DaemonWsServer:
                     "message": f"sha256 mismatch: {digest}",
                 })
         return {"content_b64": base64.b64encode(content).decode()}
+
+    def _handle_tasks_cancel(self, body: dict) -> dict:
+        """Server-initiated cancel (Phase 4, reverse-dial channel).
+
+        Looks the task up in the running-task registry and cancels the
+        asyncio task; the executor's CancelledError branch kills the
+        agent subprocess and reports ``status="cancelled"`` through the
+        normal chain. Unknown / already-finished ids are idempotent
+        no-ops — the claim-channel delivery and the server's
+        late-report guard cover whatever this path misses.
+        """
+        from . import running_tasks
+
+        task_id = body.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            raise ValueError({
+                "type": "validation_error",
+                "message": "tasks.cancel requires task_id",
+            })
+        cancelled = running_tasks.cancel(task_id)
+        return {"ok": True, "was_running": cancelled}
 
     async def _handle_session_history(self, body: dict) -> dict:
         """Read a session transcript from this daemon's local provider store.

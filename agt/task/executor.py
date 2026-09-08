@@ -346,6 +346,25 @@ class TaskExecutor:
 
     # ── Mode: interactive ───────────────────────────────────────
 
+
+    def _cancelled_result(self, task: Task, start: float, stdout: str = "", stderr: str = "") -> TaskResult:
+        """Terminal result for a server-cancelled Step (Phase 4).
+
+        Built after the subprocess was killed by the cancellation path;
+        ``status="cancelled"`` flows through the normal report chain.
+        """
+        return TaskResult(
+            task_id=task.task_id,
+            provider=task.provider,
+            exit_code=-1,
+            stdout=stdout,
+            stderr=stderr,
+            duration=time.monotonic() - start,
+            status="cancelled",
+            session_id=None,
+            resume_rejected=False,
+        )
+
     async def _execute_interactive(
         self,
         task: Task,
@@ -388,6 +407,14 @@ class TaskExecutor:
                 session_id=None,
                 resume_rejected=False,
             )
+        except asyncio.CancelledError:
+            # Phase 4: server-initiated cancel (tasks.cancel / claim
+            # channel) cancelled the outer task — kill the agent and
+            # surface a cancelled result through the normal report path.
+            process.kill()
+            with contextlib.suppress(ProcessLookupError):
+                await process.wait()
+            return self._cancelled_result(task, start)
         duration = time.monotonic() - start
         return TaskResult(
             task_id=task.task_id,
@@ -483,6 +510,14 @@ class TaskExecutor:
                 duration=duration,
                 status="timeout",
             )
+        except asyncio.CancelledError:
+            # Phase 4: server-initiated cancel — kill the agent, surface
+            # cancelled through the normal report path. The finally
+            # block below still stops the progress sampler.
+            process.kill()
+            with contextlib.suppress(ProcessLookupError):
+                await process.wait()
+            return self._cancelled_result(task, start)
         finally:
             if sampler_task is not None:
                 sampler_task.cancel()
@@ -737,6 +772,13 @@ class TaskExecutor:
                 duration=duration,
                 status="timeout",
             )
+        except asyncio.CancelledError:
+            # Phase 4: server-initiated cancel — kill the agent, surface
+            # cancelled through the normal report path.
+            process.kill()
+            with contextlib.suppress(ProcessLookupError):
+                await process.wait()
+            return self._cancelled_result(task, start)
 
         await process.wait()
         duration = time.monotonic() - start

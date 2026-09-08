@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_serializer
 
 from ..a2a import Message
 
@@ -86,6 +86,11 @@ class ClaimRequest(BaseModel):
 
 class ClaimResponse(BaseModel):
     tasks: list["TaskPayload"]
+    # Phase 4: unreported cancellations for THIS daemon (HTTP long-poll
+    # cancel channel). Steps with status=cancelled and exit_code IS NULL
+    # — the daemon kills those subprocesses and reports cancelled, which
+    # sets exit_code and drops them from future lists (self-draining).
+    cancelled_task_ids: list[str] = []
 
 
 class TaskPayload(BaseModel):
@@ -152,6 +157,20 @@ class ReportResponse(BaseModel):
     recorded: bool
     # Phase 2: ids assigned to the registered artifacts, in report order.
     artifacts: list[str] = []
+    # Phase 4: machine-readable no-op reason (e.g. "task_cancelled" when
+    # a late report hits an already-cancelled Step). Optional — old
+    # clients ignore it; new clients get the same value on HTTP and WS.
+    reason: str | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_reason(self, handler):
+        """Drop ``reason`` when absent so a normal report stays byte-identical
+        to the WS path's raw dict (``{"recorded": True, "artifacts": []}``)
+        rather than leaking a spurious ``"reason": null``."""
+        data = handler(self)
+        if data.get("reason") is None:
+            data.pop("reason", None)
+        return data
 
 
 # ── Artifacts (Phase 2) ─────────────────────────────────────────────

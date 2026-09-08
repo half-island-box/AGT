@@ -83,6 +83,18 @@ async def record_task_result_for_daemon(
     if task.daemon_id != daemon_id:
         raise ValueError({"type": "task_not_owned", "message": task_id})
 
+    # Phase 4 (review fix #4/#8): protect a cancelled Step from late
+    # reports. A non-cancelled report arriving after the server already
+    # cancelled must not resurrect the step — gentle no-op (not 409,
+    # which would trigger the daemon's WS→HTTP report retry storm).
+    # Cancelled reports stay idempotently accepted.
+    if task.status == "cancelled" and status != "cancelled":
+        return {
+            "recorded": False,
+            "reason": "task_cancelled",
+            "artifacts": [],
+        }
+
     task.exit_code = exit_code
     task.stdout = stdout
     task.stderr = stderr

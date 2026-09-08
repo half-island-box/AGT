@@ -26,10 +26,15 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agt.server.models import IdentityBindingModel, IdentityModel, RuntimeModel
+from agt.server.models import TaskModel
 
 from .runtime_service import is_stale
 
 log = logging.getLogger(__name__)
+
+# Phase 4 dynamic routing: how many recent tasks with the same identity
+# count toward daemon affinity.
+AFFINITY_WINDOW = 20
 
 
 @dataclass
@@ -39,6 +44,20 @@ class SelectionResult:
     daemon_id: str
     provider: str
     identity_did: str
+
+
+@dataclass
+class RoutingDecision:
+    """Phase 4 dynamic-routing result: daemon AND provider jointly.
+
+    Returning both is load-bearing (review fix #2): ``spawn_children``
+    uses the routed provider to override its local single-value
+    resolution, so the step's target daemon always has a runtime for
+    the step's provider — a mismatch would leave it queued forever.
+    """
+
+    daemon_id: str
+    provider: str
 
 
 class SelectionError(ValueError):
@@ -196,4 +215,131 @@ async def select_runtime(
     )
 
 
-__all__ = ["SelectionResult", "SelectionError", "select_runtime"]
+# ── Phase 4: dynamic routing (spawn/sessionless path) ───────────────
+
+
+async def route_runtime(
+    db: AsyncSession,
+    *,
+    identity_did: str | None,
+    provider_hint: str | None,
+) -> "RoutingDecision | None":
+    """Jointly route ``(daemon_id, provider)`` by capability + scoring.
+
+    Unlike :func:`select_runtime` (submit/sessionful path — binding-
+    gated, resolve-once), this function treats bindings as *hints*:
+    an identity with zero bindings still routes to any live daemon
+    whose runtime covers a candidate provider.
+
+    Candidates: ``(provider, daemon)`` pairs where provider ∈ the
+    candidate provider set (identity's bindings dedup, or
+    ``{provider_hint}`` when identity-less) and the daemon has a
+    runtime row for it that is not stale. "Online" is uniformly
+    ``!is_stale(last_seen)`` — ``RuntimeModel.status`` is display-only.
+
+    Scoring per daemon: affinity (recent N=20 tasks with the same
+    identity on that daemon) − load (running-Step count, i.e.
+    claimed-but-unreported). Tiebreak: binding priority, then stable
+    daemon id. Returns None when no candidate exists (caller decides
+    the fallback — spawn_children falls back to the parent daemon).
+    """
+    # 1. Candidate provider set: identity bindings' providers (dedup), or
+    #    the provider hint when the identity has no bindings (or is absent).
+    if identity_did:
+        bind_rows = (
+            await db.execute(
+                select(IdentityBindingModel).where(
+                    IdentityBindingModel.identity_did == identity_did
+                )
+            )
+        ).scalars().all()
+        candidate_providers = {b.provider for b in bind_rows}
+        if not candidate_providers:
+            candidate_providers = {provider_hint} if provider_hint else set()
+    else:
+        candidate_providers = {provider_hint} if provider_hint else set()
+    if not candidate_providers:
+        return None
+
+    # 2. Live (provider, daemon) pairs from RuntimeModel.
+    runtime_rows = (
+        await db.execute(
+            select(RuntimeModel).where(RuntimeModel.provider.in_(candidate_providers))
+        )
+    ).scalars().all()
+    offered: dict[str, set[str]] = {}
+    for row in runtime_rows:
+        if not is_stale(row.last_seen):
+            offered.setdefault(row.daemon_id, set()).add(row.provider)
+    if not offered:
+        return None
+
+    daemon_ids = list(offered.keys())
+
+    # 3. Affinity: recent tasks with this identity, counted per daemon.
+    affinity: dict[str, int] = {}
+    if identity_did:
+        recent = (
+            await db.execute(
+                select(TaskModel.daemon_id)
+                .where(TaskModel.identity_did == identity_did)
+                .order_by(TaskModel.updated_at.desc())
+                .limit(AFFINITY_WINDOW)
+            )
+        ).scalars().all()
+        for did in recent:
+            if did:
+                affinity[did] = affinity.get(did, 0) + 1
+
+    # 4. Load: running (claimed-but-unreported) steps per daemon.
+    #    Missing rows count as 0 — a signal gap must never fail routing.
+    load: dict[str, int] = {}
+    running_rows = (
+        await db.execute(
+            select(TaskModel.daemon_id)
+            .where(TaskModel.status == "running")
+            .where(TaskModel.daemon_id.in_(daemon_ids))
+        )
+    ).scalars().all()
+    for did in running_rows:
+        load[did] = load.get(did, 0) + 1
+
+    # 5. Binding priority as tiebreak hint (identity-scoped, max per daemon).
+    binding_priority: dict[str, int] = {}
+    if identity_did:
+        for b in bind_rows:
+            cur = binding_priority.get(b.daemon_id)
+            if cur is None or b.priority > cur:
+                binding_priority[b.daemon_id] = b.priority
+
+    # Descending score / priority, ascending daemon id for stability:
+    # min over the negated keys == max with stable final tiebreak.
+    best_daemon = min(
+        daemon_ids,
+        key=lambda d: (
+            -(affinity.get(d, 0) - load.get(d, 0)),
+            -binding_priority.get(d, -1),
+            d,
+        ),
+    )
+
+    # 6. Provider within the chosen daemon: binding priority first among
+    #    the providers it actually offers, else stable sorted pick.
+    available_providers = offered[best_daemon]
+    chosen_provider = sorted(available_providers)[0]
+    if identity_did:
+        for b in sorted(bind_rows, key=lambda b: (-b.priority, b.id)):
+            if b.provider in available_providers:
+                chosen_provider = b.provider
+                break
+
+    return RoutingDecision(daemon_id=best_daemon, provider=chosen_provider)
+
+
+__all__ = [
+    "SelectionResult",
+    "SelectionError",
+    "select_runtime",
+    "RoutingDecision",
+    "route_runtime",
+]

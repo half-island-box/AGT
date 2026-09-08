@@ -188,6 +188,15 @@ def ensure_schema(conn: Connection) -> None:
         )
         log.info("Migrated tasks table: added outcome_payload column")
 
+    # Phase 4: index for the routing load aggregate (GROUP BY daemon_id).
+    # New databases get it from create_all; existing ones get it here.
+    # Guarded on the column existing so a minimal legacy schema (e.g. the
+    # migration test fixtures) that predates ``daemon_id`` doesn't break.
+    if _table_exists(conn, "tasks") and "daemon_id" in _column_names(conn, "tasks"):
+        conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_tasks_daemon_id ON tasks (daemon_id)"
+        )
+
 
 def migrate_identities_and_sessions(conn: Connection, root_dir: Path | None = None) -> None:
     """Apply Phase 4 identity + Job/Step + session schema migrations. Idempotent.

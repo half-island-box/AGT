@@ -32,6 +32,7 @@ from ..schemas import (
 )
 from ..services.claim_service import (
     claim_tasks_for_daemon,
+    cancelled_tasks_for_daemon,
     notify_task_available,
 )
 from ..services.artifact_service import artifact_to_out, artifacts_for_steps
@@ -251,7 +252,10 @@ async def claim_task(
         timeout_seconds=payload.timeout_seconds,
         runtime_ids=payload.runtime_ids,
     )
-    return ClaimResponse(tasks=tasks)
+    # Phase 4: HTTP long-poll cancel channel — this daemon's unreported
+    # cancellations ride along on every claim response.
+    cancelled_ids = await cancelled_tasks_for_daemon(db, payload.daemon_id)
+    return ClaimResponse(tasks=tasks, cancelled_task_ids=cancelled_ids)
 
 
 @router.post("/{task_id}/report")

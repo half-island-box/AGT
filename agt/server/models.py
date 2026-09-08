@@ -124,7 +124,8 @@ class TaskModel(Base):
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, default="pending", index=True
     )
-    daemon_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Phase 4: indexed — the routing load aggregate GROUP BYs this column.
+    daemon_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     # Step 3.6: daemon-targeted routing. NULL = free task (any matching
     # daemon may claim); non-NULL = pinned to that daemon only.
     target_daemon_id: Mapped[str | None] = mapped_column(String(64), nullable=True)

@@ -100,6 +100,28 @@ class DaemonLink:
             )
             return False
 
+    async def notify_cancel(self, task_id: str) -> bool:
+        """Best-effort cancel push to this daemon (Phase 4).
+
+        Reverse-dial counterpart of the claim-channel delivery: the
+        daemon's ``tasks.cancel`` handler looks the task up in its
+        running-task registry and terminates the subprocess. Returns
+        True when the notification was acknowledged; False when the
+        link is down (the claim channel / late-report guard still
+        cover that daemon — cancellation is dual-channel by design).
+        """
+        link = self._link
+        if link is None or link.closed or not link.supports_rpc_v1:
+            return False
+        try:
+            await link.call("tasks.cancel", {"task_id": task_id}, timeout_ms=5000)
+            return True
+        except Exception:
+            log.debug(
+                "notify_cancel failed for %s", self.daemon_id, exc_info=True,
+            )
+            return False
+
     async def get_session_history(self, session_id: str, provider: str) -> dict:
         """Fetch a session's transcript from the remote daemon's local reader.
 
@@ -366,7 +388,15 @@ class DaemonLink:
                 timeout_seconds=0,  # WS claim is non-blocking; long-poll is the caller's job
                 runtime_ids=runtime_ids,
             )
-        return {"tasks": [t.model_dump() for t in tasks]}
+            # Phase 4: cancel delivery rides the claim response on the
+            # WS path too — same shape as the HTTP ClaimResponse.
+            from .services.claim_service import cancelled_tasks_for_daemon
+
+            cancelled_ids = await cancelled_tasks_for_daemon(db, self.daemon_id)
+        return {
+            "tasks": [t.model_dump() for t in tasks],
+            "cancelled_task_ids": cancelled_ids,
+        }
 
     async def _handle_runtimes_register(self, body: dict) -> dict:
         """Sync the daemon's runtime snapshot into the registry.
