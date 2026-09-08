@@ -223,6 +223,8 @@ async def route_runtime(
     *,
     identity_did: str | None,
     provider_hint: str | None,
+    requested_daemon_id: str | None = None,
+    requested_provider: str | None = None,
 ) -> "RoutingDecision | None":
     """Jointly route ``(daemon_id, provider)`` by capability + scoring.
 
@@ -231,20 +233,31 @@ async def route_runtime(
     an identity with zero bindings still routes to any live daemon
     whose runtime covers a candidate provider.
 
+    ``requested_daemon_id`` / ``requested_provider`` are phase-A *hard*
+    placement constraints from a parent's spawn envelope: when set they
+    narrow the candidate set, and when the request can't be honored
+    (daemon offline / doesn't offer the provider) the function returns
+    ``None`` so the caller can fail the child at birth rather than
+    silently rerouting. Neither gate is binding-scoped — a parent may
+    pin a child to a daemon/provider its identity isn't bound to, as
+    long as that daemon has a live runtime for the provider.
+
     Candidates: ``(provider, daemon)`` pairs where provider ∈ the
-    candidate provider set (identity's bindings dedup, or
-    ``{provider_hint}`` when identity-less) and the daemon has a
-    runtime row for it that is not stale. "Online" is uniformly
-    ``!is_stale(last_seen)`` — ``RuntimeModel.status`` is display-only.
+    candidate provider set (requested provider, else identity's bindings
+    dedup, else ``{provider_hint}``) and the daemon has a runtime row for
+    it that is not stale. "Online" is uniformly ``!is_stale(last_seen)`` —
+    ``RuntimeModel.status`` is display-only.
 
     Scoring per daemon: affinity (recent N=20 tasks with the same
     identity on that daemon) − load (running-Step count, i.e.
     claimed-but-unreported). Tiebreak: binding priority, then stable
-    daemon id. Returns None when no candidate exists (caller decides
-    the fallback — spawn_children falls back to the parent daemon).
+    daemon id. Returns None when no candidate exists (caller decides the
+    fallback — spawn_children falls back to the parent daemon on a plain
+    miss, but fails the child at birth when placement was requested).
     """
-    # 1. Candidate provider set: identity bindings' providers (dedup), or
-    #    the provider hint when the identity has no bindings (or is absent).
+    # Bindings are read once: they drive the candidate provider set (when
+    # no provider was requested) AND the priority tiebreak below.
+    bind_rows: list[IdentityBindingModel] = []
     if identity_did:
         bind_rows = (
             await db.execute(
@@ -253,6 +266,13 @@ async def route_runtime(
                 )
             )
         ).scalars().all()
+
+    # 1. Candidate provider set: an explicit requested provider (hard) >
+    #    identity bindings' providers (dedup) > the provider hint
+    #    (identity-less / zero-binding fallback).
+    if requested_provider is not None:
+        candidate_providers = {requested_provider}
+    elif identity_did:
         candidate_providers = {b.provider for b in bind_rows}
         if not candidate_providers:
             candidate_providers = {provider_hint} if provider_hint else set()
@@ -273,6 +293,14 @@ async def route_runtime(
             offered.setdefault(row.daemon_id, set()).add(row.provider)
     if not offered:
         return None
+
+    # 2b. A requested daemon is a hard constraint: narrow ``offered`` to
+    #     just that daemon; if it has no live runtime for a candidate
+    #     provider, the request is un-honorable → None.
+    if requested_daemon_id is not None:
+        if requested_daemon_id not in offered:
+            return None
+        offered = {requested_daemon_id: offered[requested_daemon_id]}
 
     daemon_ids = list(offered.keys())
 

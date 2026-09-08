@@ -16,6 +16,7 @@ from sqlalchemy.pool import NullPool
 
 from agt.server.database import make_session_factory
 from agt.server.models import Base, RuntimeModel
+from agt.server.config import DaemonTarget
 from agt.server.services.daemon_service import get_daemon, list_daemons
 from agt.server.services.runtime_service import TS_FMT
 
@@ -147,3 +148,50 @@ class TestGet:
 
     def test_get_unknown_returns_none(self, db: _DB) -> None:
         assert db.run(_get, db, "did-not-exist") is None
+
+
+class TestStaticOverlay:
+    """Phase A: `~/.agt/daemons` url/capabilities overlay merge."""
+
+    def _defs(self, **kw) -> dict[str, DaemonTarget]:
+        return {
+            "d1": DaemonTarget(
+                daemon_id="d1",
+                name=kw.get("name", "cloud"),
+                url=kw.get("url", "ws://h:8422"),
+                capabilities=kw.get("capabilities", ("containers", "logs")),
+            )
+        }
+
+    def test_overlay_merges_url_and_capabilities(self, db: _DB) -> None:
+        db.run(_insert, db, _row("d1", "claude", last_seen=_stamp(1)))
+
+        async def _run():
+            async with db.session() as session:
+                return await get_daemon("d1", session, daemon_defs=self._defs())
+
+        d = asyncio.run(_run())
+        assert d["url"] == "ws://h:8422"
+        assert d["capabilities"] == ["containers", "logs"]
+
+    def test_overlay_fills_missing_name(self, db: _DB) -> None:
+        db.run(_insert, db, _row("d1", "claude", last_seen=_stamp(1)))
+
+        async def _run():
+            async with db.session() as session:
+                return await get_daemon("d1", session, daemon_defs=self._defs())
+
+        d = asyncio.run(_run())
+        assert d["daemon_name"] == "cloud"
+
+    def test_absent_target_omits_overlay_keys(self, db: _DB) -> None:
+        db.run(_insert, db, _row("d1", "claude", last_seen=_stamp(1)))
+
+        async def _run():
+            async with db.session() as session:
+                return await list_daemons(session, daemon_defs={})
+
+        result = asyncio.run(_run())
+        assert result[0]["daemon_id"] == "d1"
+        assert "url" not in result[0]
+        assert "capabilities" not in result[0]

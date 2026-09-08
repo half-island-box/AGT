@@ -433,18 +433,36 @@ async def spawn_children(
 
         # Phase 4 dynamic routing (D1/D5): joint (target, provider)
         # decision. The routed provider overrides the single-value
-        # resolution so target/runtime always match; no candidate falls
-        # back to the parent daemon + Phase 3 single-value resolution.
+        # resolution so target/runtime always match. Phase A: the parent
+        # may hard-pin daemon/provider in the envelope — an un-honorable
+        # pin fails the child at birth (never silently reroute).
         from .selection_service import route_runtime
+
+        req_daemon = envelope.get("daemon_id")
+        req_provider = envelope.get("provider")
+        if not (isinstance(req_daemon, str) and req_daemon):
+            req_daemon = None
+        if not (isinstance(req_provider, str) and req_provider):
+            req_provider = None
 
         routed = await route_runtime(
             db,
             identity_did=identity,
             provider_hint=parent_job.provider,
+            requested_daemon_id=req_daemon,
+            requested_provider=req_provider,
         )
+        placement_failure: str | None = None
         if routed is not None:
             target_daemon = routed.daemon_id
             provider = routed.provider
+        elif req_daemon is not None or req_provider is not None:
+            placement_failure = (
+                f"requested placement unavailable: daemon_id={req_daemon}, "
+                f"provider={req_provider}"
+            )
+            target_daemon = daemon_id
+            provider = parent_job.provider
         else:
             target_daemon = daemon_id
 
@@ -473,15 +491,20 @@ async def spawn_children(
         except ValueError:
             raise
 
-        if unknown_identity is not None:
+        if unknown_identity is not None or placement_failure is not None:
             # Failed-at-birth child: terminal immediately, message on the
             # Step. Counts as a terminal child for the wakeup check.
+            reason = (
+                placement_failure
+                if placement_failure is not None
+                else f"unknown identity: {unknown_identity}"
+            )
             child.status = "failed"
             child.updated_at = _now()
             step = child.steps[0]
             step.status = "failed"
             step.outcome = "error"
-            step.stderr = f"unknown identity: {unknown_identity}"
+            step.stderr = reason
             step.updated_at = _now()
             await db.flush()
 

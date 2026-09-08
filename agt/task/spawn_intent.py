@@ -32,8 +32,11 @@ MAX_BATCH = 8  # mirrors server MAX_SPAWN_BATCH (payload bounding only)
 SPAWN_INSTRUCTION = (
     "[agt] To delegate parallel sub-tasks, output one line per child, "
     'exactly: AGT-SPAWN {"identity": "<did or empty>", "goal": "...", '
-    '"inputs": ["agt-artifact://..."], "return": "..."} — single-line '
-    "JSON, no code fences."
+    '"inputs": ["agt-artifact://..."], "return": "...", '
+    '"daemon_id": "<optional>", "provider": "<optional>"} — single-line '
+    "JSON, no code fences. Omit daemon_id/provider to route dynamically; "
+    "if you name one and it cannot run the requested provider, the child "
+    "fails instead of being rerouted."
 )
 
 

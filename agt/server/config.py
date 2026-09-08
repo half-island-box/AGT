@@ -16,25 +16,32 @@ class DaemonTarget:
     ``daemon_id`` is derived from ``url`` (uuid5 in the shared
     namespace — same derivation the daemon itself uses), so the file
     only needs ``name url``; the id is never stored in it.
+
+    ``capabilities`` are optional static labels declared in a third
+    ``,``-separated field (``name url cap1,cap2``). They are descriptive
+    hints for routing/display (phase A) — the live runtime catalog that
+    agents introspect is deferred to a later phase.
     """
 
     daemon_id: str
     name: str
     url: str  # ws://host:port (or wss://)
+    capabilities: tuple[str, ...] = ()  # optional static labels
 
 
 def _parse_daemons_file(path: str | None) -> list[DaemonTarget]:
-    """Parse ``~/.agt/daemons`` — one ``name url`` per line.
+    """Parse ``~/.agt/daemons`` — one ``name url [cap1,cap2,...]`` per line.
 
     Format (intentionally minimal — no extra dependency):
 
         # Comments start with hash
-        daemon-cloud-01 ws://1.2.3.4:8422
+        daemon-cloud-01 ws://1.2.3.4:8422 containers,logs
         daemon-cloud-02 ws://5.6.7.8:8422
 
-    The id is never read from the file — it is derived from the URL via
-    :func:`daemon_id_from_url` (uuid5, shared namespace), matching what
-    the daemon itself computes for its own URL.
+    The third field (optional) declares a daemon's static capability
+    labels, ``,``-separated. The id is never read from the file — it is
+    derived from the URL via :func:`daemon_id_from_url` (uuid5, shared
+    namespace), matching what the daemon itself computes for its own URL.
 
     Empty lines are skipped. Missing file → empty list. Malformed lines
     are logged and skipped (we don't want a typo to take the server
@@ -57,7 +64,11 @@ def _parse_daemons_file(path: str | None) -> list[DaemonTarget]:
         if len(parts) != 2:
             log.warning("daemons: ignoring malformed line: %r", raw)
             continue
-        name, url = parts[0].strip(), parts[1].strip()
+        name = parts[0].strip()
+        rest = parts[1].strip()
+        tokens = rest.split(None, 1)
+        url = tokens[0].strip()
+        caps_raw = tokens[1].strip() if len(tokens) == 2 else ""
         if not name or not url:
             log.warning("daemons: ignoring empty field: %r", raw)
             continue
@@ -67,7 +78,15 @@ def _parse_daemons_file(path: str | None) -> list[DaemonTarget]:
                 name, url,
             )
             continue
-        out.append(DaemonTarget(daemon_id=daemon_id_from_url(url), name=name, url=url))
+        capabilities = tuple(c.strip() for c in caps_raw.split(",") if c.strip())
+        out.append(
+            DaemonTarget(
+                daemon_id=daemon_id_from_url(url),
+                name=name,
+                url=url,
+                capabilities=capabilities,
+            )
+        )
     return out
 
 

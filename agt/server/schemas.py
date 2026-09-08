@@ -512,6 +512,12 @@ class DaemonOut(BaseModel):
     runtime_count: int
     last_seen: str
     online: bool
+    # Phase A: static config overlay from ``~/.agt/daemons`` — the
+    # reverse-dial URL and any declared capability labels. Absent for
+    # daemons that only appear in the runtimes table (e.g. local daemons
+    # that claim over HTTP long-poll, with no daemons-file entry).
+    url: str | None = None
+    capabilities: list[str] = []
 
 
 class ListDaemonsResponse(BaseModel):

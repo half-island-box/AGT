@@ -13,7 +13,7 @@ liveness TTL definition in the codebase.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Mapping
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -51,12 +51,43 @@ def _daemon_to_dict(rows: list[RuntimeModel]) -> dict[str, Any]:
     }
 
 
-async def list_daemons(db: AsyncSession) -> list[dict[str, Any]]:
+def _annotate_daemon(
+    d: dict[str, Any],
+    targets: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Overlay static ``~/.agt/daemons`` metadata (url + capabilities +
+    display name) onto an aggregated daemon dict.
+
+    No-op when ``targets`` is empty or the daemon isn't in the file (e.g.
+    a local daemon that claims over HTTP long-poll, with no reverse-dial
+    entry). ``targets`` values are ``DaemonTarget``-shaped; accessed via
+    ``getattr`` so callers can pass plain dicts in tests.
+    """
+    if not targets:
+        return d
+    t = targets.get(d["daemon_id"])
+    if t is None:
+        return d
+    d = dict(d)
+    d["url"] = getattr(t, "url", None)
+    d["capabilities"] = list(getattr(t, "capabilities", ()) or ())
+    if not d.get("daemon_name") and getattr(t, "name", None):
+        d["daemon_name"] = t.name
+    return d
+
+
+async def list_daemons(
+    db: AsyncSession,
+    daemon_defs: Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     """Return every known daemon, aggregated from runtimes rows.
 
     Rows are read WITHOUT the liveness filter so recently-offline daemons
     still appear (``online`` carries the liveness signal instead). Grouping
     is by daemon_id in insertion order of first appearance.
+
+    ``daemon_defs`` (keyed by daemon_id) is optional; when supplied, each
+    daemon gains its static ``url``/``capabilities``/display-name overlay.
     """
     result = await db.execute(
         select(RuntimeModel).order_by(RuntimeModel.daemon_id, RuntimeModel.provider)
@@ -67,12 +98,13 @@ async def list_daemons(db: AsyncSession) -> list[dict[str, Any]]:
     for r in rows:
         grouped.setdefault(r.daemon_id, []).append(r)
 
-    return [_daemon_to_dict(rows) for rows in grouped.values()]
+    return [_annotate_daemon(_daemon_to_dict(rows), daemon_defs) for rows in grouped.values()]
 
 
 async def get_daemon(
     daemon_id: str,
     db: AsyncSession,
+    daemon_defs: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Return one daemon's aggregated summary, or None if it has no rows."""
     result = await db.execute(
@@ -83,7 +115,7 @@ async def get_daemon(
     rows = list(result.scalars().all())
     if not rows:
         return None
-    return _daemon_to_dict(rows)
+    return _annotate_daemon(_daemon_to_dict(rows), daemon_defs)
 
 
 __all__ = ["list_daemons", "get_daemon"]

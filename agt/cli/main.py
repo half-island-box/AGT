@@ -2599,17 +2599,20 @@ def daemon_list(server_url: str) -> None:
 
     click.echo(f"🖥️  {len(daemons)} daemon(s) registered on the Server\n")
     click.echo(
-        f"  {'NAME':<18} {'DAEMON_ID':<16} {'DEVICE':<20} {'RUNTIME':<8} "
-        f"{'PROVIDERS':<20} {'ONLINE':<8} {'LAST SEEN':<20}"
+        f"  {'NAME':<18} {'DAEMON_ID':<16} {'URL':<24} {'DEVICE':<18} "
+        f"{'RUNTIME':<8} {'PROVIDERS':<18} {'CAPABILITIES':<22} "
+        f"{'ONLINE':<8} {'LAST SEEN':<20}"
     )
-    click.echo("  " + "─" * 112)
+    click.echo("  " + "─" * 150)
     for d in daemons:
         providers = ",".join(p["provider"] for p in d["providers"]) or "—"
         name = d.get("daemon_name") or "—"
+        url = d.get("url") or "—"
+        caps = ",".join(d.get("capabilities") or []) or "—"
         click.echo(
-            f"  {name[:18]:<18} {d['daemon_id'][:16]:<16} "
-            f"{d['device_name'][:20]:<20} {d['runtime_count']:<8} "
-            f"{providers[:20]:<20} "
+            f"  {name[:18]:<18} {d['daemon_id'][:16]:<16} {url[:24]:<24} "
+            f"{d['device_name'][:18]:<18} {d['runtime_count']:<8} "
+            f"{providers[:18]:<18} {caps[:22]:<22} "
             f"{'yes' if d['online'] else 'no':<8} {d['last_seen']:<20}"
         )
 
