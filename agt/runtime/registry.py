@@ -31,6 +31,11 @@ from .command_builders import (
     CodexCommandBuilder,
     CommandBuilder,
 )
+from .mcp_config import (
+    GlobalTomlMcpConfig,
+    McpConfigProfile,
+    ProjectJsonMcpConfig,
+)
 from .resume_detectors import (
     ClaudeResumeRejectionDetector,
     GenericResumeRejectionDetector,
@@ -89,6 +94,9 @@ class ProviderAdapter:
     stream_sink_factory: Callable[[], StreamingSink]
     resume_rejection_detector: ResumeRejectionDetector
     permission_args: tuple[str, ...] = ()
+    # Phase B: how this provider discovers the catalog MCP server (or
+    # None when it has no supported MCP-config mechanism).
+    mcp_profile: McpConfigProfile | None = None
 
 
 # Built-in adapters. New providers should be added here.
@@ -99,6 +107,7 @@ def _claude_adapter() -> ProviderAdapter:
         stream_sink_factory=ClaudeStreamSink,
         resume_rejection_detector=ClaudeResumeRejectionDetector(),
         permission_args=CLAUDE_BYPASS_PERMISSION_ARGS,
+        mcp_profile=ProjectJsonMcpConfig(".mcp.json"),
     )
 
 
@@ -111,6 +120,7 @@ def _codex_adapter() -> ProviderAdapter:
         stream_sink_factory=NoopSink,
         resume_rejection_detector=GenericResumeRejectionDetector(),
         permission_args=CODEX_SANDBOX_ARGS,
+        mcp_profile=GlobalTomlMcpConfig(),
     )
 
 

@@ -38,7 +38,7 @@ from ..daemon.identity_inject import (
     _reclaim_identity,
     _reclaim_outputs_instruction,
 )
-from ..daemon.mcp_inject import inject_mcp_config, reclaim_mcp_config
+from ..runtime.mcp_config import inject_mcp_config, reclaim_mcp_config
 from ..runtime.models import Runtime
 from ..runtime.registry import (
     ProviderAdapter,
@@ -196,13 +196,17 @@ def _mcp_url_for(config: DaemonConfig) -> str:
     """The MCP catalog endpoint a spawned agent should call.
 
     Reverse-dial (remote) agents cannot reach the Server's HTTP MCP
-    endpoint (NAT), so they hit their daemon's proxy MCP on loopback.
-    Local agents reach the Server's ``/mcp`` directly.
+    endpoint (NAT), so they hit their daemon's proxy MCP on loopback —
+    that proxy runs the FastMCP ASGI app at its root, so its endpoint is
+    the single ``/mcp``. Local agents reach the Server, where the same app
+    is *mounted at* ``/mcp`` and its sub-route is ``/`` (see
+    :func:`agt.server.mcp_server.build_catalog_mcp`), so the assembled
+    endpoint is ``/mcp/``.
     """
     if getattr(config, "listen_mode", False):
         port = getattr(config, "mcp_port", None) or 8428
         return f"http://127.0.0.1:{port}/mcp"
-    return config.server_url.rstrip("/") + "/mcp"
+    return config.server_url.rstrip("/") + "/mcp/"
 
 
 class AgentNotFoundError(RuntimeError):
@@ -308,12 +312,12 @@ class TaskExecutor:
                 identity_md=task.identity_md,
             )
 
-        # Phase B (MCP): register the live runtime catalog as a
-        # project-scoped MCP server so the agent can query it before
-        # spawning children. Reclaimed in ``finally`` alongside identity.
-        # A no-op for providers without a project-scoped MCP config file
-        # (see :mod:`agt.daemon.mcp_inject`).
-        inject_mcp_config(work_dir, task.provider, _mcp_url_for(self._config))
+        # Phase B (MCP): register the live runtime catalog as an MCP
+        # server so the agent can query it before spawning children. The
+        # provider's adapter selects the config profile (project JSON vs
+        # global TOML); a ``None`` profile is a no-op. Reclaimed in
+        # ``finally`` alongside identity.
+        inject_mcp_config(adapter.mcp_profile, work_dir, _mcp_url_for(self._config))
 
         start = time.monotonic()
         result: TaskResult | None = None
@@ -344,8 +348,8 @@ class TaskExecutor:
                 # after the outputs block is already gone.
                 _reclaim_identity(work_dir, did=task.identity_did)
             # Phase B (MCP): undo the catalog MCP config injection. A
-            # no-op for providers without a project-scoped MCP config file.
-            reclaim_mcp_config(work_dir, task.provider)
+            # no-op when the provider's adapter has no MCP profile.
+            reclaim_mcp_config(adapter.mcp_profile, work_dir)
             # Phase 2: post-exit whitelist scan, AFTER identity files are
             # reclaimed so they can never be picked up. Runs on every
             # exit path (normal, timeout, crash) and for all three

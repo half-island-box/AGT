@@ -55,8 +55,15 @@ def build_catalog_mcp(
     session_factory: Any,
     daemon_defs: dict[str, Any],
 ) -> FastMCP:
-    """Build the Server's catalog MCP server (one tool: ``list_runtimes``)."""
-    mcp = FastMCP("agt-catalog")
+    """Build the Server's catalog MCP server (one tool: ``list_runtimes``).
+
+    ``streamable_http_path="/"`` is deliberate: the app is mounted at
+    ``/mcp`` on the FastAPI app (``app.mount("/mcp", ...)``), so the
+    FastMCP default (``/mcp``) would stack with the mount prefix into a
+    double ``/mcp/mcp``. Pin the sub-app route to ``/`` so the assembled
+    endpoint is the single ``/mcp/`` the executor injects.
+    """
+    mcp = FastMCP("agt-catalog", streamable_http_path="/")
 
     @mcp.tool(description=CATALOG_TOOL_DESCRIPTION)
     async def list_runtimes(
