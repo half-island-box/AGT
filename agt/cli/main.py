@@ -3088,4 +3088,10 @@ def artifact_get(
     sys.exit(code)
 
 
+# Phase 5: SOP static-DAG commands.
+from .sop import sop as _sop_group  # noqa: E402
+
+cli.add_command(_sop_group)
+
+
 __all__ = ["cli"]

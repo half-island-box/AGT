@@ -232,6 +232,18 @@ async def record_task_result_for_daemon(
                 synthesis_daemon_id=daemon_id,
             )
 
+        # Phase 5 hook C (SOP): a terminal Job wakes its dependency-gated
+        # downstream. No-op for jobs with no DAG dependents (the common
+        # case), so this fires liberally on every terminal report — SOP
+        # nodes have no spawn parent_job_id, hooks A/B never touch them;
+        # this hook is their ONLY online wake trigger (review G1).
+        if current_job is not None and current_job.status in (
+            "done", "failed", "cancelled"
+        ):
+            from .job_service import try_wake_dependents
+
+            await try_wake_dependents(db, current_job.job_id)
+
     await db.commit()
 
     # Publish the authoritative terminal payload to any SSE subscriber.

@@ -197,6 +197,32 @@ def ensure_schema(conn: Connection) -> None:
             "CREATE INDEX IF NOT EXISTS ix_tasks_daemon_id ON tasks (daemon_id)"
         )
 
+    # Phase 5 (SOP): DAG dependency edges + per-node activation metadata.
+    if not _table_exists(conn, "job_parents"):
+        conn.exec_driver_sql("""
+            CREATE TABLE job_parents (
+                job_id VARCHAR(64) NOT NULL,
+                parent_job_id VARCHAR(64) NOT NULL,
+                created_at VARCHAR(32) NOT NULL,
+                PRIMARY KEY (job_id, parent_job_id),
+                FOREIGN KEY (job_id) REFERENCES jobs (job_id) ON DELETE CASCADE,
+                FOREIGN KEY (parent_job_id) REFERENCES jobs (job_id) ON DELETE CASCADE
+            )
+        """)
+        conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_job_parents_job ON job_parents (job_id)"
+        )
+        conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_job_parents_parent ON job_parents (parent_job_id)"
+        )
+        log.info("Migrated schema: created job_parents table")
+
+    if _table_exists(conn, "jobs") and "sop_node" not in _column_names(conn, "jobs"):
+        conn.exec_driver_sql(
+            "ALTER TABLE jobs ADD COLUMN sop_node TEXT"
+        )
+        log.info("Migrated jobs table: added sop_node column")
+
 
 def migrate_identities_and_sessions(conn: Connection, root_dir: Path | None = None) -> None:
     """Apply Phase 4 identity + Job/Step + session schema migrations. Idempotent.

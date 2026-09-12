@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from ...a2a import (
     DataPart,
@@ -30,6 +31,7 @@ from ..models import (
     IdentityBindingModel,
     IdentityModel,
     JobModel,
+    JobParentModel,
     SessionModel,
     TaskModel,
 )
@@ -37,7 +39,7 @@ from ..models import (
 log = logging.getLogger(__name__)
 
 _VALID_STATUSES = {
-    "queued", "running", "waiting_input", "waiting_children",
+    "queued", "running", "waiting_input", "waiting_children", "blocked",
     "done", "failed", "cancelled",
 }
 _TERMINAL_STATUSES = {"done", "failed", "cancelled"}
@@ -74,60 +76,92 @@ async def create_job(
     job_type: str = "task",
     message: Message | None = None,
     parent_job_id: str | None = None,
+    with_step: bool = True,
+    parents: list[str] | None = None,
+    root_job_id: str | None = None,
+    sop_node: str | None = None,
 ) -> JobModel:
-    """Create a Job and its first pending Step.
+    """Create a Job and (by default) its first pending Step.
 
     ``message`` is the structured (A2A-shaped) input; when omitted the
     plain ``prompt`` is normalized into a single-TextPart Message so every
     new Step row carries a canonical ``input_message``.
+
+    Phase 5 (SOP) additions:
+
+    - ``with_step=False`` — create an EMPTY Job (no Step) with
+      ``status="blocked"``: dependency-gated SOP nodes stay out of the
+      claim pool until activated (``append_step`` at wake time).
+    - ``parents`` — upstream job ids for the DAG edges; each becomes a
+      ``job_parents`` row (this job waits on each parent). All ids must
+      exist (ValueError otherwise).
+    - ``root_job_id`` — explicit root override. SOP nodes share the root
+      WITHOUT a spawn ``parent_job_id``, so the default "root = self"
+      would silently break the shared-root invariant (review G2).
     """
     now = _now()
     j_id = job_id or _new_id()
     s_id = task_id or _new_id()
 
     # Phase 3: lineage — children inherit the parent's root; roots carry
-    # their own id (denormalized for subtree/budget queries).
-    root_job_id = j_id
+    # their own id (denormalized for subtree/budget queries). Phase 5:
+    # an explicit override wins (SOP nodes share a root with no lineage).
+    effective_root = root_job_id or j_id
     if parent_job_id is not None:
         parent = await db.get(JobModel, parent_job_id)
         if parent is None:
             raise ValueError({"type": "parent_job_not_found", "message": parent_job_id})
-        root_job_id = parent.root_job_id
+        effective_root = root_job_id or parent.root_job_id
 
+    blocked = not with_step
     job = JobModel(
         job_id=j_id,
         parent_job_id=parent_job_id,
-        root_job_id=root_job_id,
-        status="queued",
+        root_job_id=effective_root,
+        status="blocked" if blocked else "queued",
         job_type=job_type,
         provider=provider,
         identity_did=identity_did,
         target_daemon_id=target_daemon_id,
         work_dir=work_dir,
         agent_cwd=agent_cwd,
+        sop_node=sop_node,
         created_at=now,
         updated_at=now,
     )
     db.add(job)
 
-    step = TaskModel(
-        task_id=s_id,
-        job_id=j_id,
-        provider=provider,
-        prompt=prompt,
-        status="pending",
-        target_daemon_id=target_daemon_id,
-        work_dir=work_dir,
-        agent_cwd=agent_cwd,
-        identity_did=identity_did,
-        input_message=(message or message_from_prompt(prompt)).model_dump_json(),
-        created_at=now,
-        updated_at=now,
-    )
-    db.add(step)
-    # Wire the Step into the Job's in-memory collection so callers can read
-    # ``job.steps`` without an async lazy-load round-trip.
-    job.steps.append(step)
+    # Phase 5: DAG dependency edges — this job waits on each parent.
+    for upstream in parents or []:
+        if await db.get(JobModel, upstream) is None:
+            raise ValueError({"type": "parent_job_not_found", "message": upstream})
+        db.add(
+            JobParentModel(
+                job_id=j_id,
+                parent_job_id=upstream,
+                created_at=now,
+            )
+        )
+
+    if with_step:
+        step = TaskModel(
+            task_id=s_id,
+            job_id=j_id,
+            provider=provider,
+            prompt=prompt,
+            status="pending",
+            target_daemon_id=target_daemon_id,
+            work_dir=work_dir,
+            agent_cwd=agent_cwd,
+            identity_did=identity_did,
+            input_message=(message or message_from_prompt(prompt)).model_dump_json(),
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(step)
+        # Wire the Step into the Job's in-memory collection so callers can
+        # read ``job.steps`` without an async lazy-load round-trip.
+        job.steps.append(step)
     await db.flush()
     return job
 
@@ -146,7 +180,12 @@ async def append_step(
     The Job MUST be in a state that accepts new Steps (queued, running, or
     waiting_input). The new Step inherits its runtime metadata from the Job.
     """
-    job = await get_job(db, job_id)
+    # Eagerly load the steps collection: async sessions cannot lazy-load,
+    # and callers (including SOP activation) read ``job.steps`` below.
+    result = await db.execute(
+        select(JobModel).where(JobModel.job_id == job_id).options(selectinload(JobModel.steps))
+    )
+    job = result.scalar_one_or_none()
     if job is None:
         raise ValueError({"type": "job_not_found", "message": job_id})
     if job.status not in {"queued", "running", "waiting_input"}:
@@ -262,7 +301,10 @@ def _next_status(current: str, event: str) -> str:
         return "cancelled"
 
     transitions = {
-        "queued": {"step_claimed": "running", "cancel": "cancelled"},
+        # Phase 5 (SOP): a node may fail at activation (e.g. missing
+        # upstream output) before ever being claimed — allow the terminal
+        # failure event straight from queued.
+        "queued": {"step_claimed": "running", "step_failed": "failed", "cancel": "cancelled"},
         "running": {
             "step_done": "done",
             "step_needs_input": "waiting_input",
@@ -272,6 +314,9 @@ def _next_status(current: str, event: str) -> str:
         },
         "waiting_input": {"input_received": "running", "cancel": "cancelled"},
         "waiting_children": {"children_done": "running", "cancel": "cancelled"},
+        # Phase 5 (SOP): created blocked, activates when all upstream
+        # dependencies reach a terminal state.
+        "blocked": {"dependencies_satisfied": "queued", "cancel": "cancelled"},
     }
     return transitions.get(current, {}).get(event, current)
 
@@ -298,9 +343,13 @@ async def cancel_job(db: AsyncSession, job_id: str) -> tuple[JobModel, list[tupl
 
     notify_list: list[tuple[str, str]] = []
     subtree_ids = await _descendant_closure(db, job_id)
-    # Cascade = the job itself + its descendants (D15). ``_descendant_closure``
-    # is exclusive of the root, so prepend it here.
-    for jid in [job_id, *subtree_ids]:
+    dependent_ids = await _dependent_closure(db, job_id)
+    # Cascade = the job itself + spawn descendants (D15) + downstream DAG
+    # dependents (Phase 5 D6). Both closures are exclusive of the root.
+    cancel_set = [job_id] + subtree_ids + [d for d in dependent_ids if d != job_id]
+    seen: set[str] = set()
+    ordered = [jid for jid in cancel_set if not (jid in seen or seen.add(jid))]
+    for jid in ordered:
         target = job if jid == job_id else await get_job(db, jid)
         if target is None:
             continue
@@ -329,6 +378,24 @@ async def _descendant_closure(db: AsyncSession, job_id: str) -> list[str]:
         rows = (
             await db.execute(
                 select(JobModel.job_id).where(JobModel.parent_job_id.in_(frontier))
+            )
+        ).scalars().all()
+        frontier = [r for r in rows if r not in seen]
+        seen.extend(frontier)
+    return seen
+
+
+async def _dependent_closure(db: AsyncSession, job_id: str) -> list[str]:
+    """All downstream DAG dependents of ``job_id`` (exclusive), expanding
+    ``job_parents.parent_job_id → job_id`` iteratively."""
+    seen: list[str] = []
+    frontier = [job_id]
+    while frontier:
+        rows = (
+            await db.execute(
+                select(JobParentModel.job_id).where(
+                    JobParentModel.parent_job_id.in_(frontier)
+                )
             )
         ).scalars().all()
         frontier = [r for r in rows if r not in seen]
@@ -535,6 +602,52 @@ def _child_message(envelope: dict) -> Message:
     return Message(role="user", parts=parts)
 
 
+async def try_wake_dependents(db: AsyncSession, terminal_job_id: str) -> list[str]:
+    """Wake dependency-gated dependents of a (just-)terminal Job (SOP).
+
+    For each DIRECT dependent (``job_parents.parent_job_id == terminal``):
+    skip unless still ``blocked``; if ALL its upstream jobs are terminal,
+    hand it to ``sop_service.activate_job`` (deferred import — that module
+    imports this one). Returns the activated job ids (empty for non-SOP
+    jobs with no dependents, so callers may invoke liberally from any
+    terminal path).
+
+    The activation itself may end in ``failed`` (missing upstream
+    output); sop_service re-invokes this function there so failure
+    propagates down the chain (review G1).
+    """
+    dep_rows = (
+        await db.execute(
+            select(JobParentModel.job_id).where(
+                JobParentModel.parent_job_id == terminal_job_id
+            )
+        )
+    ).scalars().all()
+    if not dep_rows:
+        return []
+
+    activated: list[str] = []
+    from .sop_service import activate_job  # deferred: avoid import cycle
+
+    for dep_id in dep_rows:
+        dep = await db.get(JobModel, dep_id)
+        if dep is None or dep.status != "blocked":
+            continue
+        parent_ids = (
+            await db.execute(
+                select(JobParentModel.parent_job_id).where(
+                    JobParentModel.job_id == dep_id
+                )
+            )
+        ).scalars().all()
+        parents = [await db.get(JobModel, pid) for pid in parent_ids]
+        if any(p is None or p.status not in _TERMINAL_STATUSES for p in parents):
+            continue
+        await activate_job(db, dep)
+        activated.append(dep_id)
+    return activated
+
+
 async def on_child_done(
     db: AsyncSession,
     parent_job_id: str,
@@ -665,5 +778,8 @@ __all__ = [
     "report_step",
     "transition_job",
     "cancel_job",
+    "try_wake_dependents",
+    "on_child_done",
+    "spawn_children",
     "resolve_job_by_session",
 ]

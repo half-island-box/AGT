@@ -90,6 +90,12 @@ class JobModel(Base):
         String(256), nullable=True, index=True
     )
     target_daemon_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Phase 5 (SOP): per-node activation metadata JSON — raw ``input``
+    # (with ``${node.output}`` placeholders), declared ``output`` name,
+    # explicit provider/daemon overrides, identity alias. Needed because
+    # blocked jobs have no Step/input_message until activation, yet the
+    # activation runs in a later transaction. NULL on non-SOP jobs.
+    sop_node: Mapped[str | None] = mapped_column(Text, nullable=True)
     work_dir: Mapped[str | None] = mapped_column(String(512), nullable=True)
     agent_cwd: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     created_at: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -103,6 +109,29 @@ class JobModel(Base):
         # Async sessions can't lazily load a relationship (MissingGreenlet),
         # so load Steps eagerly whenever a Job is fetched. ``create_job``
         # also wires the first Step into this collection in-memory.
+        lazy="selectin",
+    )
+
+    # Phase 5 (SOP): DATA-dependency edges, deliberately orthogonal to the
+    # spawn lineage above. A row (job_id=X, parent_job_id=Y) means "X
+    # waits for Y's terminal state". ``parents`` = upstream set (= DSL
+    # depends_on), ``dependents`` = who waits on me (wake/cancel fanout).
+    # viewonly: deletions ride on the DB-side FK CASCADE; async service
+    # code queries ``JobParentModel`` directly via select().
+    parents: Mapped[list["JobModel"]] = relationship(
+        "JobModel",
+        secondary="job_parents",
+        primaryjoin="JobModel.job_id == JobParentModel.job_id",
+        secondaryjoin="JobModel.job_id == JobParentModel.parent_job_id",
+        viewonly=True,
+        lazy="selectin",
+    )
+    dependents: Mapped[list["JobModel"]] = relationship(
+        "JobModel",
+        secondary="job_parents",
+        primaryjoin="JobModel.job_id == JobParentModel.parent_job_id",
+        secondaryjoin="JobModel.job_id == JobParentModel.job_id",
+        viewonly=True,
         lazy="selectin",
     )
 
@@ -311,6 +340,33 @@ class IdentityBindingModel(Base):
     created_at: Mapped[str] = mapped_column(String(32), nullable=False)
 
 
+class JobParentModel(Base):
+    """One SOP data-dependency edge (Phase 5).
+
+    Row ``(job_id=X, parent_job_id=Y)`` means **X waits for Y**: Y is an
+    upstream of X; X is a dependent of Y. This is the DAG edge — the
+    spawn lineage (``JobModel.parent_job_id``) is a different, orthogonal
+    axis and MUST NOT be conflated with it. Both FKs CASCADE so deleting
+    either endpoint drops the edge.
+    """
+
+    __tablename__ = "job_parents"
+
+    job_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("jobs.job_id", ondelete="CASCADE"),
+        primary_key=True,
+        index=True,
+    )
+    parent_job_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("jobs.job_id", ondelete="CASCADE"),
+        primary_key=True,
+        index=True,
+    )
+    created_at: Mapped[str] = mapped_column(String(32), nullable=False)
+
+
 __all__ = [
     "Base",
     "RuntimeModel",
@@ -320,4 +376,5 @@ __all__ = [
     "IdentityModel",
     "IdentityBindingModel",
     "ArtifactModel",
+    "JobParentModel",
 ]

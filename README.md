@@ -13,6 +13,7 @@ It is an experimental Python foundation for a future multi-agent desktop client.
 - Queue tasks through a local FastAPI server and execute them on one or more daemons.
 - Route tasks by provider, daemon, identity, and runtime binding.
 - Protect agent-to-server callbacks with task-scoped HMAC tokens.
+- Author reusable multi-agent pipelines as static DAGs (SOP): YAML `tasks` with `depends_on`, `${node.output}` dataflow references, dependency-gated activation, and `agt sop validate/submit/run/status/log`.
 - Route identity-based sub-tasks dynamically across daemons (capability + affinity + load scoring; chat sessions stay pinned to one daemon) and propagate cancellation to running remote subprocesses (`tasks.cancel` push for reverse-dial daemons, claim-response delivery for HTTP daemons).
 - Collect declared agent deliverables as addressable artifacts (`agt-artifact://<id>`): agents place files in `.agt/outputs/` (optionally described by `manifest.json`), the server registers lineage/mime/summary, and later steps can consume them by reference — bytes only move cross-daemon, on demand.
 - Expose a live runtime catalog over MCP so a parent agent can discover which daemons are up (and what providers they run) before spawning a child.

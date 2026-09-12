@@ -304,6 +304,38 @@ class ServerClient:
                 return None
             raise
 
+    async def submit_sop(
+        self,
+        spec: dict,
+        cwd: str | None = None,
+        local_daemon_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Validate + expand + submit a SOP DAG (Phase 5).
+
+        ``spec`` is the raw parsed document; the server re-validates it
+        with the shared ``parse_sop`` and returns
+        ``{"root_job_id": ..., "nodes": {name: job_id}}``.
+
+        ``cwd`` / ``local_daemon_id`` (cwd injection): the submitter's
+        pwd and local daemon id, so the server can default an un-pinned
+        node's ``agent_cwd`` to pwd when it lands on the local daemon and
+        refuse a remote landing with no ``dir``.
+        """
+        payload: dict[str, Any] = {"spec": spec}
+        if cwd is not None:
+            payload["cwd"] = cwd
+        if local_daemon_id is not None:
+            payload["local_daemon_id"] = local_daemon_id
+        return await self._post("/api/sop/submit", payload)
+
+    async def sop_status(self, root_job_id: str) -> dict[str, Any]:
+        """Per-node status of a submitted SOP DAG (DAG nodes only)."""
+        return await self._get(f"/api/sop/{root_job_id}/status")
+
+    async def sop_node_log(self, root_job_id: str, node_name: str) -> dict[str, Any]:
+        """Full stdout/stderr log for one SOP node, addressed by name."""
+        return await self._get(f"/api/sop/{root_job_id}/nodes/{node_name}/log")
+
     async def get_artifact_content(self, artifact_id: str) -> bytes:
         """Fetch an artifact's bytes over HTTP (input-side resolution)."""
         assert self._client is not None, "ServerClient must be used as async context manager"

@@ -84,6 +84,23 @@ def test_codex_builder_with_resume():
     ]
 
 
+def test_codex_builder_with_permission_args():
+    """Permission args (from the adapter) slot in before resume/-p."""
+    cmd = CodexCommandBuilder().build(
+        Path("/bin/codex"), _task("say hi"), ["--sandbox", "workspace-write", "--approval-mode", "full-auto"]
+    )
+    assert cmd == [
+        "/bin/codex",
+        "exec",
+        "--skip-git-repo-check",
+        "--sandbox",
+        "workspace-write",
+        "--approval-mode",
+        "full-auto",
+        "say hi",
+    ]
+
+
 def test_codex_builder_stream_args_pass_through():
     """Builder is provider-agnostic about stream args — they just slot in."""
     cmd = CodexCommandBuilder().build(
