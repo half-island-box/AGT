@@ -3093,5 +3093,10 @@ from .sop import sop as _sop_group  # noqa: E402
 
 cli.add_command(_sop_group)
 
+# Goal mode: dynamic orchestration commands.
+from .goal import goal as _goal_group  # noqa: E402
+
+cli.add_command(_goal_group)
+
 
 __all__ = ["cli"]

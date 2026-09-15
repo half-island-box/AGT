@@ -336,6 +336,53 @@ class ServerClient:
         """Full stdout/stderr log for one SOP node, addressed by name."""
         return await self._get(f"/api/sop/{root_job_id}/nodes/{node_name}/log")
 
+    async def job_tree(self, job_id: str) -> dict[str, Any]:
+        """Nested Job subtree rooted at ``job_id`` (spawn lineage)."""
+        return await self._get(f"/api/jobs/{job_id}/tree")
+
+    async def job_log(self, job_id: str) -> dict[str, Any]:
+        """Full stdout/stderr for every Step under a Job."""
+        return await self._get(f"/api/jobs/{job_id}/log")
+
+    async def submit_goal(
+        self,
+        goal: str,
+        *,
+        identity_did: str | None = None,
+        provider: str | None = None,
+        daemon_id: str | None = None,
+        dir: str | None = None,
+        max_depth: int | None = None,
+        max_descendants: int | None = None,
+    ) -> dict[str, Any]:
+        """Submit a goal root Job; returns ``{root_job_id, status}``."""
+        payload: dict[str, Any] = {"goal": goal}
+        for key, value in (
+            ("identity_did", identity_did),
+            ("provider", provider),
+            ("daemon_id", daemon_id),
+            ("dir", dir),
+            ("max_depth", max_depth),
+            ("max_descendants", max_descendants),
+        ):
+            if value is not None:
+                payload[key] = value
+        return await self._post("/api/goal/submit", payload)
+
+    async def goal_export(
+        self,
+        root_job_id: str,
+        *,
+        include_failed: bool = False,
+        keep_planning: bool = False,
+    ) -> dict[str, Any]:
+        """Export a goal run to a SOP draft; returns ``{yaml, warnings}``."""
+        params = {
+            "include_failed": "true" if include_failed else "false",
+            "keep_planning": "true" if keep_planning else "false",
+        }
+        return await self._get(f"/api/goal/{root_job_id}/export", params=params)
+
     async def get_artifact_content(self, artifact_id: str) -> bytes:
         """Fetch an artifact's bytes over HTTP (input-side resolution)."""
         assert self._client is not None, "ServerClient must be used as async context manager"

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db
-from ..models import JobModel, TaskModel
+from ..models import ArtifactModel, JobModel, TaskModel
 from ..schemas import ArtifactOut, SubmitTaskRequest, SubmitTaskResponse
 from ..services.artifact_service import artifact_to_out, artifacts_for_steps
 from ..services.claim_service import notify_task_available
@@ -42,6 +45,49 @@ class JobStatusResponse(BaseModel):
     current_step_id: str | None = None
     # Phase 2: declared deliverables of the current Step (public form).
     artifacts: list[ArtifactOut] = []
+
+
+class JobTreeNode(BaseModel):
+    """One node of a Job subtree (goal / spawn lineage view)."""
+
+    job_id: str
+    parent_job_id: str | None = None
+    status: str
+    provider: str
+    identity_did: str | None = None
+    daemon_id: str | None = None
+    session_id: str | None = None
+    # identity slug first, else the goal / first-prompt excerpt (≤24 chars).
+    label: str = ""
+    # Wall seconds between Job creation and last update (both are
+    # "%Y-%m-%d %H:%M:%S" UTC strings).
+    duration: float | None = None
+    artifacts: list[ArtifactOut] = []
+    # First line of the latest failed/timeout Step's stderr, truncated.
+    error: str | None = None
+    children: list["JobTreeNode"] = []
+
+
+class JobTreeResponse(BaseModel):
+    root_job_id: str
+    node: JobTreeNode
+
+
+class JobLogStep(BaseModel):
+    """One Step's full execution record."""
+
+    task_id: str
+    status: str
+    session_id: str | None = None
+    exit_code: int | None = None
+    stdout: str | None = None
+    stderr: str | None = None
+
+
+class JobLogResponse(BaseModel):
+    job_id: str
+    status: str
+    steps: list[JobLogStep] = []
 
 
 @router.post("", response_model=CreateJobResponse, status_code=status.HTTP_201_CREATED)
@@ -188,6 +234,159 @@ async def job_status(
         current_step_id=current,
         artifacts=[
             ArtifactOut(**artifact_to_out(r)) for r in artifact_rows
+        ],
+    )
+
+
+# ── GET /{job_id}/tree — Job subtree view (goal mode observability) ─
+
+
+def _ts(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+
+
+def _node_label(job: JobModel) -> str:
+    """identity slug first, else the goal / first prompt excerpt."""
+    if job.identity_did and ":" in job.identity_did:
+        return job.identity_did.rsplit(":", 1)[-1]
+    first_prompt = job.steps[0].prompt if job.steps else ""
+    text = " ".join((first_prompt or "").split())
+    return text[:24]
+
+
+def _node_error(job: JobModel) -> str | None:
+    for step in reversed(job.steps):
+        if step.status in ("failed", "timeout") and step.stderr:
+            first_line = step.stderr.strip().splitlines()[0]
+            return first_line[:160]
+    return None
+
+
+def _build_tree_node(
+    job: JobModel,
+    artifacts_by_job: dict[str, list[ArtifactModel]],
+    children_of: dict[str, list[JobModel]],
+) -> JobTreeNode:
+    daemon_id = next(
+        (s.daemon_id for s in reversed(job.steps) if s.daemon_id), None
+    )
+    session_id = next(
+        (s.session_id for s in reversed(job.steps) if s.session_id), None
+    )
+    created, updated = _ts(job.created_at), _ts(job.updated_at)
+    duration = (
+        max(0.0, (updated - created).total_seconds())
+        if created and updated else None
+    )
+    return JobTreeNode(
+        job_id=job.job_id,
+        parent_job_id=job.parent_job_id,
+        status=job.status,
+        provider=job.provider,
+        identity_did=job.identity_did,
+        daemon_id=daemon_id,
+        session_id=session_id,
+        label=_node_label(job),
+        duration=duration,
+        artifacts=[
+            ArtifactOut(**artifact_to_out(r))
+            for r in artifacts_by_job.get(job.job_id, [])
+        ],
+        error=_node_error(job),
+        children=[
+            _build_tree_node(child, artifacts_by_job, children_of)
+            for child in children_of.get(job.job_id, [])
+        ],
+    )
+
+
+@router.get("/{job_id}/tree")
+async def job_tree(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> JobTreeResponse:
+    """Nested Job subtree rooted at ``job_id`` (spawn lineage).
+
+    One query by ``root_job_id`` — a root's own ``root_job_id`` equals
+    its ``job_id``, so the single condition covers the root itself.
+    Nodes are assembled by ``parent_job_id`` and ordered by creation
+    time. Backs ``agt goal status`` / ``goal run`` (goal mode) and
+    works for any spawn-rooted Job.
+    """
+    rows = (
+        await db.execute(
+            select(JobModel)
+            .where(JobModel.root_job_id == job_id)
+            .order_by(JobModel.created_at, JobModel.job_id)
+        )
+    ).scalars().all()
+
+    by_id = {j.job_id: j for j in rows}
+    root = by_id.get(job_id)
+    if root is None:
+        # Either unknown id (404) or a non-root node: for the latter,
+        # return that node alone as a single-node subtree view.
+        root = await db.get(JobModel, job_id)
+        if root is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="job not found"
+            )
+        rows = [root]
+        by_id = {root.job_id: root}
+
+    children_of: dict[str, list[JobModel]] = {}
+    for job in rows:
+        if job.parent_job_id and job.parent_job_id in by_id:
+            children_of.setdefault(job.parent_job_id, []).append(job)
+
+    artifact_rows = (
+        await db.execute(
+            select(ArtifactModel).where(
+                ArtifactModel.job_id.in_([j.job_id for j in rows])
+            )
+        )
+    ).scalars().all()
+    artifacts_by_job: dict[str, list[ArtifactModel]] = {}
+    for row in artifact_rows:
+        artifacts_by_job.setdefault(row.job_id, []).append(row)
+
+    return JobTreeResponse(
+        root_job_id=root.job_id,
+        node=_build_tree_node(root, artifacts_by_job, children_of),
+    )
+
+
+@router.get("/{job_id}/log", response_model=JobLogResponse)
+async def job_log(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> JobLogResponse:
+    """Full stdout/stderr for every Step under a Job, in creation order.
+
+    Generic (works for goal nodes and any spawn Job); SOP keeps its own
+    name-addressed view. Backs ``agt goal log <root> [job_id]``.
+    """
+    job = await get_job(db, job_id)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job not found")
+    return JobLogResponse(
+        job_id=job.job_id,
+        status=job.status,
+        steps=[
+            JobLogStep(
+                task_id=s.task_id,
+                status=s.status,
+                session_id=s.session_id,
+                exit_code=s.exit_code,
+                stdout=s.stdout,
+                stderr=s.stderr,
+            )
+            for s in job.steps
         ],
     )
 

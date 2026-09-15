@@ -223,6 +223,14 @@ def ensure_schema(conn: Connection) -> None:
         )
         log.info("Migrated jobs table: added sop_node column")
 
+    # Goal mode: root-Job metadata JSON (per-run spawn budget, template
+    # fingerprint, raw goal text). NULL on non-goal jobs.
+    if _table_exists(conn, "jobs") and "goal_meta" not in _column_names(conn, "jobs"):
+        conn.exec_driver_sql(
+            "ALTER TABLE jobs ADD COLUMN goal_meta TEXT"
+        )
+        log.info("Migrated jobs table: added goal_meta column")
+
 
 def migrate_identities_and_sessions(conn: Connection, root_dir: Path | None = None) -> None:
     """Apply Phase 4 identity + Job/Step + session schema migrations. Idempotent.

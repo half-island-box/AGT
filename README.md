@@ -2,7 +2,7 @@
 
 [中文文档](README_zh.md) | **English**
 
-**agt** is a local bridge for AI coding-agent CLIs. It discovers installed agents, runs them from the terminal, and provides a server/daemon layer for queued, concurrent, multi-machine execution — including dynamic sub-agent spawning, static DAG pipelines, artifact management, and an MCP runtime catalog.
+**agt** is a local bridge for AI coding-agent CLIs. It discovers installed agents, runs them from the terminal, and provides a server/daemon layer for queued, concurrent, multi-machine execution — including goal-driven orchestration, dynamic sub-agent spawning, static DAG pipelines, artifact management, and an MCP runtime catalog.
 
 It is an experimental Python foundation for a future multi-agent desktop client. The desktop UI has intentionally not been chosen yet.
 
@@ -17,8 +17,9 @@ It is an experimental Python foundation for a future multi-agent desktop client.
 
 ### Orchestration
 
+- **Goal-driven orchestration**: hand one requirement to a root orchestrator agent (`agt goal`), which decomposes it, recursively spawns child agents within a per-run budget (`--max-depth` / `--max-descendants` / `max_batch`), and synthesizes the final answer. A full Job-tree view (`agt goal status`), `AGT-ASK` questions answered via `agt goal input`, cascade cancel, and artifact download round out the entry.
 - **Dynamic spawn**: a parent agent emits `AGT-SPAWN <json>` marker lines to delegate parallel sub-tasks; the server materializes child Jobs, waits for completion, then spawns a synthesis step that aggregates child artifacts.
-- **Static DAG pipelines (SOP)**: author reusable multi-agent workflows in YAML with `depends_on`, `${node.output}` dataflow references, and dependency-gated activation (`blocked → queued`). Terminal-node artifacts are the pipeline's final output.
+- **Static DAG pipelines (SOP)**: author reusable multi-agent workflows in YAML with `depends_on`, `${node.output}` dataflow references, and dependency-gated activation (`blocked → queued`). Terminal-node artifacts are the pipeline's final output. A successful goal run can be distilled back into a SOP draft via `agt goal export`.
 - **Identity-based routing**: identities (DID) bind to `(daemon, provider)` runtimes; sub-tasks route dynamically across daemons by capability + affinity + load, while chat sessions stay pinned.
 - **Cancellation**: cancels cascade to spawn descendants and DAG dependents; running remote subprocesses are terminated via `tasks.cancel` push (reverse-dial) or claim-response delivery (HTTP).
 
@@ -124,6 +125,21 @@ agt sop validate pipeline.yaml
 agt sop run pipeline.yaml
 ```
 
+## Goal example
+
+```bash
+# Hand one open-ended requirement to a root orchestrator agent.
+agt goal run "Write deployment docs for this repo"
+
+# Inspect the grown Job tree / answer an agent question mid-run.
+agt goal status <root_job_id>
+agt goal input <job_id> "Use Chinese and split by module"
+
+# Distill a successful run into a reusable SOP DAG.
+agt goal export <root_job_id> -o pipeline.yaml
+agt sop validate pipeline.yaml && agt sop run pipeline.yaml
+```
+
 ## CLI overview
 
 | Command | Description |
@@ -132,6 +148,7 @@ agt sop run pipeline.yaml
 | `agt run` | Run one prompt locally or through a daemon. |
 | `agt chat` | Start, list, or resume an interactive agent session. |
 | `agt sop` | Validate / submit / run / status / log static DAG pipelines. |
+| `agt goal` | Submit / run / status / log / input / cancel / artifacts / export goal-driven runs. |
 | `agt artifact` | List and download declared deliverables. |
 | `agt server` | Start, stop, or inspect the task server. |
 | `agt daemon` | Start, stop, inspect, list, or show daemons. |
@@ -175,7 +192,10 @@ agt/
 ├── ids.py         Stable ID derivation (uuid5 from daemon URL)
 ├── cli/           Click command-line interface
 │   ├── main.py    All core commands (probe/run/chat/server/daemon/task/...)
-│   └── sop.py     SOP pipeline commands (validate/submit/run/status/log)
+│   ├── sop.py     SOP pipeline commands (validate/submit/run/status/log)
+│   └── goal.py    Goal orchestration commands (submit/run/status/log/input/
+│                  cancel/artifacts/export)
+├── goal/          Goal-mode prompt templates (orchestrator strategy)
 ├── comm/          HTTP + WebSocket client, WS-RPC link
 ├── daemon/        Runtime registration, task claiming, reverse-dial WS server,
 │                  MCP proxy, running-task tracking, local resource server
@@ -185,9 +205,10 @@ agt/
 │                  resume_detectors, mcp_config profiles
 ├── server/        FastAPI application:
 │   ├── routes/    tasks, jobs, artifacts, identities, sessions, daemons,
-│   │              runtimes, heartbeat, sop
+│   │              runtimes, heartbeat, sop, goal
 │   ├── services/  job lifecycle, spawn orchestration, artifact registry,
-│   │              claim, report, selection, SOP expansion, catalog
+│   │              claim, report, selection, SOP expansion, goal submit/export,
+│   │              catalog
 │   ├── mcp_server MCP runtime catalog (FastMCP)
 │   └── stream_hub SSE pub/sub for remote streaming
 ├── sop/           SOP DSL parsing + static validation
@@ -227,6 +248,7 @@ agt/
 - [New-provider registration guide](<docs/guide%20docs/provider-registration.md>)
 - [Architecture & orchestration design](docs/impl/agent-orchestration-design.md)
 - [SOP design](docs/impl/phase5-sop-design.md)
+- [Goal mode design](docs/impl/goal-mode-design.md)
 - [Dynamic spawn design](docs/impl/phase3-dynamic-spawn-design.md)
 
 ## Development

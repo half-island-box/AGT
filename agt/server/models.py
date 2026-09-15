@@ -96,6 +96,11 @@ class JobModel(Base):
     # blocked jobs have no Step/input_message until activation, yet the
     # activation runs in a later transaction. NULL on non-SOP jobs.
     sop_node: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Goal mode: root-Job metadata JSON — {"mode":"goal","budget":
+    # {max_depth,max_descendants,max_batch},"template":…,"goal":…,
+    # "goal_sha256":…}. Only goal roots write this; children, SOP nodes
+    # and plain tasks stay NULL (budgets then fall back to constants).
+    goal_meta: Mapped[str | None] = mapped_column(Text, nullable=True)
     work_dir: Mapped[str | None] = mapped_column(String(512), nullable=True)
     agent_cwd: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     created_at: Mapped[str] = mapped_column(String(32), nullable=False)

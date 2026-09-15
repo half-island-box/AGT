@@ -80,6 +80,7 @@ async def create_job(
     parents: list[str] | None = None,
     root_job_id: str | None = None,
     sop_node: str | None = None,
+    goal_meta: str | None = None,
 ) -> JobModel:
     """Create a Job and (by default) its first pending Step.
 
@@ -126,6 +127,7 @@ async def create_job(
         work_dir=work_dir,
         agent_cwd=agent_cwd,
         sop_node=sop_node,
+        goal_meta=goal_meta,
         created_at=now,
         updated_at=now,
     )
@@ -403,18 +405,58 @@ async def _dependent_closure(db: AsyncSession, job_id: str) -> list[str]:
     return seen
 
 
-async def _job_depth(db: AsyncSession, job: JobModel) -> int:
+async def _job_depth(
+    db: AsyncSession, job: JobModel, max_depth: int = MAX_TREE_DEPTH
+) -> int:
     """Depth of ``job`` in the Job tree (root = 1), by parent-chain walk.
-    Bounded by MAX_TREE_DEPTH so the walk is trivially cheap."""
+
+    Bounded by ``max_depth`` so the walk stays cheap; the returned depth
+    saturates at ``max_depth + 1`` (sufficient for the spawn depth check).
+    """
     depth = 1
     current = job
-    while current.parent_job_id is not None and depth <= MAX_TREE_DEPTH + 1:
+    while current.parent_job_id is not None and depth <= max_depth + 1:
         parent = await db.get(JobModel, current.parent_job_id)
         if parent is None:
             break
         current = parent
         depth += 1
     return depth
+
+
+async def _goal_budget(
+    db: AsyncSession, root_job_id: str
+) -> tuple[int, int, int]:
+    """Effective spawn budget ``(max_depth, max_descendants, max_batch)``.
+
+    Goal roots persist ``goal_meta.budget`` (see goal_service.py) and so
+    parameterize the tree; non-goal trees fall back to the legacy
+    constants. Values are clamped to >= 1; absent/malformed fields keep
+    the constant (never a crash on a corrupt goal_meta blob).
+    """
+    max_depth, max_descendants, max_batch = (
+        MAX_TREE_DEPTH, MAX_ROOT_CHILDREN, MAX_SPAWN_BATCH,
+    )
+    root = await db.get(JobModel, root_job_id)
+    if root is None or not root.goal_meta:
+        return max_depth, max_descendants, max_batch
+    try:
+        meta = json.loads(root.goal_meta)
+    except (TypeError, ValueError):
+        return max_depth, max_descendants, max_batch
+    budget = meta.get("budget") if isinstance(meta, dict) else None
+    if not isinstance(budget, dict):
+        return max_depth, max_descendants, max_batch
+
+    def _int(key: str, default: int) -> int:
+        val = budget.get(key)
+        return val if isinstance(val, int) and val >= 1 else default
+
+    return (
+        _int("max_depth", MAX_TREE_DEPTH),
+        _int("max_descendants", MAX_ROOT_CHILDREN),
+        _int("max_batch", MAX_SPAWN_BATCH),
+    )
 
 
 async def spawn_children(
@@ -435,24 +477,32 @@ async def spawn_children(
     if not children:
         return []
 
+    # Cumulative root budget (goal mode G3): the goal root's goal_meta
+    # overrides the legacy constants; non-goal trees keep MAX_*.
+    max_depth, max_descendants, max_batch = await _goal_budget(
+        db, parent_job.root_job_id
+    )
+
     # Budget: batch size.
-    if len(children) > MAX_SPAWN_BATCH:
+    if len(children) > max_batch:
         log.warning(
             "spawn batch %d > %d; truncating (parent=%s)",
-            len(children), MAX_SPAWN_BATCH, parent_job.job_id,
+            len(children), max_batch, parent_job.job_id,
         )
-        children = children[:MAX_SPAWN_BATCH]
+        children = children[:max_batch]
 
     # Budget: tree depth — children would exceed the cap → skip all.
-    depth = await _job_depth(db, parent_job)
-    if depth + 1 > MAX_TREE_DEPTH:
+    depth = await _job_depth(db, parent_job, max_depth)
+    if depth + 1 > max_depth:
         log.warning(
             "spawn rejected: depth %d + 1 > %d (parent=%s)",
-            depth, MAX_TREE_DEPTH, parent_job.job_id,
+            depth, max_depth, parent_job.job_id,
         )
         return []
 
-    # Budget: total children under the root.
+    # Budget: total descendants under the root (children + grandchildren …
+    # every spawn row carries a parent_job_id, so the shared-root query
+    # already counts grandchildren and retries).
     existing = (
         await db.execute(
             select(JobModel).where(
@@ -461,10 +511,10 @@ async def spawn_children(
             )
         )
     ).scalars().all()
-    remaining = MAX_ROOT_CHILDREN - len(existing)
+    remaining = max_descendants - len(existing)
     if remaining <= 0:
         log.warning(
-            "spawn rejected: root %s already has %d children",
+            "spawn rejected: root %s already has %d descendants",
             parent_job.root_job_id, len(existing),
         )
         return []

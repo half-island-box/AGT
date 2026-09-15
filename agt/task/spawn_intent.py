@@ -39,6 +39,25 @@ SPAWN_INSTRUCTION = (
     "fails instead of being rerouted."
 )
 
+# ── AGT-ASK: explicit "ask the user" marker (goal mode G2b) ─────────
+#
+# task-type Jobs have no implicit needs_input path (that derivation is
+# chat-only: clean exit ⇒ waiting_input). AGT-ASK is the explicit
+# channel: one JSON line asking a question; the daemon reports
+# outcome=needs_input with the question in outcome_payload. ASK wins
+# over SPAWN when both appear in the same turn.
+
+ASK_PREFIX = "AGT-ASK "
+ASK_LINE_RE = re.compile(r"^AGT-ASK\s+(\{.*\})\s*$")
+
+ASK_INSTRUCTION = (
+    "[agt] If you are genuinely blocked and cannot proceed without the "
+    'user\'s answer, output exactly one line: AGT-ASK {"question": "..."} '
+    "— single-line JSON, no code fences. Use it ONLY when truly blocked; "
+    "the task pauses until answered. Do not combine AGT-ASK with "
+    "AGT-SPAWN in the same turn (the ask wins, spawn intents are dropped)."
+)
+
 
 @dataclass
 class SpawnParseResult:
@@ -113,11 +132,101 @@ def mask_spawn_lines(text: str) -> str:
     )
 
 
+@dataclass
+class AskParseResult:
+    """Outcome of scanning one Step's stdout for AGT-ASK lines."""
+
+    cleaned_stdout: str
+    asked: bool = False
+    question: str | None = None
+
+
+def parse_ask_markers(stdout: str) -> AskParseResult:
+    """Extract the AGT-ASK question and strip marker lines from stdout.
+
+    The first well-formed marker wins (one question per turn); malformed
+    AGT-ASK lines are stripped with a warning. When asked, a
+    ``[agt] waiting for input: …`` summary line is appended so the
+    question stays visible in the reported stdout.
+    """
+    kept: list[str] = []
+    asked = False
+    question: str | None = None
+
+    for line in stdout.splitlines():
+        match = ASK_LINE_RE.match(line)
+        if match is None:
+            if line.startswith(ASK_PREFIX):
+                log.warning("AGT-ASK line is not valid JSON; skipping: %.120s", line)
+                continue
+            kept.append(line)
+            continue
+        if asked:
+            log.warning("multiple AGT-ASK lines; keeping only the first question")
+            continue
+        try:
+            envelope = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            log.warning("AGT-ASK JSON decode failed; skipping line")
+            continue
+        q = envelope.get("question") if isinstance(envelope, dict) else None
+        if not isinstance(q, str) or not q.strip():
+            log.warning("AGT-ASK envelope missing question; skipping")
+            continue
+        asked = True
+        question = q.strip()
+
+    cleaned = "\n".join(kept)
+    if stdout.endswith("\n") and cleaned:
+        cleaned += "\n"
+    if asked:
+        summary = f"[agt] waiting for input: {question}"
+        base = cleaned.rstrip("\n")
+        cleaned = (base + "\n" + summary + "\n") if base else (summary + "\n")
+    return AskParseResult(cleaned_stdout=cleaned, asked=asked, question=question)
+
+
+def derive_marker_outcome(stdout: str) -> tuple[str, str | None, dict | None]:
+    """Terminal-outcome decision over a Step's raw captured stdout.
+
+    Shared by the executor's report path (goal mode G2b). Returns
+    ``(cleaned_stdout, outcome, outcome_payload)``:
+
+    - AGT-ASK present → ``needs_input`` + ``{"ask": {"question": …}}``;
+      ASK wins over SPAWN — spawn envelopes are dropped with a warning
+      (the agent re-emits them after the answer arrives next turn).
+    - AGT-SPAWN envelopes present → ``spawn_subjob`` + children.
+    - neither → ``(stdout, None, None)`` (caller derives as before).
+    """
+    spawn = parse_spawn_markers(stdout)
+    cleaned = spawn.cleaned_stdout if spawn.spawned_count else stdout
+    ask = parse_ask_markers(cleaned)
+    if ask.asked and ask.question is not None:
+        if spawn.spawned_count:
+            log.warning(
+                "AGT-ASK and AGT-SPAWN in the same step; "
+                "ASK wins, spawn envelopes dropped"
+            )
+        return (
+            ask.cleaned_stdout,
+            "needs_input",
+            {"ask": {"question": ask.question}},
+        )
+    if spawn.spawned_count and spawn.children:
+        return cleaned, "spawn_subjob", {"children": spawn.children}
+    return cleaned, None, None
+
+
 __all__ = [
     "SPAWN_PREFIX",
     "SPAWN_INSTRUCTION",
+    "ASK_PREFIX",
+    "ASK_INSTRUCTION",
     "SpawnParseResult",
     "parse_spawn_markers",
+    "AskParseResult",
+    "parse_ask_markers",
+    "derive_marker_outcome",
     "mask_spawn_lines",
     "MAX_BATCH",
 ]

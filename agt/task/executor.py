@@ -267,7 +267,11 @@ class TaskExecutor:
             scan_outputs,
             snapshot_outputs,
         )
-        from .spawn_intent import SPAWN_INSTRUCTION, parse_spawn_markers
+        from .spawn_intent import (
+            ASK_INSTRUCTION,
+            SPAWN_INSTRUCTION,
+            derive_marker_outcome,
+        )
 
         # Phase 3 (D9): server-computed subdir isolates parallel child
         # jobs; root jobs share the Phase 2 directory. The instruction
@@ -278,7 +282,7 @@ class TaskExecutor:
             instruction = OUTPUTS_INSTRUCTION.replace(
                 "'.agt/outputs/'", f"'{task.outputs_subdir}'"
             )
-        instruction = f"{instruction}\n{SPAWN_INSTRUCTION}"
+        instruction = f"{instruction}\n{SPAWN_INSTRUCTION}\n{ASK_INSTRUCTION}"
         outputs_snapshot = snapshot_outputs(outputs_dir)
         # Deliver the deliverables (+spawn) contract through the provider's
         # project-instructions file (CLAUDE.md / AGENTS.md) instead of
@@ -359,16 +363,18 @@ class TaskExecutor:
             if result is not None:
                 try:
                     result.artifacts = scan_outputs(outputs_dir, outputs_snapshot)
-                    # Phase 3: spawn markers — parse envelopes, strip the
-                    # lines from user-visible stdout, set the structured
-                    # outcome. Runs after the artifact scan so spawn text
-                    # never pollutes stdout-derived anything else.
-                    spawn = parse_spawn_markers(result.stdout)
-                    if spawn.spawned_count:
-                        result.stdout = spawn.cleaned_stdout
-                        if spawn.children:
-                            result.outcome = "spawn_subjob"
-                            result.outcome_payload = {"children": spawn.children}
+                    # Phase 3 spawn markers + goal-mode G2b AGT-ASK: strip
+                    # marker lines from user-visible stdout and derive the
+                    # structured outcome (ASK wins over SPAWN). Runs after
+                    # the artifact scan so marker text never pollutes
+                    # stdout-derived anything else.
+                    cleaned, outcome, outcome_payload = derive_marker_outcome(
+                        result.stdout
+                    )
+                    result.stdout = cleaned
+                    if outcome is not None:
+                        result.outcome = outcome
+                        result.outcome_payload = outcome_payload
                 except Exception as exc:
                     log.warning("artifact scan failed: %s", exc)
 
