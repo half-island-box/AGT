@@ -1,0 +1,117 @@
+{
+  "name": "agt-vscode",
+  "displayName": "AGT — Multi-Agent Bridge",
+  "description": "VS Code client for the local agt server: daemons, agent runtimes, chat, SOP and goal orchestration.",
+  "version": "0.1.0",
+  "publisher": "agt",
+  "license": "MIT",
+  "private": true,
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "AI",
+    "Chat",
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "agt",
+          "title": "AGT",
+          "icon": "media/agt.svg"
+        }
+      ]
+    },
+    "views": {
+      "agt": [
+        {
+          "id": "agt.daemons",
+          "name": "Daemons"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "agt.showSettings",
+        "title": "AGT: Open Settings",
+        "icon": "$(settings-gear)"
+      },
+      {
+        "command": "agt.refresh",
+        "title": "AGT: Refresh",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "agt.startServer",
+        "title": "AGT: Start Server"
+      },
+      {
+        "command": "agt.stopServer",
+        "title": "AGT: Stop Server"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "agt.showSettings",
+          "when": "view == agt.daemons",
+          "group": "navigation"
+        },
+        {
+          "command": "agt.refresh",
+          "when": "view == agt.daemons",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "AGT",
+      "properties": {
+        "agt.serverUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8420",
+          "description": "Base URL of the agt server"
+        },
+        "agt.autoStart": {
+          "type": "boolean",
+          "default": true,
+          "description": "Start the agt server automatically when it is unreachable"
+        },
+        "agt.startCommand": {
+          "type": "string",
+          "default": "uv run agt server start --detach",
+          "description": "Shell command used to start the agt server (run in the workspace root)"
+        },
+        "agt.stopCommand": {
+          "type": "string",
+          "default": "uv run agt server stop",
+          "description": "Shell command used to stop the agt server"
+        },
+        "agt.language": {
+          "type": "string",
+          "enum": ["zh", "en"],
+          "default": "zh",
+          "description": "UI language for AGT views (static text only)"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.js --production",
+    "watch": "node esbuild.js --watch",
+    "typecheck": "tsc --noEmit",
+    "dev:web": "node scripts/dev.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.7.0"
+  }
+}

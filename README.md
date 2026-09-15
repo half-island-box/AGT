@@ -35,6 +35,7 @@ It is an experimental Python foundation for a future multi-agent desktop client.
 - **Daemon**: HTTP long-poll or reverse-dial WebSocket (NAT traversal), semaphore-based concurrency (`AGT_MAX_CONCURRENT`), heartbeat + runtime registration.
 - **MCP runtime catalog**: `list_runtimes` tool served at `/mcp/` (Streamable HTTP) so parent agents can discover which daemons/providers are online before spawning children. Claude Code gets it via project `.mcp.json`; Codex via global `~/.codex/config.toml`.
 - **Provider adapters**: command builders, session locators, stream sinks, resume-rejection detectors, and MCP config profiles are registered per provider — adding a new agent means adding a registry row, not touching the executor.
+- **VS Code extension (in development)**: TypeScript client in `vscode/` — activity-bar daemon tree, server lifecycle management, status bar, settings webview, and zh/en UI. It talks to the same HTTP API as the CLI; no Python logic is duplicated.
 
 ## Requirements
 
@@ -99,6 +100,19 @@ agt server stop
 Default: server on `127.0.0.1:8420`, OpenAPI at [http://127.0.0.1:8420/docs](http://127.0.0.1:8420/docs).
 
 Remote daemons connect via HTTP or **reverse-dial WebSocket** (server dials out, NAT-friendly). See the [quick-start guide](<docs/guide%20docs/quick_start.md>).
+
+## VS Code extension (early)
+
+The `vscode/` directory holds a TypeScript UI client for the server (Chat / SOP / Goal modes are being filled in milestone by milestone; currently: server lifecycle, daemon tree, status bar, settings page with zh/en toggle).
+
+```bash
+cd vscode
+npm install
+npm run build       # bundle extension + webview
+npm run dev:web     # browser preview of webviews with mock data (no VS Code needed)
+```
+
+Debug in VS Code: open `vscode/`, run `npm run watch`, press **F5** (Extension Development Host). The extension auto-starts `agt server` (configurable via `agt.startCommand`) and reads daemons from `/api/daemons`.
 
 ## SOP example
 
@@ -215,6 +229,8 @@ agt/
 └── task/          Task executor (3 modes), session store, artifact scanner,
                    spawn intent parser, message renderer
 ```
+
+The TypeScript client lives in `vscode/` with a strict layer split: `src/core` (API client, server lifecycle, i18n — no `vscode` imports, reusable by future hosts like Obsidian) and `src/platform` + `src/webviews` (VS Code-specific UI).
 
 ## Configuration
 
