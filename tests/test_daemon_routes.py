@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 
 from starlette.testclient import TestClient
 
-from agt.server.config import ServerConfig
+from agt.server.config import DaemonTarget, ServerConfig
 from agt.server.database import make_engine, make_session_factory
 from agt.server.main import create_app
 from agt.server.migrate_schema import ensure_schema
@@ -27,12 +27,14 @@ def _stamp(age_seconds: float) -> str:
     return (now - timedelta(seconds=age_seconds)).strftime(TS_FMT)
 
 
-def _build_app(tmp_path) -> tuple[TestClient, callable]:
+def _build_app(tmp_path, daemons=None) -> tuple[TestClient, callable]:
     cfg = ServerConfig(
         host="127.0.0.1", port=8420,
         db_path=str(tmp_path / "daemons.db"), secret=SECRET,
         sessions_json_path=str(tmp_path / "no-sessions.json"),
     )
+    if daemons is not None:
+        cfg.daemons = daemons
     engine = make_engine(cfg)
     factory = make_session_factory(engine)
 
@@ -121,5 +123,48 @@ class TestGet:
         try:
             resp = client.get("/api/daemons/no-such-daemon")
             assert resp.status_code == 404
+        finally:
+            dispose()
+
+
+class TestConfigFileDaemons:
+    """Configured-but-never-seen daemons now appear (union with runtimes)."""
+
+    def _cfg_daemons(self) -> list[DaemonTarget]:
+        return [
+            DaemonTarget(
+                daemon_id="d-cfg",
+                name="cloud",
+                url="ws://h:8422",
+                capabilities=("containers",),
+            )
+        ]
+
+    def test_config_daemon_listed_offline(self, tmp_path) -> None:
+        client, dispose = _build_app(tmp_path, daemons=self._cfg_daemons())
+        try:
+            daemons = client.get("/api/daemons").json()["daemons"]
+            by_id = {d["daemon_id"]: d for d in daemons}
+            # Configured daemon appears first, even with no runtime rows.
+            assert list(by_id) == ["d-cfg", "d1", "d2"]
+            d = by_id["d-cfg"]
+            assert d["online"] is False
+            assert d["runtime_count"] == 0
+            assert d["device_name"] is None
+            assert d["last_seen"] is None
+            assert d["url"] == "ws://h:8422"
+            assert d["capabilities"] == ["containers"]
+        finally:
+            dispose()
+
+    def test_get_config_daemon_not_404(self, tmp_path) -> None:
+        client, dispose = _build_app(tmp_path, daemons=self._cfg_daemons())
+        try:
+            resp = client.get("/api/daemons/d-cfg")
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["online"] is False
+            assert body["runtime_count"] == 0
+            assert body["daemon_name"] == "cloud"
         finally:
             dispose()

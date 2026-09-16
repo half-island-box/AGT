@@ -355,7 +355,7 @@ class SessionResolveOut(BaseModel):
 
 
 class SessionHistoryMessage(BaseModel):
-    """One message in a provider session transcript (remote history echo)."""
+    """One message in a provider session transcript."""
 
     role: str  # "user" | "assistant" | "system"
     content: str
@@ -363,11 +363,11 @@ class SessionHistoryMessage(BaseModel):
 
 
 class SessionHistoryOut(BaseModel):
-    """Transcript of a remote session, read from the owning daemon.
+    """Transcript of a session, read from its owning daemon or local store.
 
-    ``not_implemented`` is True when the daemon's history reader has no
-    support for this session's provider (e.g. cursor) — the CLI then shows
-    the same "not implemented" hint it does for local resumes.
+    ``not_implemented`` is True when the history reader has no support for
+    this session's provider (e.g. cursor) — the CLI then shows the same
+    "not implemented" hint it does for local resumes.
     """
 
     session_id: str
@@ -507,10 +507,11 @@ class DaemonOut(BaseModel):
 
     daemon_id: str
     daemon_name: str | None = None
-    device_name: str
+    # Nullable for configured-but-never-seen daemons (no runtime row yet).
+    device_name: str | None = None
     providers: list[DaemonProviderOut]
     runtime_count: int
-    last_seen: str
+    last_seen: str | None = None
     online: bool
     # Phase A: static config overlay from ``~/.agt/daemons`` — the
     # reverse-dial URL and any declared capability labels. Absent for

@@ -27,6 +27,7 @@ from agt.comm.errors import RPCRejected, WSRPCUnavailable
 from agt.daemon.ws_server import DaemonWsServer
 from agt.server.config import ServerConfig
 from agt.server.daemon_link import DaemonLink
+from agt.server.config import DaemonTarget
 from agt.server.database import make_engine, make_session_factory
 from agt.server.main import create_app
 from agt.server.migrate_schema import ensure_schema
@@ -137,11 +138,12 @@ class TestDaemonLinkGetSessionHistory:
 # ── Server: GET /api/sessions/{sid}/history ──────────────────────────
 
 
-def _build_app(tmp_path: Path):
+def _build_app(tmp_path: Path, *, daemons: list[DaemonTarget] | None = None):
     cfg = ServerConfig(
         host="127.0.0.1", port=8420,
         db_path=str(tmp_path / "server.db"), secret=SECRET,
         sessions_json_path=str(tmp_path / "no-sessions.json"),
+        daemons=daemons or [],
     )
     engine = make_engine(cfg)
     factory = make_session_factory(engine)
@@ -274,6 +276,112 @@ class TestSessionHistoryRoute:
             client.app.state.daemon_links = {"d1": fake}
             resp = client.get("/api/sessions/s1/history")
             assert resp.status_code == 502
+        finally:
+            dispose()
+
+
+class TestLocalDaemonHistoryFallback:
+    def _local_target(self) -> DaemonTarget:
+        return DaemonTarget(
+            daemon_id="local", name="local", url="ws://127.0.0.1:8422"
+        )
+
+    def test_reads_local_provider_transcript_without_link(self, tmp_path) -> None:
+        client, factory, dispose = _build_app(
+            tmp_path, daemons=[self._local_target()]
+        )
+        try:
+            asyncio.run(_seed_task(
+                factory, task_id="t1", session_id="s1", daemon_id="local",
+                provider="claude",
+            ))
+
+            def _fake_load(provider, session_id):
+                assert provider == "claude"
+                assert session_id == "s1"
+                return [Message(role="user", content="local hello", timestamp=1.0)]
+
+            with patch("agt.server.routes.sessions.load_history", _fake_load):
+                resp = client.get("/api/sessions/s1/history")
+
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["not_implemented"] is False
+            assert body["messages"] == [
+                {"role": "user", "content": "local hello", "timestamp": 1.0}
+            ]
+        finally:
+            dispose()
+
+    def test_local_unimplemented_provider_returns_hint(self, tmp_path) -> None:
+        client, factory, dispose = _build_app(
+            tmp_path, daemons=[self._local_target()]
+        )
+        try:
+            asyncio.run(_seed_task(
+                factory, task_id="t1", session_id="s1", daemon_id="local",
+                provider="cursor",
+            ))
+
+            def _fake_load(provider, session_id):
+                raise NotImplementedError("history reader for provider 'cursor'")
+
+            with patch("agt.server.routes.sessions.load_history", _fake_load):
+                resp = client.get("/api/sessions/s1/history")
+
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["messages"] == []
+            assert body["not_implemented"] is True
+        finally:
+            dispose()
+
+    def test_prefers_connected_link_over_local_read(self, tmp_path) -> None:
+        client, factory, dispose = _build_app(
+            tmp_path, daemons=[self._local_target()]
+        )
+        try:
+            asyncio.run(_seed_task(
+                factory, task_id="t1", session_id="s1", daemon_id="local",
+            ))
+            fake = _FakeDaemonLink(result={
+                "messages": [
+                    {"role": "user", "content": "via link", "timestamp": 1.0},
+                ],
+                "not_implemented": False,
+            })
+            client.app.state.daemon_links = {"local": fake}
+
+            def _fail_load(provider, session_id):
+                raise AssertionError("local reader must not run")
+
+            with patch("agt.server.routes.sessions.load_history", _fail_load):
+                resp = client.get("/api/sessions/s1/history")
+
+            assert resp.status_code == 200
+            assert resp.json()["messages"][0]["content"] == "via link"
+            assert fake.calls == [("s1", "claude")]
+        finally:
+            dispose()
+
+    def test_remote_daemon_does_not_use_local_reader(self, tmp_path) -> None:
+        target = DaemonTarget(
+            daemon_id="remote", name="remote", url="ws://example.invalid:8422"
+        )
+        client, factory, dispose = _build_app(tmp_path, daemons=[target])
+        try:
+            asyncio.run(_seed_task(
+                factory, task_id="t1", session_id="s1", daemon_id="remote",
+            ))
+
+            def _fail_load(provider, session_id):
+                raise AssertionError("remote session must not read local store")
+
+            with patch("agt.server.routes.sessions.load_history", _fail_load):
+                resp = client.get("/api/sessions/s1/history")
+
+            assert resp.status_code == 503
+            assert resp.json()["detail"] == "daemon offline"
         finally:
             dispose()
 

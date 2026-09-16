@@ -12,11 +12,15 @@ Two query shapes (Phase 4 Step 3):
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ...agent_history import load_history
 from ...comm.errors import RPCRejected, WSRPCUnavailable, WSRPCUncertain
+from ...net import host_of_url, is_local_host
 from ..database import get_db
 from ..models import JobModel, SessionModel, TaskModel
 from ..schemas import SessionHistoryOut, SessionResolveOut
@@ -181,19 +185,49 @@ async def list_session_artifacts(
     return [artifact_to_out(r) for r in await artifacts_for_job(db, job.job_id)]
 
 
+def _is_local_daemon_target(request: Request, daemon_id: str) -> bool:
+    """Return True when the owning daemon target is on this machine.
+
+    Reverse-dial remains the general path for remote daemons. For a local
+    daemon, however, the Server process can read the same provider store
+    (``~/.claude`` / ``~/.codex``) without requiring a WebSocket link.
+    """
+    cfg = getattr(request.app.state, "config", None)
+    if cfg is None:
+        return False
+    return any(
+        target.daemon_id == daemon_id and is_local_host(host_of_url(target.url))
+        for target in cfg.daemons
+    )
+
+
+async def _read_local_session_history(session_id: str, provider: str) -> dict:
+    """Read a transcript directly from this machine's provider store."""
+    try:
+        messages = await asyncio.to_thread(load_history, provider, session_id)
+    except NotImplementedError:
+        return {"messages": [], "not_implemented": True}
+    return {
+        "messages": [
+            {"role": m.role, "content": m.content, "timestamp": m.timestamp}
+            for m in messages
+        ],
+        "not_implemented": False,
+    }
+
+
 @router.get("/{session_id}/history")
 async def get_session_history(
     session_id: str,
     request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> SessionHistoryOut:
-    """Fetch a remote session's transcript from its owning daemon.
+    """Fetch a session transcript from its owning daemon.
 
-    Backs the CLI's remote ``--resume`` history echo. The transcript lives
-    on the daemon machine, so the Server resolves the session's ``daemon_id``
-    and forwards a ``session.history`` RPC over that daemon's reverse-dial
-    link — it never stores (or returns) transcripts it doesn't currently
-    retrieve on demand.
+    Remote daemons are queried with a ``session.history`` RPC over their
+    reverse-dial link. A daemon configured with a local URL instead falls
+    back to reading this machine's provider transcript directly, so HTTP
+    long-poll local daemons do not need reverse-dial solely to echo history.
 
     Error mapping: 404 = unknown session id; 503 = no owning daemon / link
     offline; 502 = daemon answered but rejected the history RPC.
@@ -228,6 +262,13 @@ async def get_session_history(
     daemon_links = getattr(request.app.state, "daemon_links", {})
     link = daemon_links.get(daemon_id)
     if link is None or not link.connected:
+        if _is_local_daemon_target(request, daemon_id):
+            result = await _read_local_session_history(session_id, provider)
+            return SessionHistoryOut(
+                session_id=session_id,
+                messages=result.get("messages", []),
+                not_implemented=bool(result.get("not_implemented", False)),
+            )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="daemon offline",
@@ -236,6 +277,13 @@ async def get_session_history(
     try:
         result = await link.get_session_history(session_id, provider)
     except (WSRPCUnavailable, WSRPCUncertain):
+        if _is_local_daemon_target(request, daemon_id):
+            result = await _read_local_session_history(session_id, provider)
+            return SessionHistoryOut(
+                session_id=session_id,
+                messages=result.get("messages", []),
+                not_implemented=bool(result.get("not_implemented", False)),
+            )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="daemon offline",
