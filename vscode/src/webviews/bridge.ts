@@ -6,6 +6,10 @@ export interface BootInfo {
   autoStart: boolean;
   startCommand: string;
   stopCommand: string;
+  autoStartDaemon: boolean;
+  daemonStartCommand: string;
+  daemonStopCommand: string;
+  daemonRunning: boolean;
   language: UiLanguage;
   state: ServerState;
   latencyMs: number | null;

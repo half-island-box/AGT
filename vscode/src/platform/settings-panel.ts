@@ -111,6 +111,10 @@ export class SettingsPanel {
       autoStart: cfg.get<boolean>('autoStart'),
       startCommand: cfg.get<string>('startCommand'),
       stopCommand: cfg.get<string>('stopCommand'),
+      autoStartDaemon: cfg.get<boolean>('autoStartDaemon'),
+      daemonStartCommand: cfg.get<string>('daemonStartCommand'),
+      daemonStopCommand: cfg.get<string>('daemonStopCommand'),
+      daemonRunning: lifecycle.daemonRunning(),
       language: this.ctx.language(),
       state: lifecycle.state,
       latencyMs: lifecycle.latencyMs,
@@ -148,7 +152,16 @@ export class SettingsPanel {
         }
         case 'setConfig': {
           const params = msg.params ?? {};
-          const allowed = ['serverUrl', 'autoStart', 'startCommand', 'stopCommand', 'language'];
+          const allowed = [
+            'serverUrl',
+            'autoStart',
+            'startCommand',
+            'stopCommand',
+            'autoStartDaemon',
+            'daemonStartCommand',
+            'daemonStopCommand',
+            'language',
+          ];
           for (const [key, value] of Object.entries(params)) {
             if (allowed.includes(key)) {
               await this.config().update(key, value, vscode.ConfigurationTarget.Global);
@@ -160,6 +173,21 @@ export class SettingsPanel {
         }
         case 'startServer': {
           await this.ctx.lifecycle.ensureStarted();
+          // Same contract as window startup: a server this client started
+          // comes up together with the local daemon (switch permitting).
+          await this.ctx.lifecycle.ensureDaemonStarted();
+          this.ctx.onConfigOrStateChange();
+          result = await this.bootPayload();
+          break;
+        }
+        case 'startDaemon': {
+          await this.ctx.lifecycle.startDaemon();
+          this.ctx.onConfigOrStateChange();
+          result = await this.bootPayload();
+          break;
+        }
+        case 'stopDaemon': {
+          await this.ctx.lifecycle.stopDaemon();
           this.ctx.onConfigOrStateChange();
           result = await this.bootPayload();
           break;

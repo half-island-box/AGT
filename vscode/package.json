@@ -38,6 +38,11 @@
     },
     "commands": [
       {
+        "command": "agt.showChat",
+        "title": "AGT: Open Chat",
+        "icon": "$(comment-discussion)"
+      },
+      {
         "command": "agt.showSettings",
         "title": "AGT: Open Settings",
         "icon": "$(settings-gear)"
@@ -54,10 +59,23 @@
       {
         "command": "agt.stopServer",
         "title": "AGT: Stop Server"
+      },
+      {
+        "command": "agt.startDaemon",
+        "title": "AGT: Start Local Daemon"
+      },
+      {
+        "command": "agt.stopDaemon",
+        "title": "AGT: Stop Local Daemon"
       }
     ],
     "menus": {
       "view/title": [
+        {
+          "command": "agt.showChat",
+          "when": "view == agt.daemons",
+          "group": "navigation"
+        },
         {
           "command": "agt.showSettings",
           "when": "view == agt.daemons",
@@ -92,6 +110,21 @@
           "type": "string",
           "default": "uv run agt server stop",
           "description": "Shell command used to stop the agt server"
+        },
+        "agt.autoStartDaemon": {
+          "type": "boolean",
+          "default": true,
+          "description": "Also start the local daemon when the server is started by the extension"
+        },
+        "agt.daemonStartCommand": {
+          "type": "string",
+          "default": "uv run agt daemon start --detach",
+          "description": "Shell command used to start the local daemon (AGT_SERVER_URL is exported for it)"
+        },
+        "agt.daemonStopCommand": {
+          "type": "string",
+          "default": "uv run agt daemon stop",
+          "description": "Shell command used to stop the local daemon"
         },
         "agt.language": {
           "type": "string",

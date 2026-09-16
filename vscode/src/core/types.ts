@@ -30,6 +30,103 @@ export interface RuntimeInfo {
   daemon_name: string | null;
 }
 
+export interface IdentityInfo {
+  did: string;
+  daemon_id: string;
+  name: string;
+  description: string;
+  capabilities: string[];
+  status: string;
+  visibility: string;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface IdentityBindingInfo {
+  id: number;
+  identity_did: string;
+  daemon_id: string;
+  provider: string;
+  priority: number;
+  is_default: boolean;
+  created_at: string;
+}
+
+export interface IdentityWithBindings extends IdentityInfo {
+  bindings: IdentityBindingInfo[];
+}
+
+export interface ChatSessionInfo {
+  session_id: string;
+  task_id: string;
+  provider: string;
+  identity_did: string | null;
+  dir: string | null;
+  first_prompt: string;
+  last_seen_at: string;
+}
+
+export interface SessionResolveInfo {
+  job_id: string;
+  task_id: string;
+  session_id: string;
+  provider: string;
+  identity_did: string | null;
+  daemon_id: string | null;
+  dir: string | null;
+}
+
+export interface SessionHistoryMessage {
+  role: 'user' | 'assistant' | 'system' | string;
+  content: string;
+  timestamp?: number | null;
+}
+
+export interface SessionHistoryInfo {
+  session_id: string;
+  messages: SessionHistoryMessage[];
+  not_implemented: boolean;
+}
+
+export interface JobInfo {
+  job_id: string;
+  task_id: string;
+  status: string;
+}
+
+export interface JobStatusInfo {
+  job_id: string;
+  status: string;
+  current_step_id: string | null;
+}
+
+export interface TaskStatusInfo {
+  task_id: string;
+  provider: string;
+  status: string;
+  session_id: string | null;
+  exit_code: number | null;
+  stdout: string | null;
+  stderr: string | null;
+  duration: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export type TaskStreamEvent =
+  | { type: 'snapshot'; status: string; stdout: string }
+  | { type: 'delta'; chunk: string }
+  | {
+      type: 'done';
+      status: string;
+      stdout: string;
+      session_id?: string | null;
+      exit_code?: number | null;
+      resume_rejected?: boolean | null;
+      stderr?: string | null;
+    };
+
 export type ServerState = 'unknown' | 'offline' | 'starting' | 'online';
 
 export type UiLanguage = 'zh' | 'en';

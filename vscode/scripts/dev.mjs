@@ -32,13 +32,18 @@ const server = createServer(async (req, res) => {
   const url = new URL(req.url ?? '/', 'http://localhost');
   try {
     if (url.pathname === '/') {
-      res.writeHead(200, { 'content-type': mime['.html'] });
-      res.end(shell('AGT dev preview', '/settings.html', 'about:blank'));
+      res.writeHead(302, { location: '/chat.html' });
+      res.end();
       return;
     }
     if (url.pathname === '/settings.html') {
       res.writeHead(200, { 'content-type': mime['.html'] });
       res.end(shell('AGT Settings', '/dist/webview-settings.js', '/dist/webview-settings.css'));
+      return;
+    }
+    if (url.pathname === '/chat.html') {
+      res.writeHead(200, { 'content-type': mime['.html'] });
+      res.end(shell('AGT Chat', '/dist/webview-chat.js', '/dist/webview-chat.css'));
       return;
     }
     const safe = normalize(url.pathname).replace(/^(\.\.[/\\])+/, '');
@@ -57,5 +62,6 @@ const server = createServer(async (req, res) => {
 
 server.listen(port, '127.0.0.1', () => {
   console.log(`AGT webview preview:`);
+  console.log(`  http://127.0.0.1:${port}/chat.html`);
   console.log(`  http://127.0.0.1:${port}/settings.html`);
 });

@@ -70,6 +70,9 @@ body {
 }
 
 .agd-switch-row { display: flex; align-items: center; gap: 9px; font-size: 12px; margin: 2px 0 12px; }
+.agd-switch-group { display: flex; flex-direction: column; gap: 8px; margin: 2px 0 12px; }
+.agd-switch-group .agd-switch-row { margin: 0; }
+.agd-daemon-state { font-size: 11px; }
 .agd-switch { position: relative; display: inline-block; width: 34px; height: 19px; flex: none; }
 .agd-switch input { opacity: 0; position: absolute; }
 .agd-switch i {
@@ -84,7 +87,7 @@ body {
 .agd-switch input:checked + i { background: var(--vscode-button-background, #3794ff); border-color: transparent; }
 .agd-switch input:checked + i::after { left: 16px; }
 
-.agd-actions { display: flex; gap: 8px; }
+.agd-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 
 .agd-pill {
   display: inline-flex; align-items: center; height: 20px; padding: 0 9px;

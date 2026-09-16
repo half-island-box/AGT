@@ -1,4 +1,17 @@
-import type { DaemonInfo, RuntimeInfo } from './types';
+import type {
+  ChatSessionInfo,
+  DaemonInfo,
+  IdentityBindingInfo,
+  IdentityInfo,
+  IdentityWithBindings,
+  JobInfo,
+  JobStatusInfo,
+  RuntimeInfo,
+  SessionHistoryInfo,
+  SessionResolveInfo,
+  TaskStatusInfo,
+  TaskStreamEvent,
+} from './types';
 
 const DEFAULT_TIMEOUT_MS = 4000;
 
@@ -18,25 +31,52 @@ export class AgtApi {
     this.baseUrl = normalizeBaseUrl(url);
   }
 
-  private async request<T>(path: string, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<T> {
+  private async request<T>(
+    path: string,
+    init: RequestInit = {},
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+  ): Promise<T> {
     const controller = new AbortController();
+    let onAbort: (() => void) | undefined;
+    if (init.signal) {
+      const outer = init.signal;
+      if (outer.aborted) controller.abort(outer.reason);
+      else {
+        onAbort = () => controller.abort(outer.reason);
+        outer.addEventListener('abort', onAbort, { once: true });
+      }
+    }
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const res = await fetch(`${this.baseUrl}${path}`, {
+        ...init,
         signal: controller.signal,
-        headers: { accept: 'application/json' },
+        headers: { accept: 'application/json', ...(init.headers ?? {}) },
       });
       if (!res.ok) {
-        throw new Error(`HTTP ${res.status} ${res.statusText}`);
+        throw new Error(await errorMessage(res));
       }
       return (await res.json()) as T;
     } finally {
+      if (init.signal && onAbort) init.signal.removeEventListener('abort', onAbort);
       clearTimeout(timer);
     }
   }
 
+  private post<T>(path: string, body: unknown, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<T> {
+    return this.request<T>(
+      path,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+      timeoutMs,
+    );
+  }
+
   async health(): Promise<{ status: string }> {
-    return this.request<{ status: string }>('/api/health', 2500);
+    return this.request<{ status: string }>('/api/health', {}, 2500);
   }
 
   async daemons(): Promise<DaemonInfo[]> {
@@ -49,6 +89,116 @@ export class AgtApi {
     return res.runtimes;
   }
 
+  async identities(): Promise<IdentityInfo[]> {
+    const res = await this.request<{ identities: IdentityInfo[] }>('/api/identities');
+    return res.identities;
+  }
+
+  async identityBindings(did: string): Promise<IdentityBindingInfo[]> {
+    const didPath = encodeURIComponent(did);
+    const res = await this.request<{ bindings: IdentityBindingInfo[] }>(
+      `/api/identities/${didPath}/bindings`,
+    );
+    return res.bindings;
+  }
+
+  async identitiesWithBindings(): Promise<IdentityWithBindings[]> {
+    const identities = await this.identities();
+    return Promise.all(
+      identities.map(async (identity) => ({
+        ...identity,
+        bindings: await this.identityBindings(identity.did),
+      })),
+    );
+  }
+
+  async daemonSessions(daemonId: string): Promise<ChatSessionInfo[]> {
+    const id = encodeURIComponent(daemonId);
+    const res = await this.request<{ sessions: ChatSessionInfo[] }>(
+      `/api/daemons/${id}/sessions`,
+    );
+    return res.sessions;
+  }
+
+  async resolveSession(sessionId: string): Promise<SessionResolveInfo> {
+    return this.request<SessionResolveInfo>(
+      `/api/sessions/${encodeURIComponent(sessionId)}`,
+    );
+  }
+
+  async sessionHistory(sessionId: string): Promise<SessionHistoryInfo> {
+    return this.request<SessionHistoryInfo>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/history`,
+    );
+  }
+
+  async createChatJob(input: {
+    prompt: string;
+    provider: string;
+    targetDaemonId: string;
+    identityDid?: string | null;
+    agentCwd?: string | null;
+  }): Promise<JobInfo> {
+    return this.post<JobInfo>('/api/jobs', {
+      prompt: input.prompt,
+      provider: input.provider,
+      target_daemon_id: input.targetDaemonId,
+      identity_did: input.identityDid ?? null,
+      agent_cwd: input.agentCwd ?? null,
+    });
+  }
+
+  async appendChatInput(jobId: string, prompt: string): Promise<JobInfo> {
+    return this.post<JobInfo>(`/api/jobs/${encodeURIComponent(jobId)}/input`, { prompt });
+  }
+
+  async jobStatus(jobId: string): Promise<JobStatusInfo> {
+    return this.request<JobStatusInfo>(`/api/jobs/${encodeURIComponent(jobId)}/status`);
+  }
+
+  async cancelJob(jobId: string): Promise<{ cancelled: boolean }> {
+    return this.post<{ cancelled: boolean }>(
+      `/api/jobs/${encodeURIComponent(jobId)}/cancel`,
+      {},
+    );
+  }
+
+  async taskStatus(taskId: string): Promise<TaskStatusInfo> {
+    return this.request<TaskStatusInfo>(`/api/tasks/${encodeURIComponent(taskId)}/status`);
+  }
+
+  async *streamTask(taskId: string, signal?: AbortSignal): AsyncGenerator<TaskStreamEvent> {
+    const res = await fetch(
+      `${this.baseUrl}/api/tasks/${encodeURIComponent(taskId)}/stream`,
+      { signal, headers: { accept: 'text/event-stream' } },
+    );
+    if (!res.ok) {
+      throw new Error(await errorMessage(res));
+    }
+    if (!res.body) {
+      throw new Error('server returned an empty event stream');
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let boundary = buffer.indexOf('\n\n');
+      while (boundary >= 0) {
+        const frame = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        const event = parseSseFrame(frame);
+        if (event) yield event;
+        boundary = buffer.indexOf('\n\n');
+      }
+    }
+    buffer += decoder.decode();
+    const event = parseSseFrame(buffer);
+    if (event) yield event;
+  }
+
   /** Returns latency in ms, or null when the server is unreachable. */
   async ping(): Promise<number | null> {
     const started = Date.now();
@@ -59,4 +209,38 @@ export class AgtApi {
       return null;
     }
   }
+}
+
+async function errorMessage(res: Response): Promise<string> {
+  try {
+    const body = (await res.json()) as { detail?: unknown; message?: unknown };
+    const detail = body.detail ?? body.message;
+    if (typeof detail === 'string' && detail.trim()) {
+      return `HTTP ${res.status}: ${detail}`;
+    }
+    if (detail) {
+      return `HTTP ${res.status}: ${JSON.stringify(detail)}`;
+    }
+  } catch {
+    // Non-JSON error responses keep the status-line fallback below.
+  }
+  return `HTTP ${res.status} ${res.statusText}`;
+}
+
+function parseSseFrame(frame: string): TaskStreamEvent | undefined {
+  let type = 'message';
+  let data = '';
+  for (const rawLine of frame.split(/\r?\n/)) {
+    if (rawLine.startsWith(':')) continue;
+    if (rawLine.startsWith('event:')) {
+      type = rawLine.slice(6).trim();
+    } else if (rawLine.startsWith('data:')) {
+      data += rawLine.slice(5).trim();
+    }
+  }
+  if (!data || (type !== 'snapshot' && type !== 'delta' && type !== 'done')) {
+    return undefined;
+  }
+  const payload = JSON.parse(data) as Record<string, unknown>;
+  return { type, ...(payload as object) } as TaskStreamEvent;
 }

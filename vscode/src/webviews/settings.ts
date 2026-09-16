@@ -142,13 +142,23 @@ function render(): void {
         <input id="agd-url" class="agd-input agd-mono" value="${esc(boot.serverUrl)}">
         <button type="button" id="agd-test" class="agd-btn" ${busyAction ? 'disabled' : ''}>${busyAction === 'testConnection' ? spinner() : ''}${tr('settings.test')}</button>
       </label>
-      <label class="agd-switch-row">
-        <span class="agd-switch"><input id="agt-auto" type="checkbox" ${boot.autoStart ? 'checked' : ''}><i></i></span>
-        <span>${tr('settings.autoStart')}</span>
-      </label>
+      <div class="agd-switch-group">
+        <label class="agd-switch-row">
+          <span class="agd-switch"><input id="agt-auto" type="checkbox" ${boot.autoStart ? 'checked' : ''}><i></i></span>
+          <span>${tr('settings.autoStart')}</span>
+        </label>
+        <label class="agd-switch-row">
+          <span class="agd-switch"><input id="agt-auto-daemon" type="checkbox" ${boot.autoStartDaemon ? 'checked' : ''}><i></i></span>
+          <span>${tr('settings.autoStartDaemon')}</span>
+        </label>
+      </div>
       <div class="agd-actions">
         <button type="button" id="agd-start" class="agd-btn agd-btn-primary" ${boot.state === 'online' || busyAction ? 'disabled' : ''}>${busyAction === 'startServer' ? spinner() + tr('status.starting') : tr('settings.startServer')}</button>
         <button type="button" id="agd-stop" class="agd-btn" ${boot.state !== 'online' || busyAction ? 'disabled' : ''}>${busyAction === 'stopServer' ? spinner() : ''}${tr('settings.stopServer')}</button>
+        <span class="agd-flex"></span>
+        <span class="agd-dim agd-daemon-state">${boot.daemonRunning ? tr('settings.daemonRunning') : tr('settings.daemonStopped')}</span>
+        <button type="button" id="agd-daemon-start" class="agd-btn" ${boot.daemonRunning || busyAction ? 'disabled' : ''}>${busyAction === 'startDaemon' ? spinner() : ''}${tr('settings.startDaemon')}</button>
+        <button type="button" id="agd-daemon-stop" class="agd-btn" ${!boot.daemonRunning || busyAction ? 'disabled' : ''}>${busyAction === 'stopDaemon' ? spinner() : ''}${tr('settings.stopDaemon')}</button>
       </div>
     </section>
 
@@ -210,6 +220,13 @@ function wireEvents(): void {
     if (boot) boot.autoStart = checked;
     void bridge.call('setConfig', { autoStart: checked });
   });
+  document.getElementById('agt-auto-daemon')?.addEventListener('change', (e) => {
+    const checked = (e.target as HTMLInputElement).checked;
+    if (boot) boot.autoStartDaemon = checked;
+    void bridge.call('setConfig', { autoStartDaemon: checked });
+  });
+  document.getElementById('agd-daemon-start')?.addEventListener('click', () => void call('startDaemon'));
+  document.getElementById('agd-daemon-stop')?.addEventListener('click', () => void call('stopDaemon'));
   document.getElementById('agd-url')?.addEventListener('change', (e) => {
     const url = (e.target as HTMLInputElement).value.trim();
     if (boot) boot.serverUrl = url;
