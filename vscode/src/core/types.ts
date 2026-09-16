@@ -130,3 +130,23 @@ export type TaskStreamEvent =
 export type ServerState = 'unknown' | 'offline' | 'starting' | 'online';
 
 export type UiLanguage = 'zh' | 'en';
+
+/** One DAG node as the server sees it (``POST /api/sop/validate``). */
+export interface SopValidationNode {
+  name: string;
+  depends_on: string[];
+  output: string | null;
+  identity: string | null;
+}
+
+/**
+ * Result of server-side SOP validation. Never a transport error: a failed
+ * validation is ``ok: false`` plus a human-readable ``error``.
+ */
+export interface SopValidation {
+  ok: boolean;
+  name: string | null;
+  nodes: SopValidationNode[];
+  identities: string[];
+  error: string | null;
+}

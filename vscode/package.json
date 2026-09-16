@@ -43,6 +43,20 @@
         "icon": "$(comment-discussion)"
       },
       {
+        "command": "agt.showSop",
+        "title": "AGT: Open SOP Editor",
+        "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "agt.newSop",
+        "title": "AGT: New SOP Template",
+        "icon": "$(new-file)"
+      },
+      {
+        "command": "agt.openSopEditor",
+        "title": "AGT: Open With SOP Editor"
+      },
+      {
         "command": "agt.showSettings",
         "title": "AGT: Open Settings",
         "icon": "$(settings-gear)"
@@ -77,6 +91,16 @@
           "group": "navigation"
         },
         {
+          "command": "agt.showSop",
+          "when": "view == agt.daemons",
+          "group": "navigation"
+        },
+        {
+          "command": "agt.newSop",
+          "when": "view == agt.daemons",
+          "group": "navigation"
+        },
+        {
           "command": "agt.showSettings",
           "when": "view == agt.daemons",
           "group": "navigation"
@@ -84,6 +108,13 @@
         {
           "command": "agt.refresh",
           "when": "view == agt.daemons",
+          "group": "navigation"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "agt.openSopEditor",
+          "when": "resourceExtname == .yaml || resourceExtname == .yml",
           "group": "navigation"
         }
       ]
@@ -128,7 +159,10 @@
         },
         "agt.language": {
           "type": "string",
-          "enum": ["zh", "en"],
+          "enum": [
+            "zh",
+            "en"
+          ],
           "default": "zh",
           "description": "UI language for AGT views (static text only)"
         }
@@ -138,6 +172,10 @@
   "scripts": {
     "build": "node esbuild.js --production",
     "watch": "node esbuild.js --watch",
+    "test:core": "esbuild tests/sop-core.test.ts --bundle --platform=node --format=cjs --outfile=dist/test/sop-core.test.cjs --log-level=warning && node --test dist/test/sop-core.test.cjs",
+    "test:inspector": "esbuild tests/sop-inspector.test.ts --bundle --platform=node --format=cjs --outfile=dist/test/sop-inspector.test.cjs --log-level=warning && node --test dist/test/sop-inspector.test.cjs",
+    "check:sop": "esbuild tests/roundtrip-check.ts --bundle --platform=node --format=cjs --outfile=dist/test/roundtrip-check.cjs --log-level=warning && node dist/test/roundtrip-check.cjs && cd .. && uv run agt sop validate /tmp/agt-sop-roundtrip/edited.sop.yaml",
+    "check:server-endpoint": "esbuild tests/probe-validate-endpoint.ts --bundle --platform=node --format=cjs --outfile=dist/test/probe-validate-endpoint.cjs --log-level=warning && node dist/test/probe-validate-endpoint.cjs",
     "typecheck": "tsc --noEmit",
     "dev:web": "node scripts/dev.mjs"
   },
@@ -146,5 +184,8 @@
     "@types/vscode": "^1.85.0",
     "esbuild": "^0.24.0",
     "typescript": "^5.7.0"
+  },
+  "dependencies": {
+    "yaml": "^2.9.1"
   }
 }

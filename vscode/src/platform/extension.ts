@@ -1,10 +1,13 @@
 import * as vscode from 'vscode';
+import { readFileSync } from 'node:fs';
 import { ServerLifecycle } from '../core/lifecycle';
 import type { DaemonInfo, UiLanguage } from '../core/types';
 import { AgtStatusBar } from './statusbar';
 import { AgtTreeProvider } from './tree';
 import { SettingsPanel, type BridgeContext } from './settings-panel';
 import { ChatPanel, type ChatBridgeContext } from './chat-panel';
+import { looksLikeSop } from '../core/sop/document';
+import { SopEditorPanel, type SopBridgeContext } from './sop-editor-panel';
 
 interface AgtConfig {
   serverUrl: string;
@@ -98,7 +101,49 @@ export function activate(context: vscode.ExtensionContext): void {
       );
     },
     openSettings: () => SettingsPanel.show(bridgeContext),
+    openSop: () => openSopEditor(),
   };
+  const sopContext: SopBridgeContext = {
+    extensionUri: context.extensionUri,
+    context,
+    lifecycle,
+    language: () => language,
+    setLanguage: async (next) => {
+      await vscode.workspace.getConfiguration('agt').update(
+        'language',
+        next,
+        vscode.ConfigurationTarget.Global,
+      );
+    },
+    openChat: () => ChatPanel.show(chatContext),
+    openSettings: () => SettingsPanel.show(bridgeContext),
+  };
+
+  /** Only YAML that plausibly is a SOP is worth opening in the editor. */
+  function isSopCandidate(uri: vscode.Uri): boolean {
+    if (uri.scheme !== 'file' || !/\.ya?ml$/i.test(uri.fsPath)) {
+      return false;
+    }
+    if (/\.sop\.ya?ml$/i.test(uri.fsPath)) {
+      return true;
+    }
+    try {
+      return looksLikeSop(readFileSync(uri.fsPath, 'utf8'));
+    } catch {
+      return false;
+    }
+  }
+
+  function openSopEditor(uri?: vscode.Uri): void {
+    let target = uri;
+    if (!target) {
+      const active = vscode.window.activeTextEditor?.document.uri;
+      if (active && isSopCandidate(active)) {
+        target = active;
+      }
+    }
+    SopEditorPanel.show(sopContext, target);
+  }
 
   const pollTimer = setInterval(() => void refresh(), 15000);
 
@@ -108,6 +153,11 @@ export function activate(context: vscode.ExtensionContext): void {
     treeView,
     vscode.commands.registerCommand('agt.showSettings', () => SettingsPanel.show(bridgeContext)),
     vscode.commands.registerCommand('agt.showChat', () => ChatPanel.show(chatContext)),
+    vscode.commands.registerCommand('agt.showSop', () => openSopEditor()),
+    vscode.commands.registerCommand('agt.openSopEditor', (uri?: vscode.Uri) =>
+      openSopEditor(uri),
+    ),
+    vscode.commands.registerCommand('agt.newSop', () => void SopEditorPanel.newSop(sopContext)),
     vscode.commands.registerCommand('agt.refresh', () => void refresh({ ensure: false })),
     vscode.commands.registerCommand('agt.startServer', () => void refresh({ ensure: true })),
     vscode.commands.registerCommand('agt.stopServer', async () => {
@@ -130,6 +180,7 @@ export function activate(context: vscode.ExtensionContext): void {
       language = config.language;
       lifecycle.updateOptions(config);
       ChatPanel.notifyLanguage(config.language);
+      SopEditorPanel.notifyLanguage(config.language);
       void refresh();
     }),
     { dispose: () => clearInterval(pollTimer) },

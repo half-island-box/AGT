@@ -1,0 +1,818 @@
+import './sop-editor.css';
+import { t, type MessageKey } from '../core/i18n';
+import { issues as localIssues, wouldCycle } from '../core/sop/graph';
+import { computeLayout, type SopPoint } from '../core/sop/layout';
+import { buildOptions, renderOptions } from '../core/sop/options';
+import type { EditIntent, SopDoc, SopIssue, SopNode } from '../core/sop/model';
+import type { ServerState, UiLanguage } from '../core/types';
+import { SopCanvas } from './sop-canvas';
+import { bridge } from './bridge';
+
+interface SopTemplateInfo {
+  path: string;
+  label: string;
+  nodeCount: number;
+}
+
+interface SopDaemonOption {
+  id: string;
+  label: string;
+  online: boolean;
+  providers: string[];
+}
+
+interface SopBoot {
+  language: UiLanguage;
+  state: ServerState;
+  templatePath: string | null;
+  templates: SopTemplateInfo[];
+  daemons: SopDaemonOption[];
+  model: SopDoc | null;
+  text: string;
+  dirty: boolean;
+  positions: Record<string, SopPoint>;
+  parseError: string | null;
+}
+
+interface ServerValidation {
+  ok: boolean;
+  error: string | null;
+  /** The host could not reach the server, so no verdict is available. */
+  offline?: boolean;
+  /** The running server does not expose /api/sop/validate (older build). */
+  stale?: boolean;
+  at: number;
+}
+
+type NodeField = 'name' | 'identity' | 'input' | 'output' | 'provider' | 'daemon' | 'dir';
+
+let boot: SopBoot | null = null;
+let lang: UiLanguage = 'zh';
+let selected: string | null = null;
+let positions: Record<string, SopPoint> = {};
+let validation: ServerValidation | null = null;
+let busy: 'save' | 'validate' | null = null;
+let toast: { text: string; kind: 'info' | 'error' } | null = null;
+let showPreview = false;
+let pendingImpact:
+  | { kind: 'deleteNode'; name: string; dependents: string[]; placeholders: string[] }
+  | null = null;
+let canvas: SopCanvas | null = null;
+let view: { scale: number; offset: SopPoint } | undefined;
+let viewInitialized = false;
+let layoutTimer: number | null = null;
+let newIdentityAlias: string | null = null;
+
+function tr(key: MessageKey, vars?: Record<string, string | number>): string {
+  return t(lang, key, vars);
+}
+
+function esc(value: unknown): string {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;');
+}
+
+function model(): SopDoc | null {
+  return boot?.model ?? null;
+}
+
+function selectedNode(): SopNode | null {
+  return model()?.nodes.find((node) => node.name === selected) ?? null;
+}
+
+function nodeIssues(node: SopNode): SopIssue[] {
+  return allIssues().filter((issue) => issue.node === node.name);
+}
+
+function allIssues(): SopIssue[] {
+  const doc = model();
+  if (!doc) {
+    return [];
+  }
+  const list = localIssues(doc);
+  if (validation && !validation.ok) {
+    const detail = validation.offline
+      ? tr('sop.serverOffline')
+      : validation.stale
+        ? tr('sop.validateStale')
+        : validation.error ?? tr('sop.validFail');
+    list.push({ level: 'error', message: `${tr('sop.sourceServer')}: ${detail}` });
+  }
+  return list;
+}
+
+function applyBoot(next: SopBoot): void {
+  boot = next;
+  lang = next.language;
+  // Local drags win over the values echoed back by the host (workspace
+  // state is written on a debounce, so its copy can lag a drag).
+  const merged: Record<string, SopPoint> = {};
+  const computed = next.model ? computeLayout(next.model) : {};
+  for (const node of next.model?.nodes ?? []) {
+    merged[node.name] = positions[node.name] ?? next.positions[node.name] ?? computed[node.name];
+  }
+  positions = merged;
+  if (selected && !next.model?.nodes.some((node) => node.name === selected)) {
+    selected = null;
+  }
+}
+
+function flash(text: string, kind: 'info' | 'error' = 'info'): void {
+  toast = { text, kind };
+  render();
+  window.setTimeout(() => {
+    toast = null;
+    render();
+  }, 2400);
+}
+
+/**
+ * Selection changes must NOT rebuild the canvas: the pointer is still down
+ * while dragging a node, and re-rendering would replace the element the
+ * drag is attached to. Only the highlight and the inspector are refreshed.
+ */
+function refreshSelectionUI(): void {
+  for (const element of document.querySelectorAll<HTMLElement>('.agd-sop-node')) {
+    element.classList.toggle('is-selected', element.dataset.node === selected);
+  }
+  const inspector = document.querySelector('.agd-sop-inspector');
+  if (inspector) {
+    inspector.innerHTML = renderInspector();
+    wireInspector();
+  }
+}
+
+async function call(method: string, params?: Record<string, unknown>): Promise<void> {
+  try {
+    const result = await bridge.call<SopBoot>(method, params);
+    if (result && typeof result === 'object' && 'templates' in result) {
+      applyBoot(result);
+    }
+    render();
+  } catch (err) {
+    flash(String(err instanceof Error ? err.message : err), 'error');
+  }
+}
+
+async function apply(intent: EditIntent): Promise<boolean> {
+  try {
+    const result = await bridge.call<SopBoot>('sop.apply', { intent });
+    applyBoot(result);
+    render();
+    return true;
+  } catch (err) {
+    flash(String(err instanceof Error ? err.message : err), 'error');
+    return false;
+  }
+}
+
+/** Ask the server to validate the document (the DSL authority). */
+async function runValidate(): Promise<void> {
+  busy = 'validate';
+  render();
+  try {
+    const result = await bridge.call<ServerValidation>('sop.validate');
+    validation = { ...result, at: Date.now() };
+  } catch (err) {
+    validation = {
+      ok: false,
+      error: String(err instanceof Error ? err.message : err),
+      at: Date.now(),
+    };
+  } finally {
+    busy = null;
+    render();
+  }
+}
+
+function persistLayout(next: Record<string, SopPoint>): void {
+  positions = next;
+  if (layoutTimer !== null) {
+    window.clearTimeout(layoutTimer);
+  }
+  layoutTimer = window.setTimeout(() => {
+    void bridge.call('sop.setLayout', { positions });
+  }, 400);
+}
+
+/* ── rendering ─────────────────────────────────────────────────────── */
+
+function render(): void {
+  const root = document.getElementById('agt-root');
+  if (!root) {
+    return;
+  }
+  if (!boot) {
+    root.innerHTML = `<div class="agd-sop-loading">…</div>`;
+    return;
+  }
+  const doc = model();
+  root.innerHTML = `
+  <div class="agd-sop">
+    <header class="agd-sop-head">
+      <div class="agd-sop-brand"><span>AGT</span><small>${tr('sop.title')}</small></div>
+      <nav class="agd-modes" aria-label="AGT modes">
+        <button type="button" class="agd-mode" data-mode="chat">${tr('mode.chat')}</button>
+        <button type="button" class="agd-mode agd-mode-active">${tr('mode.sop')}</button>
+        <button type="button" class="agd-mode" disabled title="${tr('chat.goalComing')}">${tr('mode.goal')}</button>
+      </nav>
+      <div class="agd-sop-tools">
+        <span class="agd-sop-doc">${doc ? esc(boot.templatePath ?? '') : ''}</span>
+        <span class="agd-sop-dirty">${boot.dirty ? tr('sop.unsaved') : ''}</span>
+        <button type="button" class="agd-icon-btn" id="agd-sop-lang">${tr('settings.langToggle')}</button>
+        <button type="button" class="agd-icon-btn" id="agd-sop-settings" title="${tr('chat.openSettings')}">⚙</button>
+      </div>
+    </header>
+    <div class="agd-sop-body">
+      <aside class="agd-sop-side">
+        ${renderTemplates()}
+        ${renderIdentities(doc)}
+      </aside>
+      <section class="agd-sop-main">
+        ${renderToolbar()}
+        <div class="agd-sop-canvas" id="agd-sop-canvas"></div>
+        ${showPreview ? renderPreview() : ''}
+        ${renderProblems()}
+      </section>
+      <aside class="agd-sop-inspector">
+        ${renderInspector()}
+      </aside>
+    </div>
+    ${toast ? `<div class="agd-sop-toast ${toast.kind === 'error' ? 'is-error' : ''}">${esc(toast.text)}</div>` : ''}
+    ${pendingImpact ? renderImpact() : ''}
+  </div>`;
+
+  mountCanvas();
+  wireEvents();
+  wireInspector();
+}
+
+function renderTemplates(): string {
+  const templates = boot?.templates ?? [];
+  const rows = templates
+    .map(
+      (template) => `
+      <button type="button" class="agd-sop-template ${template.path === boot?.templatePath ? 'is-active' : ''}" data-template="${esc(template.path)}">
+        <span>${esc(template.label)}</span>
+        <small>${tr('sop.nodeCount', { count: template.nodeCount })}</small>
+      </button>`,
+    )
+    .join('');
+  return `
+  <div class="agd-sop-card">
+    <div class="agd-sop-card-head">
+      <span>${tr('sop.templates')}</span>
+      <span class="agd-flex"></span>
+      <button type="button" class="agd-mini-btn" id="agd-sop-new" title="${tr('sop.newSop')}">+</button>
+    </div>
+    ${rows || `<p class="agd-sop-empty">${tr('sop.noTemplates')}</p>`}
+  </div>`;
+}
+
+function renderIdentities(doc: SopDoc | null): string {
+  if (!doc) {
+    return '';
+  }
+  const rows = doc.identities
+    .map(
+      (identity) => `
+      <div class="agd-sop-identity" data-alias="${esc(identity.alias)}">
+        <div class="agd-sop-identity-head">
+          <span class="agd-mono">${esc(identity.alias)}</span>
+          <button type="button" class="agd-mini-btn" data-identity-delete="${esc(identity.alias)}">×</button>
+        </div>
+        <label>${tr('sop.identityDid')}<input class="agd-input agd-mono" data-identity-field="did" data-alias="${esc(identity.alias)}" value="${esc(identity.did)}"></label>
+        <label>${tr('sop.identityProvider')}<input class="agd-input" data-identity-field="provider" data-alias="${esc(identity.alias)}" value="${esc(identity.provider)}"></label>
+      </div>`,
+    )
+    .join('');
+  return `
+  <div class="agd-sop-card">
+    <div class="agd-sop-card-head">
+      <span>${tr('sop.identities')}</span>
+      <span class="agd-flex"></span>
+      <button type="button" class="agd-mini-btn" id="agd-sop-identity-add" title="${tr('sop.addIdentity')}">+</button>
+    </div>
+    ${rows || `<p class="agd-sop-empty">—</p>`}
+    ${
+      newIdentityAlias !== null
+        ? `<div class="agd-sop-identity is-new">
+             <input class="agd-input agd-mono" id="agd-sop-identity-new" placeholder="${tr('sop.identityAlias')}" value="${esc(newIdentityAlias)}">
+           </div>`
+        : ''
+    }
+  </div>`;
+}
+
+function renderToolbar(): string {
+  return `
+  <div class="agd-sop-toolbar">
+    <button type="button" class="agd-btn" id="agd-sop-add">${tr('sop.addNode')}</button>
+    <button type="button" class="agd-btn" id="agd-sop-layout">${tr('sop.autoLayout')}</button>
+    <button type="button" class="agd-btn" id="agd-sop-fit">${tr('sop.fit')}</button>
+    <button type="button" class="agd-btn" id="agd-sop-zoom-out">−</button>
+    <button type="button" class="agd-btn" id="agd-sop-zoom-in">+</button>
+    <span class="agd-flex"></span>
+    <button type="button" class="agd-btn" id="agd-sop-preview">${showPreview ? '▾ ' : '▸ '}${tr('sop.preview')}</button>
+    <button type="button" class="agd-btn" id="agd-sop-yaml">${tr('sop.openYaml')}</button>
+    <button type="button" class="agd-btn" id="agd-sop-validate" ${busy ? 'disabled' : ''}>${busy === 'validate' ? tr('sop.validating') : tr('sop.validate')}</button>
+    <button type="button" class="agd-btn agd-btn-primary" id="agd-sop-save" ${busy || !boot?.dirty ? 'disabled' : ''}>${busy === 'save' ? '…' : tr('sop.save')}</button>
+  </div>`;
+}
+
+function renderPreview(): string {
+  return `<pre class="agd-sop-preview"><code>${esc(boot?.text ?? '')}</code></pre>`;
+}
+
+function renderProblems(): string {
+  const list = allIssues();
+  if (list.length === 0) {
+    return `<div class="agd-sop-problems"><div class="agd-sop-card-head"><span>${tr('sop.problems')}</span><span class="agd-flex"></span><span class="agd-sop-ok">${tr('sop.noProblems')}</span></div></div>`;
+  }
+  const rows = list
+    .map(
+      (issue) => `
+      <button type="button" class="agd-sop-problem is-${issue.level}" ${issue.node ? `data-problem-node="${esc(issue.node)}"` : ''}>
+        <span class="agd-sop-level">${issue.level === 'error' ? tr('sop.level.error') : issue.level === 'warning' ? tr('sop.level.warning') : tr('sop.level.info')}</span>
+        <span>${esc(issue.message)}</span>
+      </button>`,
+    )
+    .join('');
+  return `
+  <div class="agd-sop-problems">
+    <div class="agd-sop-card-head">
+      <span>${tr('sop.problems')}</span>
+      <span class="agd-flex"></span>
+      <small class="agd-dim">${validation ? (validation.ok ? tr('sop.validOk') : tr('sop.validFail')) : tr('sop.sourceLocal')}</small>
+    </div>
+    ${
+      validation?.stale
+        ? `<div class="agd-sop-stale"><button type="button" class="agd-btn agd-btn-primary" id="agd-sop-restart-server">${tr('sop.restartServer')}</button></div>`
+        : ''
+    }
+    ${rows}
+  </div>`;
+}
+
+function renderInspector(): string {
+  const node = selectedNode();
+  if (!node) {
+    return `
+    <div class="agd-sop-card">
+      <div class="agd-sop-card-head"><span>${tr('sop.inspector')}</span></div>
+      <p class="agd-sop-empty">${tr('sop.noSelection')}</p>
+    </div>`;
+  }
+  const doc = model() as SopDoc;
+  // Always display the value the document holds — an alias that was deleted
+  // from `identities` must still show up (as the current value) instead of
+  // silently collapsing to 「不指定」.
+  const identityOptions = renderOptions(
+    buildOptions({
+      values: doc.identities.map((identity) => identity.alias),
+      current: node.identity,
+      noneLabel: tr('sop.field.none'),
+      unmatchedLabel: (alias) => tr('sop.identityCurrent', { name: alias }),
+    }),
+    esc,
+  );
+  const candidates = doc.nodes.filter((other) => other.name !== node.name);
+  const deps = node.dependsOn
+    .map(
+      (dep) => `
+      <span class="agd-sop-dep">${esc(dep)}<button type="button" class="agd-mini-btn" data-dep-remove="${esc(dep)}">×</button></span>`,
+    )
+    .join('') || `<span class="agd-dim">—</span>`;
+  const addable = candidates.filter((other) => !node.dependsOn.includes(other.name));
+  const addOptions = [
+    `<option value="">${tr('sop.addDependency')}</option>`,
+    ...addable.map((other) => `<option value="${esc(other.name)}">${esc(other.name)}</option>`),
+  ].join('');
+  const selectedDaemon = (boot?.daemons ?? []).find((d) => d.id === node.daemon);
+
+  // Daemon pinning is validated server-side at submit
+  // (``_validate_explicit_targets``): a pinned daemon needs a provider, and
+  // that provider must have a live runtime on it. Surface it here instead of
+  // letting the user find out when the run is rejected.
+  const pinProblems: SopIssue[] = [];
+  if (node.daemon !== '' && node.provider === '') {
+    pinProblems.push({ level: 'warning', message: tr('sop.pinNeedsProvider') });
+  } else if (
+    node.daemon !== '' &&
+    node.provider !== '' &&
+    selectedDaemon &&
+    !selectedDaemon.providers.includes(node.provider)
+  ) {
+    pinProblems.push({
+      level: 'warning',
+      message: tr('sop.pinProviderMissing', {
+        daemon: selectedDaemon.label,
+        name: node.provider,
+      }),
+    });
+  }
+  const nodeProblems = [...nodeIssues(node), ...pinProblems];
+
+  return `
+  <div class="agd-sop-card">
+    <div class="agd-sop-card-head">
+      <span>${tr('sop.inspector')}</span>
+      <span class="agd-flex"></span>
+      <button type="button" class="agd-mini-btn is-danger" id="agd-sop-delete-node" title="${tr('sop.deleteNode')}">🗑</button>
+    </div>
+    ${
+      nodeProblems.length > 0
+        ? `<div class="agd-sop-node-problems">${nodeProblems
+            .map((issue) => `<p class="is-${issue.level}">${esc(issue.message)}</p>`)
+            .join('')}</div>`
+        : ''
+    }
+    <label class="agd-sop-field">${tr('sop.field.name')}<input class="agd-input agd-mono" id="agd-sop-node-name" value="${esc(node.name)}"></label>
+    <label class="agd-sop-field">${tr('sop.field.identity')}<select class="agd-input" id="agd-sop-node-identity">${identityOptions}</select></label>
+    <label class="agd-sop-field">${tr('sop.field.input')}<textarea class="agd-input agd-sop-textarea" id="agd-sop-node-input" rows="5" placeholder="${tr('sop.field.inputPh')}">${esc(node.input)}</textarea></label>
+    <label class="agd-sop-field">${tr('sop.field.output')}<input class="agd-input agd-mono" id="agd-sop-node-output" value="${esc(node.output)}"></label>
+    <label class="agd-sop-field">
+      <span>${tr('sop.field.daemon')}</span>
+      <select class="agd-input agd-mono" id="agd-sop-node-daemon">${daemonOptions(node)}</select>
+      <small class="agd-dim">${selectedDaemon ? esc(selectedDaemon.id) : ''}</small>
+    </label>
+    <label class="agd-sop-field">
+      <span>${tr('sop.field.provider')}</span>
+      <select class="agd-input agd-mono" id="agd-sop-node-provider">${providerOptions(node)}</select>
+      <small class="agd-dim">${pinHint(node)}</small>
+    </label>
+    <label class="agd-sop-field">${tr('sop.field.dir')}<input class="agd-input agd-mono" id="agd-sop-node-dir" value="${esc(node.dir)}"></label>
+    <div class="agd-sop-field">
+      <span>${tr('sop.dependencies')}</span>
+      <div class="agd-sop-deps">${deps}</div>
+      <select class="agd-input" id="agd-sop-dep-add">${addOptions}</select>
+    </div>
+  </div>`;
+}
+
+function renderImpact(): string {
+  const lines: string[] = [];
+  if (pendingImpact && pendingImpact.dependents.length > 0) {
+    lines.push(tr('sop.impact.dependents', { nodes: pendingImpact.dependents.join(', ') }));
+  }
+  if (pendingImpact && pendingImpact.placeholders.length > 0) {
+    lines.push(
+      tr('sop.impact.placeholders', { nodes: pendingImpact.placeholders.join(', ') }),
+    );
+  }
+  return `
+  <div class="agd-sop-modal">
+    <div class="agd-sop-modal-body">
+      <h3>${tr('sop.impact.title')}</h3>
+      ${lines.map((line) => `<p>${esc(line)}</p>`).join('') || '<p>—</p>'}
+      <div class="agd-actions">
+        <button type="button" class="agd-btn agd-btn-primary" id="agd-sop-impact-confirm">${tr('sop.impact.confirm')}</button>
+        <button type="button" class="agd-btn" id="agd-sop-impact-cancel">${tr('sop.impact.cancel')}</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+/** Daemon select: value is the ``daemon_id`` the DSL expects. */
+function daemonOptions(node: SopNode): string {
+  const daemons = boot?.daemons ?? [];
+  const options = buildOptions({
+    values: daemons.map((daemon) => daemon.id),
+    current: node.daemon,
+    noneLabel: daemons.length === 0 ? tr('sop.noDaemons') : tr('sop.field.none'),
+    unmatchedLabel: (id) => tr('sop.daemonCurrent', { name: id }),
+  });
+  // Friendly labels (display name + offline marker) on top of the shared
+  // option list, which owns the selected/current-value semantics.
+  const byId = new Map(daemons.map((daemon) => [daemon.id, daemon]));
+  return options
+    .map((option) => {
+      const daemon = byId.get(option.value);
+      const label = daemon
+        ? `${daemon.label}${daemon.online ? '' : ` · ${tr('sop.daemonOffline')}`}`
+        : option.label;
+      return `<option value="${esc(option.value)}"${option.selected ? ' selected' : ''}>${esc(label)}</option>`;
+    })
+    .join('');
+}
+
+/**
+ * Provider select, scoped to the pinned daemon: choosing a daemon narrows
+ * the list to the providers that daemon actually registered. Without a
+ * pin the list is the union across daemons, and the current value is always
+ * kept selectable so an offline provider is never silently dropped.
+ */
+function providerOptions(node: SopNode): string {
+  const daemons = boot?.daemons ?? [];
+  const selectedDaemon = daemons.find((daemon) => daemon.id === node.daemon);
+  const names = selectedDaemon
+    ? selectedDaemon.providers
+    : [...new Set(daemons.flatMap((daemon) => daemon.providers))].sort();
+  return renderOptions(
+    buildOptions({
+      values: names,
+      current: node.provider,
+      noneLabel: tr('sop.field.none'),
+      unmatchedLabel: (name) => tr('sop.providerCurrent', { name }),
+    }),
+    esc,
+  );
+}
+
+/** One-line explanation of where the provider list came from. */
+function pinHint(node: SopNode): string {
+  const daemons = boot?.daemons ?? [];
+  const selectedDaemon = daemons.find((daemon) => daemon.id === node.daemon);
+  if (node.daemon !== '' && selectedDaemon) {
+    return tr('sop.providerFromDaemon', { daemon: selectedDaemon.label });
+  }
+  return daemons.length > 0 ? tr('sop.providerFromAll') : '';
+}
+
+function mountCanvas(): void {
+  const host = document.getElementById('agd-sop-canvas');
+  if (!host) {
+    canvas = null;
+    return;
+  }
+  if (canvas) {
+    view = canvas.getView();
+  }
+  const doc = model();
+  const options = {
+    editable: true,
+    nodes: (doc?.nodes ?? []).map((node) => {
+      const problems = nodeIssues(node);
+      return {
+        name: node.name,
+        subtitle: node.identity || node.provider || '—',
+        badge: node.output ? `→ ${node.output}` : '',
+        selected: node.name === selected,
+        problem: problems.some((i) => i.level === 'error')
+          ? ('error' as const)
+          : problems.some((i) => i.level === 'warning')
+            ? ('warning' as const)
+            : problems.length > 0
+              ? ('info' as const)
+              : null,
+      };
+    }),
+    edges: (doc?.nodes ?? []).flatMap((node) =>
+      node.dependsOn.map((dep) => ({ from: dep, to: node.name })),
+    ),
+    positions,
+    selected,
+    view,
+    onSelect: (name: string | null) => {
+      selected = name;
+      refreshSelectionUI();
+    },
+    onConnect: (from: string, to: string): boolean => {
+      if (!doc || wouldCycle(doc, to, from)) {
+        flash(tr('sop.cycleBlocked'), 'error');
+        return false;
+      }
+      void apply({ kind: 'addDependency', node: to, dependsOn: from });
+      return true;
+    },
+    onDeleteEdge: (from: string, to: string) => {
+      void apply({ kind: 'removeDependency', node: to, dependsOn: from });
+    },
+    onMove: (name: string, point: SopPoint) => {
+      persistLayout({ ...positions, [name]: point });
+    },
+    onRename: (name: string) => {
+      selected = name;
+      refreshSelectionUI();
+      document.getElementById('agd-sop-node-name')?.focus();
+    },
+    onAddNode: () => {
+      void apply({ kind: 'addNode', after: selected });
+    },
+  };
+  // The webview re-renders its whole root on every edit, so the host element
+  // is new each time: build a fresh canvas (carrying the saved view) instead
+  // of updating a detached instance.
+  canvas = new SopCanvas(host, options);
+  canvas.render();
+  if (!viewInitialized) {
+    viewInitialized = true;
+    canvas.fit();
+  }
+}
+
+/* ── events ────────────────────────────────────────────────────────── */
+
+function wireEvents(): void {
+  document.querySelector('[data-mode="chat"]')?.addEventListener('click', () => void bridge.call('openChat'));
+  document.getElementById('agd-sop-lang')?.addEventListener('click', async () => {
+    lang = lang === 'zh' ? 'en' : 'zh';
+    render();
+    await bridge.call('setLanguage', { language: lang });
+  });
+  document.getElementById('agd-sop-settings')?.addEventListener('click', () => void bridge.call('openSettings'));
+  document.getElementById('agd-sop-new')?.addEventListener('click', () => void call('sop.newSop'));
+  document.querySelectorAll<HTMLElement>('[data-template]').forEach((element) => {
+    element.addEventListener('click', () =>
+      void call('sop.openTemplate', { path: element.dataset.template }),
+    );
+  });
+  document.getElementById('agd-sop-add')?.addEventListener('click', () =>
+    void apply({ kind: 'addNode', after: selected }),
+  );
+  document.getElementById('agd-sop-layout')?.addEventListener('click', () => {
+    const doc = model();
+    if (!doc) {
+      return;
+    }
+    const next = computeLayout(doc, {});
+    positions = next;
+    persistLayout(next);
+    canvas?.update({}, next);
+    canvas?.fit();
+  });
+  document.getElementById('agd-sop-fit')?.addEventListener('click', () => canvas?.fit());
+  document.getElementById('agd-sop-zoom-in')?.addEventListener('click', () => canvas?.zoom(0.1));
+  document.getElementById('agd-sop-zoom-out')?.addEventListener('click', () => canvas?.zoom(-0.1));
+  document.getElementById('agd-sop-preview')?.addEventListener('click', () => {
+    showPreview = !showPreview;
+    render();
+  });
+  document.getElementById('agd-sop-yaml')?.addEventListener('click', () => void call('sop.revealYaml'));
+  document.getElementById('agd-sop-validate')?.addEventListener('click', () => void runValidate());
+  document.getElementById('agd-sop-restart-server')?.addEventListener('click', async () => {
+    busy = 'validate';
+    render();
+    let restarted = false;
+    try {
+      const res = await bridge.call<{ ok: boolean }>('sop.restartServer');
+      restarted = res?.ok === true;
+    } catch (err) {
+      flash(String(err instanceof Error ? err.message : err), 'error');
+    } finally {
+      busy = null;
+    }
+    if (!restarted) {
+      flash(tr('sop.restartFailed'), 'error');
+      render();
+      return;
+    }
+    await call('sop.boot');
+    await runValidate();
+  });
+  document.getElementById('agd-sop-save')?.addEventListener('click', async () => {
+    busy = 'save';
+    render();
+    try {
+      await call('sop.save');
+    } finally {
+      busy = null;
+      render();
+    }
+  });
+
+  document.querySelectorAll<HTMLElement>('[data-problem-node]').forEach((element) => {
+    element.addEventListener('click', () => {
+      selected = element.dataset.problemNode ?? null;
+      refreshSelectionUI();
+    });
+  });
+  document.querySelectorAll<HTMLElement>('[data-identity-delete]').forEach((element) => {
+    element.addEventListener('click', () =>
+      void apply({ kind: 'removeIdentity', alias: element.dataset.identityDelete ?? '' }),
+    );
+  });
+  document.getElementById('agd-sop-identity-add')?.addEventListener('click', () => {
+    newIdentityAlias = '';
+    render();
+    document.getElementById('agd-sop-identity-new')?.focus();
+  });
+  const newAlias = document.getElementById('agd-sop-identity-new') as HTMLInputElement | null;
+  newAlias?.addEventListener('input', () => {
+    newIdentityAlias = newAlias.value;
+  });
+  const commitAlias = (): void => {
+    const alias = (newIdentityAlias ?? '').trim();
+    newIdentityAlias = null;
+    if (alias === '' || model()?.identities.some((i) => i.alias === alias)) {
+      render();
+      return;
+    }
+    void apply({ kind: 'addIdentity', alias });
+  };
+  newAlias?.addEventListener('change', commitAlias);
+  newAlias?.addEventListener('keydown', (event) => {
+    if ((event as KeyboardEvent).key === 'Enter') {
+      commitAlias();
+    }
+  });
+  document.querySelectorAll<HTMLInputElement>('[data-identity-field]').forEach((element) => {
+    element.addEventListener('change', () => {
+      const field = element.dataset.identityField as 'did' | 'provider';
+      void apply({
+        kind: 'setIdentityField',
+        alias: element.dataset.alias ?? '',
+        field,
+        value: element.value,
+      });
+    });
+  });
+  document.getElementById('agd-sop-impact-cancel')?.addEventListener('click', () => {
+    pendingImpact = null;
+    render();
+  });
+  document.getElementById('agd-sop-impact-confirm')?.addEventListener('click', () => {
+    const pending = pendingImpact;
+    pendingImpact = null;
+    if (pending) {
+      void apply({ kind: 'deleteNode', name: pending.name });
+    }
+  });
+}
+
+/** Inspector bindings — re-run whenever only the inspector re-renders. */
+function wireInspector(): void {
+  const commit = (field: NodeField, value: string): void => {
+    const node = selectedNode();
+    if (!node) {
+      return;
+    }
+    if (field === 'name') {
+      if (value.trim() === '' || value === node.name) {
+        return;
+      }
+      void apply({ kind: 'renameNode', from: node.name, to: value.trim() });
+      return;
+    }
+    void apply({ kind: 'setNodeField', name: node.name, field, value });
+  };
+  const bindings: [string, NodeField][] = [
+    ['agd-sop-node-name', 'name'],
+    ['agd-sop-node-identity', 'identity'],
+    ['agd-sop-node-input', 'input'],
+    ['agd-sop-node-output', 'output'],
+    ['agd-sop-node-provider', 'provider'],
+    ['agd-sop-node-daemon', 'daemon'],
+    ['agd-sop-node-dir', 'dir'],
+  ];
+  for (const [id, field] of bindings) {
+    const element = document.getElementById(id) as HTMLInputElement | HTMLTextAreaElement | null;
+    element?.addEventListener('change', () => commit(field, element.value));
+  }
+  document.getElementById('agd-sop-dep-add')?.addEventListener('change', (event) => {
+    const value = (event.target as HTMLSelectElement).value;
+    const node = selectedNode();
+    if (!value || !node) {
+      return;
+    }
+    const doc = model();
+    if (doc && wouldCycle(doc, node.name, value)) {
+      flash(tr('sop.cycleBlocked'), 'error');
+      return;
+    }
+    void apply({ kind: 'addDependency', node: node.name, dependsOn: value });
+  });
+  document.querySelectorAll<HTMLElement>('[data-dep-remove]').forEach((element) => {
+    element.addEventListener('click', () => {
+      const node = selectedNode();
+      if (node) {
+        void apply({
+          kind: 'removeDependency',
+          node: node.name,
+          dependsOn: element.dataset.depRemove ?? '',
+        });
+      }
+    });
+  });
+  document.getElementById('agd-sop-delete-node')?.addEventListener('click', () => {
+    const node = selectedNode();
+    const doc = model();
+    if (!node || !doc) {
+      return;
+    }
+    const dependents = doc.nodes
+      .filter((other) => other.dependsOn.includes(node.name))
+      .map((other) => other.name);
+    const placeholders = doc.nodes
+      .filter((other) => other.input.includes(`\${${node.name}.`))
+      .map((other) => other.name);
+    pendingImpact = { kind: 'deleteNode', name: node.name, dependents, placeholders };
+    render();
+  });
+}
+
+async function main(): Promise<void> {
+  applyBoot(await bridge.call<SopBoot>('sop.boot'));
+  render();
+  bridge.onEvent((event, payload) => {
+    if (event === 'refresh') {
+      applyBoot(payload as SopBoot);
+      render();
+    }
+  });
+}
+
+void main();

@@ -9,6 +9,7 @@ import type {
   RuntimeInfo,
   SessionHistoryInfo,
   SessionResolveInfo,
+  SopValidation,
   TaskStatusInfo,
   TaskStreamEvent,
 } from './types';
@@ -110,6 +111,17 @@ export class AgtApi {
         bindings: await this.identityBindings(identity.did),
       })),
     );
+  }
+
+  /**
+   * Server-side SOP validation (authority for the DSL rules).
+   *
+   * Takes the document **as authored** — the editor holds the YAML text,
+   * and parsing stays a single Python implementation — and always answers
+   * 200: a failed validation arrives as ``ok: false`` + ``error``.
+   */
+  async validateSop(raw: string): Promise<SopValidation> {
+    return this.post<SopValidation>('/api/sop/validate', { raw });
   }
 
   async daemonSessions(daemonId: string): Promise<ChatSessionInfo[]> {
@@ -225,6 +237,17 @@ async function errorMessage(res: Response): Promise<string> {
     // Non-JSON error responses keep the status-line fallback below.
   }
   return `HTTP ${res.status} ${res.statusText}`;
+}
+
+/**
+ * True when a request failed because the server has no such route.
+ *
+ * The usual cause during development is a server process that predates the
+ * endpoint (started from an older install/build); callers turn this into an
+ * actionable "restart the server" message instead of a bare 404.
+ */
+export function isMissingEndpoint(err: unknown): boolean {
+  return /\bHTTP 404\b/.test(String(err));
 }
 
 function parseSseFrame(frame: string): TaskStreamEvent | undefined {

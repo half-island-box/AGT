@@ -217,7 +217,7 @@ function renderFrame(): void {
       <div class="agd-chat-brand"><span>AGT</span><small>${tr('app.subtitle')}</small></div>
       <nav class="agd-modes" aria-label="AGT modes">
         <button type="button" class="agd-mode agd-mode-active">${tr('mode.chat')}</button>
-        <button type="button" class="agd-mode" disabled title="${tr('chat.sopComing')}">${tr('mode.sop')}</button>
+        <button type="button" class="agd-mode" id="agd-mode-sop" title="${tr('mode.sop')}">${tr('mode.sop')}</button>
         <button type="button" class="agd-mode" disabled title="${tr('chat.goalComing')}">${tr('mode.goal')}</button>
       </nav>
       <div class="agd-chat-tools">
@@ -410,6 +410,9 @@ function wireFrame(): void {
   });
   document.getElementById('agd-chat-settings')?.addEventListener('click', () => {
     void bridge.call('openSettings');
+  });
+  document.getElementById('agd-mode-sop')?.addEventListener('click', () => {
+    void bridge.call('openSop');
   });
   const input = document.getElementById('agd-chat-input') as HTMLTextAreaElement | null;
   input?.addEventListener('keydown', (event) => {

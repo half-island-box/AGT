@@ -73,6 +73,64 @@ class SopNodeLogResponse(BaseModel):
     steps: list[SopNodeLogStep] = []
 
 
+class SopValidateRequest(BaseModel):
+    """A SOP document **as authored** (raw YAML or JSON text).
+
+    The editor holds the original text, so validation stays a single
+    Python implementation (``parse_sop``) instead of being re-implemented
+    in TypeScript: this endpoint never receives a pre-parsed spec.
+    """
+
+    raw: str
+
+
+class SopValidateNode(BaseModel):
+    name: str
+    depends_on: list[str] = []
+    output: str | None = None
+    identity: str | None = None
+
+
+class SopValidateResponse(BaseModel):
+    ok: bool
+    name: str | None = None
+    nodes: list[SopValidateNode] = []
+    identities: list[str] = []
+    error: str | None = None
+
+
+@router.post("/validate", response_model=SopValidateResponse)
+async def validate_sop(payload: SopValidateRequest) -> SopValidateResponse:
+    """Parse + statically validate a SOP document **without submitting**.
+
+    Always answers 200: a validation failure is a result (``ok=False`` +
+    ``error``), not a transport error, so the editor can render it inline
+    instead of turning it into a stack trace. This is the authority for
+    DSL rules — the client-side checks only cover what is needed to draw
+    the graph.
+    """
+    try:
+        spec = parse_sop(payload.raw)
+    except SOPError as exc:
+        return SopValidateResponse(ok=False, error=str(exc))
+    except Exception as exc:  # noqa: BLE001 — YAML syntax errors et al.
+        return SopValidateResponse(ok=False, error=str(exc))
+    return SopValidateResponse(
+        ok=True,
+        name=spec.name,
+        identities=sorted(spec.identities),
+        nodes=[
+            SopValidateNode(
+                name=n.name,
+                depends_on=list(n.depends_on),
+                output=n.output,
+                identity=n.identity,
+            )
+            for n in spec.nodes
+        ],
+    )
+
+
 @router.post("/submit", response_model=SopSubmitResponse)
 async def submit_sop(
     payload: SopSubmitRequest,

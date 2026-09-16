@@ -6,6 +6,10 @@ import type {
   ServerState,
   UiLanguage,
 } from '../core/types';
+import { applyIntentToModel } from '../core/sop/model-ops';
+import type { SopPoint } from '../core/sop/layout';
+import { issues as sopIssues } from '../core/sop/graph';
+import type { EditIntent, SopDoc } from '../core/sop/model';
 
 /** Fixture data + fake latency for browser preview (`npm run dev:web`). */
 const daemons: DaemonInfo[] = [
@@ -104,6 +108,138 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/* ── SOP editor fixture ────────────────────────────────────────────── */
+
+const sopTemplates = [
+  { path: '/home/you/project/pipelines/review-fix.sop.yaml', label: 'review-fix.sop.yaml', nodeCount: 3 },
+  { path: '/home/you/project/pipelines/release.sop.yaml', label: 'release.sop.yaml', nodeCount: 2 },
+];
+
+let sopPath: string | null = sopTemplates[0].path;
+let sopDirty = false;
+let sopValidation: { ok: boolean; error: string | null; at: number } | null = null;
+let sopPositions: Record<string, SopPoint> = {};
+
+const sopDocs: Record<string, SopDoc> = {
+  '/home/you/project/pipelines/review-fix.sop.yaml': {
+    name: 'review-fix',
+    identities: [
+      { alias: 'reviewer', did: 'did:agt:reviewer', provider: 'claude' },
+      { alias: 'tester', did: '', provider: 'codex' },
+    ],
+    nodes: [
+      {
+        name: 'review',
+        identity: 'reviewer',
+        dependsOn: [],
+        input: '审查当前 diff，输出审查报告',
+        output: 'review-report',
+        provider: '',
+        daemon: '',
+        dir: '',
+        index: 0,
+      },
+      {
+        name: 'fix',
+        identity: 'reviewer',
+        dependsOn: ['review'],
+        input: '根据 ${review.review-report} 修复问题',
+        output: 'fix-result',
+        provider: '',
+        daemon: '',
+        dir: '',
+        index: 1,
+      },
+      {
+        name: 'test',
+        identity: 'tester',
+        dependsOn: ['fix'],
+        input: '为 ${fix.fix-result} 补单测并运行',
+        output: '',
+        provider: '',
+        daemon: '',
+        dir: '',
+        index: 2,
+      },
+    ],
+  },
+  '/home/you/project/pipelines/release.sop.yaml': {
+    name: 'release',
+    identities: [{ alias: 'packager', did: '', provider: 'codex' }],
+    nodes: [
+      {
+        name: 'bump',
+        identity: 'packager',
+        dependsOn: [],
+        input: '升级版本号并写 CHANGELOG',
+        output: 'changelog',
+        provider: '',
+        daemon: '',
+        dir: '',
+        index: 0,
+      },
+      {
+        name: 'publish',
+        identity: 'packager',
+        dependsOn: ['bump'],
+        input: '基于 ${bump.changelog} 打 tag 并发布',
+        output: '',
+        provider: '',
+        daemon: '',
+        dir: '',
+        index: 1,
+      },
+    ],
+  },
+};
+
+/** Dev-preview only: a readable YAML echo of the model (no round-trip). */
+function renderSopYaml(doc: SopDoc): string {
+  const lines = [`name: ${doc.name}`];
+  if (doc.identities.length > 0) {
+    lines.push('identities:');
+    for (const identity of doc.identities) {
+      const parts: string[] = [];
+      if (identity.did) parts.push(`did: ${identity.did}`);
+      if (identity.provider) parts.push(`provider: ${identity.provider}`);
+      lines.push(`  ${identity.alias}: {${parts.join(', ')}}`);
+    }
+  }
+  lines.push('tasks:');
+  for (const node of doc.nodes) {
+    lines.push(`  - name: ${node.name}`);
+    if (node.identity) lines.push(`    identity: ${node.identity}`);
+    if (node.input) lines.push(`    input: ${node.input}`);
+    if (node.output) lines.push(`    output: ${node.output}`);
+    if (node.provider) lines.push(`    provider: ${node.provider}`);
+    if (node.daemon) lines.push(`    daemon: ${node.daemon}`);
+    if (node.dir) lines.push(`    dir: ${node.dir}`);
+    if (node.dependsOn.length > 0) lines.push(`    depends_on: [${node.dependsOn.join(', ')}]`);
+  }
+  return `${lines.join('\n')}\n`;
+}
+
+function sopBoot(): Record<string, unknown> {
+  const doc = sopPath ? sopDocs[sopPath] : null;
+  return {
+    language,
+    state,
+    templatePath: sopPath,
+    templates: sopTemplates,
+    daemons: daemons.map((daemon) => ({
+      id: daemon.daemon_id,
+      label: daemon.daemon_name || daemon.device_name || daemon.daemon_id,
+      online: daemon.online,
+      providers: [...new Set(daemon.providers.map((p) => p.provider))].sort(),
+    })),
+    model: doc,
+    text: doc ? renderSopYaml(doc) : '',
+    dirty: sopDirty,
+    positions: sopPath ? { ...sopPositions } : {},
+    parseError: null,
+  };
+}
+
 function boot(): Record<string, unknown> {
   return {
     serverUrl,
@@ -129,6 +265,80 @@ export async function mockCall<T>(_method: string, params?: Record<string, unkno
   await delay(200 + Math.random() * 200);
   const method = _method;
   switch (method) {
+    case 'sop.boot':
+      return sopBoot() as T;
+    case 'sop.openTemplate': {
+      const path = String(params?.path ?? '');
+      if (sopDocs[path]) {
+        sopPath = path;
+        sopPositions = {};
+        sopDirty = false;
+        sopValidation = null;
+      }
+      return sopBoot() as T;
+    }
+    case 'sop.newSop': {
+      const path = `/home/you/project/pipelines/untitled-${Object.keys(sopDocs).length + 1}.sop.yaml`;
+      sopDocs[path] = {
+        name: 'untitled',
+        identities: [],
+        nodes: [
+          {
+            name: 'task',
+            identity: '',
+            dependsOn: [],
+            input: '',
+            output: '',
+            provider: '',
+            daemon: '',
+            dir: '',
+            index: 0,
+          },
+        ],
+      };
+      sopTemplates.push({ path, label: path.split('/').pop() ?? path, nodeCount: 1 });
+      sopPath = path;
+      sopPositions = {};
+      sopDirty = true;
+      return sopBoot() as T;
+    }
+    case 'sop.apply': {
+      const doc = sopPath ? sopDocs[sopPath] : null;
+      const intent = params?.intent as EditIntent | undefined;
+      if (doc && intent) {
+        sopDocs[sopPath as string] = applyIntentToModel(doc, intent);
+        sopDirty = true;
+        sopValidation = null;
+        const template = sopTemplates.find((t) => t.path === sopPath);
+        if (template) {
+          template.nodeCount = sopDocs[sopPath as string].nodes.length;
+        }
+      }
+      return sopBoot() as T;
+    }
+    case 'sop.save':
+      sopDirty = false;
+      return sopBoot() as T;
+    case 'sop.validate': {
+      const doc = sopPath ? sopDocs[sopPath] : null;
+      const problems = doc ? sopIssues(doc).filter((i) => i.level === 'error') : [];
+      sopValidation = problems.length > 0
+        ? { ok: false, error: problems[0].message, at: Date.now() }
+        : { ok: true, error: null, at: Date.now() };
+      return sopValidation as T;
+    }
+    case 'sop.revealYaml':
+      return { ok: true } as T;
+    case 'sop.restartServer':
+      await delay(600);
+      return { ok: true } as T;
+    case 'sop.setLayout': {
+      sopPositions = (params?.positions as Record<string, SopPoint>) ?? {};
+      return { ok: true } as T;
+    }
+    case 'openChat':
+    case 'openSop':
+      return { ok: true } as T;
     case 'boot':
       return boot() as T;
     case 'testConnection':

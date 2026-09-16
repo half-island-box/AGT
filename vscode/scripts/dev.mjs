@@ -46,6 +46,11 @@ const server = createServer(async (req, res) => {
       res.end(shell('AGT Chat', '/dist/webview-chat.js', '/dist/webview-chat.css'));
       return;
     }
+    if (url.pathname === '/sop-editor.html') {
+      res.writeHead(200, { 'content-type': mime['.html'] });
+      res.end(shell('AGT SOP Editor', '/dist/webview-sop.js', '/dist/webview-sop.css'));
+      return;
+    }
     const safe = normalize(url.pathname).replace(/^(\.\.[/\\])+/, '');
     const file = join(root, safe);
     if (!file.startsWith(root)) {
@@ -64,4 +69,5 @@ server.listen(port, '127.0.0.1', () => {
   console.log(`AGT webview preview:`);
   console.log(`  http://127.0.0.1:${port}/chat.html`);
   console.log(`  http://127.0.0.1:${port}/settings.html`);
+  console.log(`  http://127.0.0.1:${port}/sop-editor.html`);
 });

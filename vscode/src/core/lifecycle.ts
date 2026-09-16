@@ -58,12 +58,16 @@ export class ServerLifecycle {
     return false;
   }
 
-  /** Probe; when offline and autoStart is enabled, start it and wait. */
-  async ensureStarted(): Promise<boolean> {
+  /**
+   * Start the server and wait for it to answer, regardless of the
+   * auto-start switch (explicit user action). A server that is already
+   * answering is left alone.
+   */
+  async start(): Promise<boolean> {
     if (await this.probe()) {
       return true;
     }
-    if (!this.options.autoStart || !this.options.startCommand.trim()) {
+    if (!this.options.startCommand.trim()) {
       return false;
     }
     this.state = 'starting';
@@ -82,6 +86,26 @@ export class ServerLifecycle {
     }
     this.state = 'offline';
     return false;
+  }
+
+  /** Probe; when offline and autoStart is enabled, start it and wait. */
+  async ensureStarted(): Promise<boolean> {
+    if (await this.probe()) {
+      return true;
+    }
+    if (!this.options.autoStart) {
+      return false;
+    }
+    return this.start();
+  }
+
+  /**
+   * Stop then start — the way to pick up a newer backend build, e.g. after
+   * an endpoint was added while an older server was still running.
+   */
+  async restart(): Promise<boolean> {
+    await this.stop();
+    return this.start();
   }
 
   async stop(): Promise<boolean> {

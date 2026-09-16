@@ -103,16 +103,24 @@ Remote daemons connect via HTTP or **reverse-dial WebSocket** (server dials out,
 
 ## VS Code extension (early)
 
-The `vscode/` directory holds a TypeScript UI client for the server (Chat / SOP / Goal modes are being filled in milestone by milestone; currently: server lifecycle, daemon tree, status bar, settings page with zh/en toggle).
+The `vscode/` directory holds a TypeScript UI client for the server, filled in milestone by milestone (M1 skeleton, M2 Chat, M3 SOP; Goal is next). Today it ships the server lifecycle, the daemon tree, the status bar, the settings page with a zh/en toggle, Chat mode, and a **visual SOP editor**.
 
 ```bash
 cd vscode
 npm install
 npm run build       # bundle extension + webview
 npm run dev:web     # browser preview of webviews with mock data (no VS Code needed)
+npm run test:core   # core SOP editor tests (round-trip, graph, layout)
+npm run check:sop   # apply an editing session and validate the result with the Python DSL
 ```
 
 Debug in VS Code: open `vscode/`, run `npm run watch`, press **F5** (Extension Development Host). The extension auto-starts `agt server` (configurable via `agt.startCommand`) and reads daemons from `/api/daemons`.
+
+### SOP editor (M3)
+
+Open **AGT: Open SOP Editor** (or the SOP tab in Chat) to edit a SOP as a DAG: templates are discovered from the workspace (`*.sop.yaml`, or any YAML with top-level `name` + `tasks`), nodes can be added/renamed/deleted, fields edited, and dependencies drawn port-to-port with live cycle blocking. **The YAML file stays the single source of truth**: the canvas parses it, applies edits back through a `WorkspaceEdit` (so dirty state and Ctrl+Z work like any editor), and `npm run check:sop` proves the produced YAML still passes `agt sop validate`.
+
+Round-trip fidelity comes from the `yaml` package's document AST (the extension's only runtime dependency), which keeps comments, key order and unknown keys for untouched parts; only `lineWidth` folding and flow-collection padding are normalized. Structural checks that the canvas needs (cycles, dangling references, duplicate outputs, `${node.output}` rules) run locally and mirror `agt/sop/dsl.py`; **server validation is the authority** and is served by `POST /api/sop/validate`, which takes the document as authored and always answers `200` with `ok`/`error`. Manual node positions are a view concern and live in workspace state, never in the template.
 
 ## SOP example
 
