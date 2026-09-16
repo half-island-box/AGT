@@ -31,12 +31,22 @@ router = APIRouter(prefix="/api/daemons", tags=["daemons"])
 def _daemon_defs(request: Request) -> dict[str, object]:
     """Build the ``daemon_id → DaemonTarget`` lookup from the config mount.
 
-    ``app.state.config`` is set in the server lifespan; routes built
+    ``app.state.config`` is set at app-construction time; routes built
     without it (tests) fall back to an empty map — the aggregated view
-    then simply omits the static url/capabilities overlay.
+    then only lists runtime-known daemons, with no url/capabilities overlay.
     """
     cfg = getattr(request.app.state, "config", None)
     return {t.daemon_id: t for t in (cfg.daemons if cfg else [])}
+
+
+def _daemon_links(request: Request) -> dict[str, object]:
+    """Build the ``daemon_id → DaemonLink`` lookup for the ``online`` signal.
+
+    ``app.state.daemon_links`` is created in the server lifespan; without it
+    (tests, or routes hit before startup) fall back to an empty map — the
+    ``online`` flag then relies on heartbeat liveness alone.
+    """
+    return getattr(request.app.state, "daemon_links", None) or {}
 
 
 @router.get("", response_model=ListDaemonsResponse)
@@ -45,7 +55,11 @@ async def list_daemons_route(
     db: AsyncSession = Depends(get_db),
 ) -> ListDaemonsResponse:
     """List every known daemon (offline ones included, with heartbeat)."""
-    daemons = await list_daemons(db, daemon_defs=_daemon_defs(request))
+    daemons = await list_daemons(
+        db,
+        daemon_defs=_daemon_defs(request),
+        daemon_links=_daemon_links(request),
+    )
     return ListDaemonsResponse(daemons=[DaemonOut(**d) for d in daemons])
 
 
@@ -55,8 +69,13 @@ async def get_daemon_route(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> DaemonOut:
-    """Return one daemon's aggregated details; 404 if it has no rows."""
-    daemon = await get_daemon(daemon_id, db, daemon_defs=_daemon_defs(request))
+    """Return one daemon's aggregated details; 404 if it is unknown."""
+    daemon = await get_daemon(
+        daemon_id,
+        db,
+        daemon_defs=_daemon_defs(request),
+        daemon_links=_daemon_links(request),
+    )
     if daemon is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

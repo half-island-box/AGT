@@ -195,3 +195,91 @@ class TestStaticOverlay:
         assert result[0]["daemon_id"] == "d1"
         assert "url" not in result[0]
         assert "capabilities" not in result[0]
+
+
+class _Link:
+    """Minimal ``DaemonLink`` stub for the ``connected`` online signal."""
+
+    def __init__(self, connected: bool) -> None:
+        self._connected = connected
+
+    @property
+    def connected(self) -> bool:
+        return self._connected
+
+
+class TestConfigBaseList:
+    """Configured daemons are the base list, even before any heartbeat."""
+
+    def _target(self, **kw) -> DaemonTarget:
+        return DaemonTarget(
+            daemon_id=kw.get("daemon_id", "d-cfg"),
+            name=kw.get("name", "cloud"),
+            url=kw.get("url", "ws://h:8422"),
+            capabilities=kw.get("capabilities", ("containers", "logs")),
+        )
+
+    def test_config_only_daemon_listed_offline(self, db: _DB) -> None:
+        async def _run():
+            async with db.session() as session:
+                return await list_daemons(session, daemon_defs={"d-cfg": self._target()})
+
+        result = asyncio.run(_run())
+        assert len(result) == 1
+        d = result[0]
+        assert d["daemon_id"] == "d-cfg"
+        assert d["daemon_name"] == "cloud"
+        assert d["runtime_count"] == 0
+        assert d["providers"] == []
+        assert d["online"] is False
+        assert d["last_seen"] is None
+        assert d["device_name"] is None
+        assert d["url"] == "ws://h:8422"
+        assert d["capabilities"] == ["containers", "logs"]
+
+    def test_config_daemon_merged_with_runtime(self, db: _DB) -> None:
+        db.run(_insert, db, _row("d-cfg", "claude", device="dev", last_seen=_stamp(1)))
+
+        async def _run():
+            async with db.session() as session:
+                return await list_daemons(session, daemon_defs={"d-cfg": self._target()})
+
+        d = asyncio.run(_run())[0]
+        assert d["runtime_count"] == 1
+        assert d["device_name"] == "dev"
+        assert d["online"] is True
+        assert d["url"] == "ws://h:8422"  # static overlay still merged
+
+    def test_config_first_then_runtime_only(self, db: _DB) -> None:
+        db.run(_insert, db,
+            _row("local-1", "claude", last_seen=_stamp(1)),
+            _row("d-cfg", "codex", last_seen=_stamp(1)),
+        )
+
+        async def _run():
+            async with db.session() as session:
+                return await list_daemons(session, daemon_defs={"d-cfg": self._target()})
+
+        result = asyncio.run(_run())
+        assert [d["daemon_id"] for d in result] == ["d-cfg", "local-1"]
+
+    def test_link_connected_marks_online_without_heartbeat(self, db: _DB) -> None:
+        async def _run():
+            async with db.session() as session:
+                return await list_daemons(
+                    session,
+                    daemon_defs={"d-cfg": self._target()},
+                    daemon_links={"d-cfg": _Link(True)},
+                )
+
+        assert asyncio.run(_run())[0]["online"] is True
+
+    def test_get_config_only_daemon_not_none(self, db: _DB) -> None:
+        async def _run():
+            async with db.session() as session:
+                return await get_daemon("d-cfg", session, daemon_defs={"d-cfg": self._target()})
+
+        d = asyncio.run(_run())
+        assert d is not None
+        assert d["online"] is False
+        assert d["runtime_count"] == 0

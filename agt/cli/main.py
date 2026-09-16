@@ -2574,10 +2574,11 @@ def daemon_status() -> None:
     envvar="AGT_SERVER_URL",
 )
 def daemon_list(server_url: str) -> None:
-    """List every daemon registered on the Server (Server view).
+    """List every daemon known to the Server (Server view).
 
     Unlike ``agt daemon status`` (which checks the LOCAL pid file), this
-    queries the Server's daemon registry aggregated from runtime rows.
+    queries the Server's daemon registry: configured ``~/.agt/daemons``
+    targets (even if never seen/offline) plus any runtime-only daemons.
     """
 
     async def _run() -> list[dict]:
@@ -2611,9 +2612,9 @@ def daemon_list(server_url: str) -> None:
         caps = ",".join(d.get("capabilities") or []) or "—"
         click.echo(
             f"  {name[:18]:<18} {d['daemon_id'][:16]:<16} {url[:24]:<24} "
-            f"{d['device_name'][:18]:<18} {d['runtime_count']:<8} "
+            f"{(d.get('device_name') or '—')[:18]:<18} {d['runtime_count']:<8} "
             f"{providers[:18]:<18} {caps[:22]:<22} "
-            f"{'yes' if d['online'] else 'no':<8} {d['last_seen']:<20}"
+            f"{'yes' if d['online'] else 'no':<8} {(d.get('last_seen') or '—'):<20}"
         )
 
 
@@ -2647,9 +2648,9 @@ def daemon_show(daemon_id: str, server_url: str) -> None:
 
     click.echo(f"daemon_id    : {daemon['daemon_id']}")
     click.echo(f"daemon_name  : {daemon.get('daemon_name') or '—'}")
-    click.echo(f"device_name  : {daemon['device_name']}")
+    click.echo(f"device_name  : {daemon.get('device_name') or '—'}")
     click.echo(f"online       : {'yes' if daemon['online'] else 'no'}")
-    click.echo(f"last_seen    : {daemon['last_seen']}")
+    click.echo(f"last_seen    : {daemon.get('last_seen') or '—'}")
     click.echo(f"runtime_count: {daemon['runtime_count']}\n")
     click.echo(f"  {'PROVIDER':<12} {'VERSION':<12} {'STATUS':<10} {'LAST SEEN':<20}")
     click.echo("  " + "─" * 56)

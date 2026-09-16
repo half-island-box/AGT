@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..ids import AGT_DAEMON_NAMESPACE, daemon_id_from_url
+from ..net import host_of_url as _host_of_url, is_local_host as _is_local_host
 
 # Re-exported for backward compatibility (CLI and tests import it from
 # here); the canonical definition lives in ``agt.ids``.
@@ -49,38 +50,6 @@ def _port_of_url(url: str) -> str | None:
     except (IndexError, ValueError):
         pass
     return None
-
-
-def _host_of_url(url: str) -> str:
-    """Extract the host from a ``ws://host:port`` / ``http://host:port`` URL."""
-    try:
-        after_scheme = url.split("://", 1)[1]
-        host_part = after_scheme.split("/", 1)[0]
-        if ":" in host_part:
-            return host_part.rsplit(":", 1)[0].strip("[]")
-        return host_part
-    except (IndexError, ValueError):
-        return ""
-
-
-def _is_local_host(host: str) -> bool:
-    """True if ``host`` refers to this machine.
-
-    Literal wildcard/loopback names always count. Otherwise the host is
-    compared against the addresses this machine's hostname resolves to
-    (local resolver — no external DNS, so this stays fast and never
-    matches a public IP bound elsewhere).
-    """
-    if host in ("0.0.0.0", "127.0.0.1", "::", "localhost"):
-        return True
-    try:
-        infos = socket.getaddrinfo(
-            socket.gethostname(), None, socket.AF_UNSPEC, socket.SOCK_STREAM
-        )
-        local_ips = {a[4][0] for a in infos}
-    except OSError:
-        local_ips = set()
-    return host.strip("[]") in local_ips
 
 
 def _find_self_daemon(ws_listen_port: int) -> tuple[str, str] | None:

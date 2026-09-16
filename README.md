@@ -35,6 +35,10 @@ It is an experimental Python foundation for a future multi-agent desktop client.
 - **Daemon**: HTTP long-poll or reverse-dial WebSocket (NAT traversal), semaphore-based concurrency (`AGT_MAX_CONCURRENT`), heartbeat + runtime registration.
 - **MCP runtime catalog**: `list_runtimes` tool served at `/mcp/` (Streamable HTTP) so parent agents can discover which daemons/providers are online before spawning children. Claude Code gets it via project `.mcp.json`; Codex via global `~/.codex/config.toml`.
 - **Provider adapters**: command builders, session locators, stream sinks, resume-rejection detectors, and MCP config profiles are registered per provider — adding a new agent means adding a registry row, not touching the executor.
+<<<<<<< Updated upstream
+=======
+- **VS Code extension (in development)**: TypeScript client in `vscode/` — activity-bar daemon tree, server + local daemon lifecycle management, status bar, settings webview, Chat mode, and zh/en UI. It talks to the same HTTP API as the CLI; no Python logic is duplicated.
+>>>>>>> Stashed changes
 
 ## Requirements
 
@@ -100,6 +104,24 @@ Default: server on `127.0.0.1:8420`, OpenAPI at [http://127.0.0.1:8420/docs](htt
 
 Remote daemons connect via HTTP or **reverse-dial WebSocket** (server dials out, NAT-friendly). See the [quick-start guide](<docs/guide%20docs/quick_start.md>).
 
+<<<<<<< Updated upstream
+=======
+## VS Code extension (early)
+
+The `vscode/` directory holds a TypeScript UI client for the server. The current milestone includes server lifecycle, daemon tree, status bar, settings, and Chat mode. Chat supports daemon/agent/identity selection with provider logos, daemon session history, live SSE output, multi-turn continuation, cancellation, and zh/en static text; SOP and Goal modes are planned in later milestones.
+
+```bash
+cd vscode
+npm install
+npm run build       # bundle extension + webview
+npm run dev:web     # browser preview of webviews with mock data (no VS Code needed)
+```
+
+Debug in VS Code: open `vscode/`, run `npm run watch`, press **F5** (Extension Development Host). The extension auto-starts `agt server` (configurable via `agt.startCommand`) and reads daemons from `/api/daemons`. Open **AGT: Open Chat** from the command palette or the chat button in the AGT sidebar to use Chat mode.
+
+Whenever the extension starts the server — on window startup or from the settings page — it also brings up the local daemon, so a fresh window is immediately usable without a separate `agt daemon start`. Both switches live in the settings page: `agt.autoStart` (start the server on window startup) and `agt.autoStartDaemon` (start the local daemon together with the server, default on). An already-running daemon is detected through `~/.agt/daemon.pid` and left untouched, the configured `serverUrl` is exported as `AGT_SERVER_URL` to the daemon process, and the commands themselves are configurable via `agt.daemonStartCommand` / `agt.daemonStopCommand` (also available as **AGT: Start Local Daemon** / **AGT: Stop Local Daemon**).
+
+>>>>>>> Stashed changes
 ## SOP example
 
 ```yaml
