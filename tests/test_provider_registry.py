@@ -88,9 +88,9 @@ def test_claude_adapter_carries_bypass_permission_args():
 def test_codex_adapter_carries_sandbox_args():
     """Codex spawns with ``--sandbox workspace-write`` so the non-interactive
     ``exec`` process can write deliverables (``.agt/outputs/``) instead of
-    being stuck in its default read-only sandbox. ``--approval-mode full-auto``
-    prevents the default ``suggest`` mode from prompting for approval on an
-    invisible stderr stream."""
+    being stuck in its default read-only sandbox. ``--approve-for-me``
+    prevents the default mode from prompting for approval on an invisible
+    stderr stream."""
     from agt.runtime.registry import CODEX_SANDBOX_ARGS
 
     adapter = get_adapter("codex")
@@ -98,8 +98,7 @@ def test_codex_adapter_carries_sandbox_args():
     assert adapter.permission_args == (
         "--sandbox",
         "workspace-write",
-        "--approval-mode",
-        "full-auto",
+        "--approve-for-me",
     )
 
 
