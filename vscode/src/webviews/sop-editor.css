@@ -164,6 +164,52 @@ select.agd-input { height: 26px; }
 .agd-sop-node.has-error { border-color: #f85149; }
 .agd-sop-node.has-warning { border-color: #d29922; }
 .agd-sop-node.has-info { border-style: dashed; }
+
+/* Run states (read-only monitoring): the node outline carries the job status. */
+.agd-sop-node.is-queued { border-color: #58a6ff; }
+.agd-sop-node.is-running { border-color: #58a6ff; box-shadow: 0 0 0 1px #58a6ff; }
+.agd-sop-node.is-waiting_input,
+.agd-sop-node.is-waiting_children { border-color: #d29922; }
+.agd-sop-node.is-blocked { border-style: dashed; opacity: 0.85; }
+.agd-sop-node.is-done { border-color: #3fb950; }
+.agd-sop-node.is-failed { border-color: #f85149; box-shadow: 0 0 0 1px #f85149; }
+.agd-sop-node.is-cancelled { border-style: dashed; opacity: 0.7; text-decoration: line-through; }
+.agd-sop-node.is-readonly { cursor: default; }
+
+.agd-sop-empty-state {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 10px; height: 100%; min-height: 320px; text-align: center;
+  color: var(--vscode-descriptionForeground, #8b8b8b);
+}
+.agd-sop-empty-state h2 { margin: 0; font-size: 14px; color: var(--vscode-foreground, #cccccc); }
+.agd-sop-empty-state p { margin: 0; font-size: 12px; max-width: 46ch; }
+
+.agd-sop-run-banner {
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 12px;
+  border-top: 1px solid var(--vscode-panel-border, #2e2e2e);
+  background: var(--vscode-editorWidget-background, #252526);
+  font-size: 11.5px;
+}
+.agd-sop-run-phase { font-weight: 600; }
+.agd-sop-run-stale { color: #d29922; }
+.agd-sop-run-status { font-style: normal; font-size: 10.5px; color: var(--vscode-descriptionForeground, #8b8b8b); }
+.agd-sop-steps { display: flex; flex-direction: column; gap: 8px; max-height: 240px; overflow: auto; }
+.agd-sop-step { border: 1px solid var(--vscode-panel-border, #2e2e2e); border-radius: 6px; padding: 6px 8px; }
+.agd-sop-step-head { display: flex; justify-content: space-between; gap: 8px; font-size: 10.5px; margin-bottom: 4px; }
+.agd-sop-stdout, .agd-sop-stderr {
+  margin: 0; padding: 6px; border-radius: 4px; max-height: 160px; overflow: auto;
+  font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; white-space: pre-wrap;
+  background: var(--vscode-textCodeBlock-background, #1b1b1b);
+}
+.agd-sop-stderr { color: #f85149; margin-top: 4px; }
+.agd-sop-artifacts { display: flex; flex-direction: column; gap: 4px; margin-bottom: 6px; }
+.agd-sop-artifact {
+  text-align: left; padding: 3px 6px; border-radius: 5px; cursor: pointer;
+  border: 1px solid var(--vscode-input-border, #3a3a3a);
+  background: var(--vscode-textCodeBlock-background, #1b1b1b);
+  color: inherit; font-size: 10.5px;
+}
 .agd-sop-node.is-drop { border-color: var(--vscode-focusBorder, #3794ff); background: var(--vscode-list-hoverBackground, #2a2d2e); }
 .agd-sop-node-title { font-weight: 600; font-size: 12.5px; margin-bottom: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agd-sop-node-sub { font-size: 10.5px; color: var(--vscode-descriptionForeground, #8b8b8b); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

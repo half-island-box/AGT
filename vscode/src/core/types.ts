@@ -150,3 +150,43 @@ export interface SopValidation {
   identities: string[];
   error: string | null;
 }
+
+/** ``POST /api/sop/submit`` — one Job per DAG node, keyed by node name. */
+export interface SopSubmitResult {
+  root_job_id: string;
+  nodes: Record<string, string>;
+}
+
+/** One node as reported by ``GET /api/sop/{root}/status``. */
+export interface SopNodeStatus {
+  name: string;
+  job_id: string;
+  status: string;
+  depends_on: string[];
+  artifacts: string[];
+  provider: string | null;
+  session_id: string | null;
+}
+
+export interface SopStatus {
+  root_job_id: string;
+  nodes: SopNodeStatus[];
+  all_terminal: boolean;
+}
+
+export interface SopNodeLogStep {
+  task_id: string;
+  status: string;
+  session_id: string | null;
+  exit_code: number | null;
+  stdout: string | null;
+  stderr: string | null;
+}
+
+export interface SopNodeLog {
+  node_name: string;
+  job_id: string;
+  status: string;
+  provider: string | null;
+  steps: SopNodeLogStep[];
+}

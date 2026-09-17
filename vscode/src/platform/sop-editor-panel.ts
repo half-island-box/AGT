@@ -1,11 +1,14 @@
 import * as vscode from 'vscode';
 import { readFileSync } from 'node:fs';
+import { homedir, hostname } from 'node:os';
 import { basename, join } from 'node:path';
 import { isMissingEndpoint } from '../core/api';
 import type { ServerLifecycle } from '../core/lifecycle';
 import { looksLikeSop, minimalSpan } from '../core/sop/document';
 import type { SopPoint } from '../core/sop/layout';
 import type { EditIntent } from '../core/sop/model';
+import { fingerprint, localDaemonId } from '../core/sop/run';
+import type { SopStatus } from '../core/types';
 import {
   applyIntent,
   parseSopText,
@@ -38,6 +41,15 @@ export interface SopDaemonOption {
   label: string;
   online: boolean;
   providers: string[];
+  url: string | null;
+}
+
+interface RunState {
+  rootJobId: string;
+  /** Fingerprint of the submitted document text. */
+  specHash: string;
+  nodes: Record<string, string>;
+  startedAt: number;
 }
 
 const STARTER_YAML = `# SOP template — edit here or on the canvas; both stay in sync.
@@ -106,6 +118,8 @@ export class SopEditorPanel {
   private disposables: vscode.Disposable[] = [];
   private templates: { path: string; label: string; nodeCount: number }[] = [];
   private daemonCache: { at: number; list: SopDaemonOption[] } = { at: 0, list: [] };
+  private run: RunState | null = null;
+  private lastStatus: SopStatus | null = null;
 
   private constructor(ctx: SopBridgeContext) {
     this.ctx = ctx;
@@ -162,15 +176,28 @@ export class SopEditorPanel {
     const document = await vscode.workspace.openTextDocument(uri);
     this.document = document;
     this.parsed = parseSopText(document.getText());
+    await this.restoreRun();
     await this.pushRefresh();
   }
 
   private async createStarter(): Promise<void> {
+    // A workspace folder is the happy path; without one (Extension
+    // Development Host, empty window) ask for a location instead of failing.
     const folder = vscode.workspace.workspaceFolders?.[0]?.uri;
-    if (!folder) {
-      throw new Error('open a folder before creating a SOP template');
+    let target = folder
+      ? vscode.Uri.joinPath(folder, 'pipeline.sop.yaml')
+      : undefined;
+    if (!target) {
+      const picked = await vscode.window.showSaveDialog({
+        saveLabel: 'Create SOP template',
+        defaultUri: vscode.Uri.file(join(homedir(), 'pipeline.sop.yaml')),
+        filters: { 'SOP template': ['yaml', 'yml'] },
+      });
+      if (!picked) {
+        return; // user cancelled — not an error
+      }
+      target = picked;
     }
-    const target = vscode.Uri.joinPath(folder, 'pipeline.sop.yaml');
     let exists = true;
     try {
       await vscode.workspace.fs.stat(target);
@@ -249,6 +276,7 @@ export class SopEditorPanel {
 
   private async bootPayload(): Promise<Record<string, unknown>> {
     await this.discoverTemplates();
+    const text = this.document?.getText() ?? '';
     return {
       language: this.ctx.language(),
       state: this.ctx.lifecycle.state,
@@ -256,11 +284,55 @@ export class SopEditorPanel {
       templates: this.templates,
       daemons: await this.daemonOptions(),
       model: this.parsed ? this.parsed.model : null,
-      text: this.document?.getText() ?? '',
+      text,
       dirty: this.document?.isDirty ?? false,
       positions: this.positions(),
       parseError: this.parsed?.parseError ?? null,
+      workspaceFolder: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null,
+      localDaemonId: this.localDaemon(),
+      run: this.run
+        ? {
+            rootJobId: this.run.rootJobId,
+            startedAt: this.run.startedAt,
+            stale: this.run.specHash !== fingerprint(text),
+          }
+        : null,
     };
+  }
+
+  /** This machine's daemon id (used for `local_daemon_id` on submit). */
+  private localDaemon(): string | null {
+    const cached = this.daemonCache.list;
+    return localDaemonId(
+      cached.map((daemon) => ({ daemon_id: daemon.id, url: daemon.url })),
+      hostname(),
+    );
+  }
+
+  private runKey(uri: vscode.Uri): string {
+    return `agt.sop.run:${uri.fsPath}`;
+  }
+
+  private async restoreRun(): Promise<void> {
+    if (!this.document) {
+      this.run = null;
+      return;
+    }
+    const stored = this.ctx.context.workspaceState.get<RunState>(
+      this.runKey(this.document.uri),
+    );
+    this.run = stored ?? null;
+    this.lastStatus = null;
+  }
+
+  private async persistRun(): Promise<void> {
+    if (!this.document) {
+      return;
+    }
+    await this.ctx.context.workspaceState.update(
+      this.runKey(this.document.uri),
+      this.run,
+    );
   }
 
   /**
@@ -282,6 +354,7 @@ export class SopEditorPanel {
             daemon.daemon_name || daemon.device_name || daemon.daemon_id,
           online: daemon.online,
           providers: [...new Set(daemon.providers.map((p) => p.provider))].sort(),
+          url: daemon.url ?? null,
         })),
       };
     } catch {
@@ -397,6 +470,81 @@ export class SopEditorPanel {
           const ok = await this.ctx.lifecycle.restart();
           this.daemonCache = { at: 0, list: [] };
           result = { ok };
+          break;
+        }
+
+        case 'sop.run': {
+          if (!this.document || !this.parsed) {
+            throw new Error('no-document');
+          }
+          const spec = this.parsed.doc.toJS();
+          const submitted = await this.ctx.lifecycle.api.submitSop({
+            spec,
+            cwd: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null,
+            localDaemonId: this.localDaemon(),
+          });
+          this.run = {
+            rootJobId: submitted.root_job_id,
+            specHash: fingerprint(this.document.getText()),
+            nodes: submitted.nodes ?? {},
+            startedAt: Date.now(),
+          };
+          this.lastStatus = null;
+          await this.persistRun();
+          result = {
+            rootJobId: this.run.rootJobId,
+            nodes: this.run.nodes,
+            ...(await this.bootPayload()),
+          };
+          break;
+        }
+
+        case 'sop.status': {
+          const rootJobId =
+            String(msg.params?.rootJobId ?? '') || this.run?.rootJobId || '';
+          if (rootJobId === '') {
+            throw new Error('no-run');
+          }
+          const status = await this.ctx.lifecycle.api.sopStatus(rootJobId);
+          this.lastStatus = status;
+          result = status;
+          break;
+        }
+
+        case 'sop.nodeLog': {
+          const rootJobId =
+            String(msg.params?.rootJobId ?? '') || this.run?.rootJobId || '';
+          const node = String(msg.params?.node ?? '');
+          if (rootJobId === '' || node === '') {
+            throw new Error('no-run');
+          }
+          result = await this.ctx.lifecycle.api.sopNodeLog(rootJobId, node);
+          break;
+        }
+
+        case 'sop.cancelRun': {
+          const rootJobId =
+            String(msg.params?.rootJobId ?? '') || this.run?.rootJobId || '';
+          if (rootJobId === '') {
+            throw new Error('no-run');
+          }
+          const status =
+            this.lastStatus ?? (await this.ctx.lifecycle.api.sopStatus(rootJobId));
+          const terminal = new Set(['done', 'failed', 'cancelled']);
+          const pending = status.nodes.filter((n) => !terminal.has(n.status));
+          await Promise.all(
+            pending.map((node) => this.ctx.lifecycle.api.cancelJob(node.job_id)),
+          );
+          this.lastStatus = null;
+          result = { cancelled: pending.map((n) => n.name) };
+          break;
+        }
+
+        case 'sop.forgetRun': {
+          this.run = null;
+          this.lastStatus = null;
+          await this.persistRun();
+          result = await this.bootPayload();
           break;
         }
 

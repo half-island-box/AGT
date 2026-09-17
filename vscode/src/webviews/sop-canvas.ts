@@ -146,7 +146,7 @@ export class SopCanvas {
           .filter(Boolean)
           .join(' ');
         return `
-        <div class="${classes}" data-node="${escapeAttr(node.name)}" style="left:${point.x}px;top:${point.y}px;width:${NODE_W}px;height:${NODE_H}px">
+        <div class="${classes}" data-node="${escapeAttr(node.name)}" data-status="${escapeAttr(node.status ?? '')}" style="left:${point.x}px;top:${point.y}px;width:${NODE_W}px;height:${NODE_H}px">
           ${
             this.options.editable
               ? `<span class="agd-sop-port agd-sop-port-in" data-port="in" data-node="${escapeAttr(node.name)}"></span>

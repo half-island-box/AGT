@@ -9,6 +9,9 @@ import type {
   RuntimeInfo,
   SessionHistoryInfo,
   SessionResolveInfo,
+  SopNodeLog,
+  SopStatus,
+  SopSubmitResult,
   SopValidation,
   TaskStatusInfo,
   TaskStreamEvent,
@@ -122,6 +125,37 @@ export class AgtApi {
    */
   async validateSop(raw: string): Promise<SopValidation> {
     return this.post<SopValidation>('/api/sop/validate', { raw });
+  }
+
+  /**
+   * Submit a SOP for execution.
+   *
+   * ``spec`` is the **parsed document** (the server re-validates it with
+   * `parse_sop`), matching what the CLI sends. ``cwd`` / ``localDaemonId``
+   * let the server default an un-pinned node's ``agent_cwd``.
+   */
+  async submitSop(input: {
+    spec: unknown;
+    cwd?: string | null;
+    localDaemonId?: string | null;
+  }): Promise<SopSubmitResult> {
+    return this.post<SopSubmitResult>('/api/sop/submit', {
+      spec: input.spec,
+      cwd: input.cwd ?? null,
+      local_daemon_id: input.localDaemonId ?? null,
+    });
+  }
+
+  async sopStatus(rootJobId: string): Promise<SopStatus> {
+    return this.request<SopStatus>(
+      `/api/sop/${encodeURIComponent(rootJobId)}/status`,
+    );
+  }
+
+  async sopNodeLog(rootJobId: string, nodeName: string): Promise<SopNodeLog> {
+    return this.request<SopNodeLog>(
+      `/api/sop/${encodeURIComponent(rootJobId)}/nodes/${encodeURIComponent(nodeName)}/log`,
+    );
   }
 
   async daemonSessions(daemonId: string): Promise<ChatSessionInfo[]> {

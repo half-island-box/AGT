@@ -111,7 +111,10 @@ npm install
 npm run build       # bundle extension + webview
 npm run dev:web     # browser preview of webviews with mock data (no VS Code needed)
 npm run test:core   # core SOP editor tests (round-trip, graph, layout)
+npm run test:inspector   # inspector regressions (selects, identity clearing, roots)
+npm run test:run         # run-tracking helpers (local daemon detection, fingerprint)
 npm run check:sop   # apply an editing session and validate the result with the Python DSL
+npm run check:run   # submit the sample SOP to a running server and read status + node log
 ```
 
 Debug in VS Code: open `vscode/`, run `npm run watch`, press **F5** (Extension Development Host). The extension auto-starts `agt server` (configurable via `agt.startCommand`) and reads daemons from `/api/daemons`. Open **AGT: Open Chat** from the command palette or the AGT sidebar to use Chat mode.
@@ -120,9 +123,11 @@ Whenever the extension starts the server — on window startup or from the setti
 
 ### SOP editor (M3)
 
-Open **AGT: Open SOP Editor** (or the SOP tab in Chat) to edit a SOP as a DAG: templates are discovered from the workspace (`*.sop.yaml`, or any YAML with top-level `name` + `tasks`), nodes can be added/renamed/deleted, fields edited, and dependencies drawn port-to-port with live cycle blocking. **The YAML file stays the single source of truth**: the canvas parses it, applies edits back through a `WorkspaceEdit` (so dirty state and Ctrl+Z work like any editor), and `npm run check:sop` proves the produced YAML still passes `agt sop validate`.
+Open **AGT: Open SOP Editor** (or the SOP tab in Chat) to edit a SOP as a DAG: templates are discovered from the workspace (`*.sop.yaml`, or any YAML with top-level `name` + `tasks`; `vscode/samples/` ships one for the dev host), nodes can be added/renamed/deleted, fields edited, and dependencies drawn port-to-port with live cycle blocking. **The YAML file stays the single source of truth**: the canvas parses it, applies edits back through a `WorkspaceEdit` (so dirty state and Ctrl+Z work like any editor), and `npm run check:sop` proves the produced YAML still passes `agt sop validate`.
 
 Round-trip fidelity comes from the `yaml` package's document AST (the extension's only runtime dependency), which keeps comments, key order and unknown keys for untouched parts; only `lineWidth` folding and flow-collection padding are normalized. Structural checks that the canvas needs (cycles, dangling references, duplicate outputs, `${node.output}` rules) run locally and mirror `agt/sop/dsl.py`; **server validation is the authority** and is served by `POST /api/sop/validate`, which takes the document as authored and always answers `200` with `ok`/`error`. Manual node positions are a view concern and live in workspace state, never in the template.
+
+**Run monitoring (M3)**: **Run** submits the document (`POST /api/sop/submit`, with `cwd` = workspace folder and `local_daemon_id` picked from `/api/daemons`) and then polls `GET /api/sop/{root}/status` every 1.5s until every node is terminal. While a run is in flight the canvas is read-only and each node carries its job status (queued/running/waiting/blocked/done/failed/cancelled) as outline colour; selecting a node loads `GET /api/sop/{root}/nodes/{name}/log` into the inspector, with stdout/stderr per step and the node's artifact URIs (click to copy). **Cancel run** cancels every unfinished node job through `POST /api/jobs/{id}/cancel`; **Stop tracking** clears the run. The last run per file is kept in workspace state, and editing the template afterwards flags it as `template changed since submit` (fingerprint comparison) instead of silently pretending the canvas still matches the run.
 
 ## SOP example
 

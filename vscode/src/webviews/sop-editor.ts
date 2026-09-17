@@ -4,7 +4,12 @@ import { issues as localIssues, wouldCycle } from '../core/sop/graph';
 import { computeLayout, type SopPoint } from '../core/sop/layout';
 import { buildOptions, renderOptions } from '../core/sop/options';
 import type { EditIntent, SopDoc, SopIssue, SopNode } from '../core/sop/model';
-import type { ServerState, UiLanguage } from '../core/types';
+import type {
+  ServerState,
+  SopNodeLog,
+  SopStatus,
+  UiLanguage,
+} from '../core/types';
 import { SopCanvas } from './sop-canvas';
 import { bridge } from './bridge';
 
@@ -32,6 +37,9 @@ interface SopBoot {
   dirty: boolean;
   positions: Record<string, SopPoint>;
   parseError: string | null;
+  workspaceFolder: string | null;
+  localDaemonId: string | null;
+  run: { rootJobId: string; startedAt: number; stale: boolean } | null;
 }
 
 interface ServerValidation {
@@ -62,6 +70,23 @@ let view: { scale: number; offset: SopPoint } | undefined;
 let viewInitialized = false;
 let layoutTimer: number | null = null;
 let newIdentityAlias: string | null = null;
+let runStatus: SopStatus | null = null;
+let runBusy: 'run' | 'cancel' | null = null;
+let nodeLog: SopNodeLog | null = null;
+let nodeLogFor: string | null = null;
+let pollTimer: number | null = null;
+
+function runActive(): boolean {
+  return boot?.run !== null && boot?.run !== undefined;
+}
+
+function runRunning(): boolean {
+  return runActive() && !(runStatus?.all_terminal ?? false);
+}
+
+function statusOf(name: string): string {
+  return runStatus?.nodes.find((node) => node.name === name)?.status ?? '';
+}
 
 function tr(key: MessageKey, vars?: Record<string, string | number>): string {
   return t(lang, key, vars);
@@ -107,6 +132,10 @@ function allIssues(): SopIssue[] {
 function applyBoot(next: SopBoot): void {
   boot = next;
   lang = next.language;
+  if (!next.run) {
+    runStatus = null;
+    stopPolling();
+  }
   // Local drags win over the values echoed back by the host (workspace
   // state is written on a debounce, so its copy can lag a drag).
   const merged: Record<string, SopPoint> = {};
@@ -118,6 +147,98 @@ function applyBoot(next: SopBoot): void {
   if (selected && !next.model?.nodes.some((node) => node.name === selected)) {
     selected = null;
   }
+  if (runActive()) {
+    startPolling();
+  }
+}
+
+/* ── run monitoring ────────────────────────────────────────────────── */
+
+function startPolling(): void {
+  if (pollTimer !== null || !runActive()) {
+    return;
+  }
+  const tick = async (): Promise<void> => {
+    pollTimer = null;
+    if (!runActive()) {
+      return;
+    }
+    const wasTerminal = runStatus?.all_terminal ?? false;
+    try {
+      runStatus = await bridge.call<SopStatus>('sop.status', {
+        rootJobId: boot?.run?.rootJobId,
+      });
+    } catch (err) {
+      flash(String(err instanceof Error ? err.message : err), 'error');
+      return;
+    }
+    // Reaching the terminal state changes the *chrome* too (the canvas
+    // becomes editable again, Run replaces Cancel), so that transition takes
+    // a full re-render; ordinary progress stays a partial update.
+    if (runStatus.all_terminal && !wasTerminal) {
+      render();
+    } else {
+      refreshRunUI();
+    }
+    if (!runStatus.all_terminal) {
+      pollTimer = window.setTimeout(() => void tick(), 1500);
+    } else if (selected) {
+      await loadNodeLog(selected);
+    }
+  };
+  pollTimer = window.setTimeout(() => void tick(), 400);
+}
+
+function stopPolling(): void {
+  if (pollTimer !== null) {
+    window.clearTimeout(pollTimer);
+    pollTimer = null;
+  }
+}
+
+/**
+ * Update only what a status change touches (node classes, banner, log) —
+ * a full re-render would tear down the canvas on every poll.
+ */
+function refreshRunUI(): void {
+  for (const element of document.querySelectorAll<HTMLElement>('.agd-sop-node')) {
+    const name = element.dataset.node ?? '';
+    const status = statusOf(name);
+    for (const cls of [...element.classList]) {
+      if (cls.startsWith('is-') && !['is-selected', 'is-readonly', 'is-drop'].includes(cls)) {
+        element.classList.remove(cls);
+      }
+    }
+    if (status !== '') {
+      element.classList.add(`is-${status}`);
+    }
+    element.dataset.status = status;
+  }
+  const banner = document.getElementById('agd-sop-run-banner');
+  if (banner) {
+    banner.innerHTML = renderRunBanner();
+    wireRunBanner();
+  }
+  refreshSelectionUI();
+}
+
+async function loadNodeLog(name: string): Promise<void> {
+  if (!runActive() || name === '') {
+    nodeLog = null;
+    nodeLogFor = null;
+    return;
+  }
+  try {
+    nodeLog = await bridge.call<SopNodeLog>('sop.nodeLog', {
+      rootJobId: boot?.run?.rootJobId,
+      node: name,
+    });
+    nodeLogFor = name;
+  } catch {
+    nodeLog = null;
+    nodeLogFor = null;
+  }
+  refreshSelectionUI();
 }
 
 function flash(text: string, kind: 'info' | 'error' = 'info'): void {
@@ -188,6 +309,77 @@ async function runValidate(): Promise<void> {
   }
 }
 
+/** Submit the document, then start tracking the run. */
+async function startRun(): Promise<void> {
+  if (runBusy) {
+    return;
+  }
+  const problems = localIssues(model() ?? { name: '', identities: [], nodes: [] });
+  if (problems.some((issue) => issue.level === 'error')) {
+    flash(tr('sop.runBlocked'), 'error');
+    return;
+  }
+  runBusy = 'run';
+  render();
+  try {
+    const payload = await bridge.call<SopBoot>('sop.run');
+    applyBoot(payload);
+    runStatus = null;
+    flash(tr('sop.runSubmitted'));
+  } catch (err) {
+    const message = String(err instanceof Error ? err.message : err);
+    flash(message.includes('no-document') ? tr('sop.noDocument') : message, 'error');
+  } finally {
+    runBusy = null;
+    render();
+    if (runActive()) {
+      startPolling();
+      if (selected) {
+        void loadNodeLog(selected);
+      }
+    }
+  }
+}
+
+async function cancelRun(): Promise<void> {
+  if (runBusy) {
+    return;
+  }
+  runBusy = 'cancel';
+  render();
+  try {
+    await bridge.call('sop.cancelRun', { rootJobId: boot?.run?.rootJobId });
+    flash(tr('sop.cancelRequested'));
+  } catch (err) {
+    flash(String(err instanceof Error ? err.message : err), 'error');
+  } finally {
+    runBusy = null;
+    render();
+    startPolling();
+  }
+}
+
+function wireRunBanner(): void {
+  document.getElementById('agd-sop-copy-root')?.addEventListener('click', async () => {
+    const id = boot?.run?.rootJobId;
+    if (!id) {
+      return;
+    }
+    try {
+      await navigator.clipboard?.writeText(id);
+      flash(tr('settings.copied'));
+    } catch {
+      flash(id);
+    }
+  });
+  document.getElementById('agd-sop-forget-run')?.addEventListener('click', async () => {
+    stopPolling();
+    runStatus = null;
+    nodeLog = null;
+    await call('sop.forgetRun');
+  });
+}
+
 function persistLayout(next: Record<string, SopPoint>): void {
   positions = next;
   if (layoutTimer !== null) {
@@ -210,6 +402,38 @@ function render(): void {
     return;
   }
   const doc = model();
+  if (!doc) {
+    // No template bound yet: guide instead of showing dead chrome. The
+    // toolbar stays rendered but disabled (see renderToolbar).
+    root.innerHTML = `
+    <div class="agd-sop">
+      <header class="agd-sop-head">
+        <div class="agd-sop-brand"><span>AGT</span><small>${tr('sop.title')}</small></div>
+        <nav class="agd-modes" aria-label="AGT modes">
+          <button type="button" class="agd-mode" data-mode="chat">${tr('mode.chat')}</button>
+          <button type="button" class="agd-mode agd-mode-active">${tr('mode.sop')}</button>
+          <button type="button" class="agd-mode" disabled title="${tr('chat.goalComing')}">${tr('mode.goal')}</button>
+        </nav>
+        <div class="agd-sop-tools">
+          <button type="button" class="agd-icon-btn" id="agd-sop-lang">${tr('settings.langToggle')}</button>
+        </div>
+      </header>
+      <div class="agd-sop-body">
+        <aside class="agd-sop-side">${renderTemplates()}</aside>
+        <section class="agd-sop-main">
+          <div class="agd-sop-empty-state">
+            <h2>${tr('sop.emptyTitle')}</h2>
+            <p>${tr('sop.emptyHint')}</p>
+            <button type="button" class="agd-btn agd-btn-primary" id="agd-sop-new">${tr('sop.newSop')}</button>
+          </div>
+        </section>
+        <aside class="agd-sop-inspector"></aside>
+      </div>
+      ${toast ? `<div class="agd-sop-toast ${toast.kind === 'error' ? 'is-error' : ''}">${esc(toast.text)}</div>` : ''}
+    </div>`;
+    wireEvents();
+    return;
+  }
   root.innerHTML = `
   <div class="agd-sop">
     <header class="agd-sop-head">
@@ -241,6 +465,7 @@ function render(): void {
         ${renderInspector()}
       </aside>
     </div>
+    ${runActive() ? renderRunBanner() : ''}
     ${toast ? `<div class="agd-sop-toast ${toast.kind === 'error' ? 'is-error' : ''}">${esc(toast.text)}</div>` : ''}
     ${pendingImpact ? renderImpact() : ''}
   </div>`;
@@ -248,6 +473,7 @@ function render(): void {
   mountCanvas();
   wireEvents();
   wireInspector();
+  wireRunBanner();
 }
 
 function renderTemplates(): string {
@@ -308,18 +534,55 @@ function renderIdentities(doc: SopDoc | null): string {
 }
 
 function renderToolbar(): string {
+  const doc = model();
+  const running = runRunning();
+  // Editing is blocked only while a run is in flight; a finished run keeps
+  // being tracked (and turns "stale" once the template changes).
+  const editable = doc !== null && boot?.parseError === null && !running;
+  const done = runActive() && !running;
   return `
   <div class="agd-sop-toolbar">
-    <button type="button" class="agd-btn" id="agd-sop-add">${tr('sop.addNode')}</button>
-    <button type="button" class="agd-btn" id="agd-sop-layout">${tr('sop.autoLayout')}</button>
+    <button type="button" class="agd-btn" id="agd-sop-add" ${editable ? '' : 'disabled'}>${tr('sop.addNode')}</button>
+    <button type="button" class="agd-btn" id="agd-sop-layout" ${editable ? '' : 'disabled'}>${tr('sop.autoLayout')}</button>
     <button type="button" class="agd-btn" id="agd-sop-fit">${tr('sop.fit')}</button>
     <button type="button" class="agd-btn" id="agd-sop-zoom-out">−</button>
     <button type="button" class="agd-btn" id="agd-sop-zoom-in">+</button>
     <span class="agd-flex"></span>
     <button type="button" class="agd-btn" id="agd-sop-preview">${showPreview ? '▾ ' : '▸ '}${tr('sop.preview')}</button>
     <button type="button" class="agd-btn" id="agd-sop-yaml">${tr('sop.openYaml')}</button>
-    <button type="button" class="agd-btn" id="agd-sop-validate" ${busy ? 'disabled' : ''}>${busy === 'validate' ? tr('sop.validating') : tr('sop.validate')}</button>
+    <button type="button" class="agd-btn" id="agd-sop-validate" ${busy || !editable ? 'disabled' : ''}>${busy === 'validate' ? tr('sop.validating') : tr('sop.validate')}</button>
+    ${
+      running
+        ? `<button type="button" class="agd-btn" id="agd-sop-cancel-run" ${runBusy ? 'disabled' : ''}>${runBusy === 'cancel' ? tr('sop.cancelling') : tr('sop.cancelRun')}</button>`
+        : `<button type="button" class="agd-btn agd-btn-primary" id="agd-sop-run" ${editable && !runBusy ? '' : 'disabled'}>${runBusy === 'run' ? tr('sop.running') : done ? tr('sop.runAgain') : tr('sop.run')}</button>`
+    }
     <button type="button" class="agd-btn agd-btn-primary" id="agd-sop-save" ${busy || !boot?.dirty ? 'disabled' : ''}>${busy === 'save' ? '…' : tr('sop.save')}</button>
+  </div>`;
+}
+
+function renderRunBanner(): string {
+  const run = boot?.run;
+  if (!run) {
+    return '';
+  }
+  const statuses = runStatus?.nodes ?? [];
+  const done = statuses.filter((n) => n.status === 'done').length;
+  const failed = statuses.filter((n) => n.status === 'failed').length;
+  const phase = !runStatus
+    ? tr('sop.loadingRun')
+    : runStatus.all_terminal
+      ? failed > 0
+        ? tr('sop.runFailed', { failed })
+        : tr('sop.runDone')
+      : tr('sop.runProgress', { done, total: statuses.length });
+  return `
+  <div class="agd-sop-run-banner" id="agd-sop-run-banner">
+    <span class="agd-sop-run-phase">${esc(phase)}</span>
+    <code class="agd-mono">${esc(run.rootJobId)}</code>
+    <button type="button" class="agd-mini-btn" id="agd-sop-copy-root">${tr('settings.copy')}</button>
+    ${run.stale ? `<span class="agd-sop-run-stale">${tr('sop.runStale')}</span>` : ''}
+    <span class="agd-flex"></span>
+    <button type="button" class="agd-mini-btn" id="agd-sop-forget-run">${tr('sop.forgetRun')}</button>
   </div>`;
 }
 
@@ -450,7 +713,57 @@ function renderInspector(): string {
       <div class="agd-sop-deps">${deps}</div>
       <select class="agd-input" id="agd-sop-dep-add">${addOptions}</select>
     </div>
+    ${renderNodeLog(node)}
   </div>`;
+}
+
+/** Execution log for the selected node (only once a run is tracked). */
+function renderNodeLog(node: SopNode): string {
+  const status = statusOf(node.name);
+  if (!runActive()) {
+    return '';
+  }
+  const log = nodeLogFor === node.name ? nodeLog : null;
+  const steps = (log?.steps ?? [])
+    .map(
+      (step) => `
+      <div class="agd-sop-step">
+        <div class="agd-sop-step-head">
+          <span class="agd-mono">${esc(step.task_id.slice(0, 8))}</span>
+          <span class="agd-dim">${esc(step.status)}${step.exit_code === null ? '' : ` · exit ${step.exit_code}`}</span>
+        </div>
+        ${step.stdout ? `<pre class="agd-sop-stdout">${esc(step.stdout)}</pre>` : ''}
+        ${step.stderr ? `<pre class="agd-sop-stderr">${esc(step.stderr)}</pre>` : ''}
+      </div>`,
+    )
+    .join('');
+  const artifacts = runStatus?.nodes.find((n) => n.name === node.name)?.artifacts ?? [];
+  return `
+  <div class="agd-sop-field">
+    <span>${tr('sop.nodeLog')} ${status ? `<em class="agd-sop-run-status is-${esc(status)}">${esc(statusText(status))}</em>` : ''}</span>
+    ${
+      artifacts.length > 0
+        ? `<div class="agd-sop-artifacts">${artifacts
+            .map(
+              (uri) =>
+                `<button type="button" class="agd-sop-artifact agd-mono" data-artifact="${esc(uri)}">${esc(uri)}</button>`,
+            )
+            .join('')}</div>`
+        : ''
+    }
+    <div class="agd-sop-steps">${
+      steps ||
+      `<p class="agd-dim">${
+        status === '' || status === 'blocked' ? tr('sop.nodeLogPending') : tr('sop.nodeLogEmpty')
+      }</p>`
+    }</div>
+  </div>`;
+}
+
+function statusText(status: string): string {
+  const key = `sop.status.${status}` as MessageKey;
+  const text = tr(key);
+  return text === key ? status : text;
 }
 
 function renderImpact(): string {
@@ -542,8 +855,12 @@ function mountCanvas(): void {
     view = canvas.getView();
   }
   const doc = model();
+  // Read-only *while* a run is in flight: the canvas must show the spec that
+  // was actually submitted. Once every node is terminal the graph is history,
+  // so editing resumes (and later marks the run stale).
+  const editable = !runRunning() && doc !== null && boot?.parseError === null;
   const options = {
-    editable: true,
+    editable,
     nodes: (doc?.nodes ?? []).map((node) => {
       const problems = nodeIssues(node);
       return {
@@ -551,6 +868,7 @@ function mountCanvas(): void {
         subtitle: node.identity || node.provider || '—',
         badge: node.output ? `→ ${node.output}` : '',
         selected: node.name === selected,
+        status: statusOf(node.name),
         problem: problems.some((i) => i.level === 'error')
           ? ('error' as const)
           : problems.some((i) => i.level === 'warning')
@@ -569,6 +887,9 @@ function mountCanvas(): void {
     onSelect: (name: string | null) => {
       selected = name;
       refreshSelectionUI();
+      if (name && runActive()) {
+        void loadNodeLog(name);
+      }
     },
     onConnect: (from: string, to: string): boolean => {
       if (!doc || wouldCycle(doc, to, from)) {
@@ -643,6 +964,8 @@ function wireEvents(): void {
   });
   document.getElementById('agd-sop-yaml')?.addEventListener('click', () => void call('sop.revealYaml'));
   document.getElementById('agd-sop-validate')?.addEventListener('click', () => void runValidate());
+  document.getElementById('agd-sop-run')?.addEventListener('click', () => void startRun());
+  document.getElementById('agd-sop-cancel-run')?.addEventListener('click', () => void cancelRun());
   document.getElementById('agd-sop-restart-server')?.addEventListener('click', async () => {
     busy = 'validate';
     render();
@@ -801,6 +1124,17 @@ function wireInspector(): void {
       .map((other) => other.name);
     pendingImpact = { kind: 'deleteNode', name: node.name, dependents, placeholders };
     render();
+  });
+  document.querySelectorAll<HTMLElement>('[data-artifact]').forEach((element) => {
+    element.addEventListener('click', async () => {
+      const uri = element.dataset.artifact ?? '';
+      try {
+        await navigator.clipboard?.writeText(uri);
+        flash(tr('settings.copied'));
+      } catch {
+        flash(uri);
+      }
+    });
   });
 }
 

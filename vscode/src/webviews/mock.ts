@@ -119,6 +119,8 @@ let sopPath: string | null = sopTemplates[0].path;
 let sopDirty = false;
 let sopValidation: { ok: boolean; error: string | null; at: number } | null = null;
 let sopPositions: Record<string, SopPoint> = {};
+let sopRun: { rootJobId: string; startedAt: number; stale: boolean } | null = null;
+let sopRunTick = 0;
 
 const sopDocs: Record<string, SopDoc> = {
   '/home/you/project/pipelines/review-fix.sop.yaml': {
@@ -237,6 +239,9 @@ function sopBoot(): Record<string, unknown> {
     dirty: sopDirty,
     positions: sopPath ? { ...sopPositions } : {},
     parseError: null,
+    workspaceFolder: '/home/you/project',
+    localDaemonId: 'dev-box-1',
+    run: sopRun,
   };
 }
 
@@ -309,6 +314,9 @@ export async function mockCall<T>(_method: string, params?: Record<string, unkno
         sopDocs[sopPath as string] = applyIntentToModel(doc, intent);
         sopDirty = true;
         sopValidation = null;
+        if (sopRun) {
+          sopRun = { ...sopRun, stale: true };
+        }
         const template = sopTemplates.find((t) => t.path === sopPath);
         if (template) {
           template.nodeCount = sopDocs[sopPath as string].nodes.length;
@@ -332,6 +340,78 @@ export async function mockCall<T>(_method: string, params?: Record<string, unkno
     case 'sop.restartServer':
       await delay(600);
       return { ok: true } as T;
+    case 'sop.run': {
+      await delay(500);
+      if (!sopPath) throw new Error('no-document');
+      const doc = sopDocs[sopPath];
+      sopRunTick = 0;
+      sopRun = {
+        rootJobId: `root-${Math.random().toString(16).slice(2, 10)}`,
+        startedAt: Date.now(),
+        stale: false,
+      };
+      return {
+        rootJobId: sopRun.rootJobId,
+        nodes: Object.fromEntries(doc.nodes.map((n, i) => [n.name, `job-${i}`])),
+        ...sopBoot(),
+      } as T;
+    }
+    case 'sop.status': {
+      // The mock advances one node per poll so the canvas really animates.
+      if (!sopRun || !sopPath) throw new Error('no-run');
+      const doc = sopDocs[sopPath];
+      sopRunTick += 1;
+      const terminal = Math.floor(sopRunTick / 1);
+      const nodes = doc.nodes.map((node, index) => ({
+        name: node.name,
+        job_id: `job-${index}`,
+        status:
+          index < terminal - 1
+            ? index === doc.nodes.length - 1
+              ? 'done'
+              : index === 1
+                ? 'failed'
+                : 'done'
+            : index === terminal - 1
+              ? 'running'
+              : 'blocked',
+        depends_on: node.dependsOn,
+        artifacts:
+          index === 0 && terminal > 0 ? ['agt-artifact://mock-review-report'] : [],
+        provider: node.identity || 'claude',
+        session_id: index < terminal - 1 ? `sess-${index}` : null,
+      }));
+      return {
+        root_job_id: sopRun.rootJobId,
+        nodes,
+        all_terminal: terminal > doc.nodes.length,
+      } as T;
+    }
+    case 'sop.nodeLog': {
+      const name = String(params?.node ?? '');
+      const status = 'done';
+      return {
+        node_name: name,
+        job_id: `job-${name}`,
+        status,
+        provider: 'claude',
+        steps: [
+          {
+            task_id: `task-${name}-1`,
+            status,
+            session_id: `sess-${name}`,
+            exit_code: 0,
+            stdout: `[mock] ${name} 执行完成\n产物已写入 .agt/outputs/`,
+            stderr: null,
+          },
+        ],
+      } as T;
+    }
+    case 'sop.cancelRun':
+      return { cancelled: ['mock-node'] } as T;
+    case 'sop.forgetRun':
+      sopRun = null;
+      return sopBoot() as T;
     case 'sop.setLayout': {
       sopPositions = (params?.positions as Record<string, SopPoint>) ?? {};
       return { ok: true } as T;
