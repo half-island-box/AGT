@@ -87,7 +87,7 @@ def test_codex_builder_with_resume():
 def test_codex_builder_with_permission_args():
     """Permission args (from the adapter) slot in before resume/-p."""
     cmd = CodexCommandBuilder().build(
-        Path("/bin/codex"), _task("say hi"), ["--sandbox", "workspace-write", "--approval-mode", "full-auto"]
+        Path("/bin/codex"), _task("say hi"), ["--sandbox", "workspace-write", "--approve-for-me"]
     )
     assert cmd == [
         "/bin/codex",
@@ -95,8 +95,7 @@ def test_codex_builder_with_permission_args():
         "--skip-git-repo-check",
         "--sandbox",
         "workspace-write",
-        "--approval-mode",
-        "full-auto",
+        "--approve-for-me",
         "say hi",
     ]
 

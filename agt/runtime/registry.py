@@ -69,16 +69,15 @@ CLAUDE_BYPASS_PERMISSION_ARGS: tuple[str, ...] = (
 # keeping everything outside the workspace read-only. Unlike Claude's
 # ``bypassPermissions`` this is a sandbox policy, not a prompt gate.
 #
-# ``--approval-mode full-auto`` is required because the default
-# ``suggest`` mode prompts the user for approval before any shell
-# command or file write. In ``agt chat``/``agt run`` stderr is silenced
-# during live output, so the prompt is invisible and codex exits with
-# empty stdout, appearing to "hang" or produce no response.
+# ``--approve-for-me`` is required because the default mode prompts the
+# user for approval before any shell command or file write. In
+# ``agt chat``/``agt run`` stderr is silenced during live output, so the
+# prompt is invisible and codex exits with empty stdout, appearing to
+# "hang" or produce no response.
 CODEX_SANDBOX_ARGS: tuple[str, ...] = (
     "--sandbox",
     "workspace-write",
-    "--approval-mode",
-    "full-auto",
+    "--approve-for-me",
 )
 
 
