@@ -75,6 +75,7 @@ let runBusy: 'run' | 'cancel' | null = null;
 let nodeLog: SopNodeLog | null = null;
 let nodeLogFor: string | null = null;
 let pollTimer: number | null = null;
+let editorMode: 'edit' | 'inspect' = 'edit';
 
 function runActive(): boolean {
   return boot?.run !== null && boot?.run !== undefined;
@@ -435,7 +436,7 @@ function render(): void {
     return;
   }
   root.innerHTML = `
-  <div class="agd-sop">
+  <div class="agd-sop ${editorMode === 'inspect' ? 'is-inspect' : ''}">
     <header class="agd-sop-head">
       <div class="agd-sop-brand"><span>AGT</span><small>${tr('sop.title')}</small></div>
       <nav class="agd-modes" aria-label="AGT modes">
@@ -536,12 +537,38 @@ function renderIdentities(doc: SopDoc | null): string {
 function renderToolbar(): string {
   const doc = model();
   const running = runRunning();
-  // Editing is blocked only while a run is in flight; a finished run keeps
-  // being tracked (and turns "stale" once the template changes).
-  const editable = doc !== null && boot?.parseError === null && !running;
+  // In inspect mode all editing controls are hidden; Run/Cancel are only
+  // shown here too (edit mode focuses on template authoring).
+  const editable = editorMode === 'edit' && doc !== null && boot?.parseError === null && !running;
   const done = runActive() && !running;
+
+  const modeToggle = `
+  <span class="agd-sop-mode-toggle">
+    <button type="button" class="agd-sop-mode-btn ${editorMode === 'edit' ? 'is-active' : ''}" data-editor-mode="edit" title="${tr('sop.modeEdit')}">✏ ${tr('sop.modeEdit')}</button>
+    <button type="button" class="agd-sop-mode-btn ${editorMode === 'inspect' ? 'is-active' : ''}" data-editor-mode="inspect" title="${tr('sop.modeInspect')}">👁 ${tr('sop.modeInspect')}</button>
+  </span>`;
+
+  if (editorMode === 'inspect') {
+    return `
+    <div class="agd-sop-toolbar">
+      ${modeToggle}
+      <span class="agd-flex"></span>
+      <button type="button" class="agd-btn" id="agd-sop-fit">${tr('sop.fit')}</button>
+      <button type="button" class="agd-btn" id="agd-sop-zoom-out">−</button>
+      <button type="button" class="agd-btn" id="agd-sop-zoom-in">+</button>
+      <span class="agd-flex"></span>
+      ${
+        running
+          ? `<button type="button" class="agd-btn" id="agd-sop-cancel-run" ${runBusy ? 'disabled' : ''}>${runBusy === 'cancel' ? tr('sop.cancelling') : tr('sop.cancelRun')}</button>`
+          : `<button type="button" class="agd-btn agd-btn-primary" id="agd-sop-run" ${doc !== null && boot?.parseError === null && !runBusy ? '' : 'disabled'}>${runBusy === 'run' ? tr('sop.running') : done ? tr('sop.runAgain') : tr('sop.run')}</button>`
+      }
+    </div>`;
+  }
+
   return `
   <div class="agd-sop-toolbar">
+    ${modeToggle}
+    <span class="agd-sop-toolbar-sep"></span>
     <button type="button" class="agd-btn" id="agd-sop-add" ${editable ? '' : 'disabled'}>${tr('sop.addNode')}</button>
     <button type="button" class="agd-btn" id="agd-sop-layout" ${editable ? '' : 'disabled'}>${tr('sop.autoLayout')}</button>
     <button type="button" class="agd-btn" id="agd-sop-fit">${tr('sop.fit')}</button>
@@ -554,7 +581,7 @@ function renderToolbar(): string {
     ${
       running
         ? `<button type="button" class="agd-btn" id="agd-sop-cancel-run" ${runBusy ? 'disabled' : ''}>${runBusy === 'cancel' ? tr('sop.cancelling') : tr('sop.cancelRun')}</button>`
-        : `<button type="button" class="agd-btn agd-btn-primary" id="agd-sop-run" ${editable && !runBusy ? '' : 'disabled'}>${runBusy === 'run' ? tr('sop.running') : done ? tr('sop.runAgain') : tr('sop.run')}</button>`
+        : `<button type="button" class="agd-btn agd-btn-primary" id="agd-sop-run" ${doc !== null && boot?.parseError === null && !running && !runBusy ? '' : 'disabled'}>${runBusy === 'run' ? tr('sop.running') : done ? tr('sop.runAgain') : tr('sop.run')}</button>`
     }
     <button type="button" class="agd-btn agd-btn-primary" id="agd-sop-save" ${busy || !boot?.dirty ? 'disabled' : ''}>${busy === 'save' ? '…' : tr('sop.save')}</button>
   </div>`;
@@ -622,6 +649,27 @@ function renderProblems(): string {
 
 function renderInspector(): string {
   const node = selectedNode();
+
+  /* ── inspect mode: log panel replaces the edit form ─────────────── */
+  if (editorMode === 'inspect') {
+    if (!node) {
+      return `
+      <div class="agd-sop-card agd-sop-log-card">
+        <div class="agd-sop-card-head"><span>${tr('sop.modeInspect')}</span></div>
+        <p class="agd-sop-empty">${tr('sop.noSelection')}</p>
+      </div>`;
+    }
+    if (!runActive()) {
+      return `
+      <div class="agd-sop-card agd-sop-log-card">
+        <div class="agd-sop-card-head"><span>${esc(node.name)}</span></div>
+        <p class="agd-sop-empty agd-dim">${tr('sop.inspectNoRun')}</p>
+      </div>`;
+    }
+    return renderInspectLog(node);
+  }
+
+  /* ── edit mode: form only (no execution log) ────────────────────── */
   if (!node) {
     return `
     <div class="agd-sop-card">
@@ -710,19 +758,21 @@ function renderInspector(): string {
     <label class="agd-sop-field">${tr('sop.field.dir')}<input class="agd-input agd-mono" id="agd-sop-node-dir" value="${esc(node.dir)}"></label>
     <div class="agd-sop-field">
       <span>${tr('sop.dependencies')}</span>
-      <div class="agd-sop-deps">${deps}</div>
-      <select class="agd-input" id="agd-sop-dep-add">${addOptions}</select>
+    <div class="agd-sop-deps">${deps}</div>
+    <select class="agd-input" id="agd-sop-dep-add">${addOptions}</select>
     </div>
-    ${renderNodeLog(node)}
   </div>`;
 }
 
 /** Execution log for the selected node (only once a run is tracked). */
-function renderNodeLog(node: SopNode): string {
+/**
+ * Full-height execution log for inspect mode. Renders in the wide
+ * right-hand inspector panel; the host polls run status, and each poll
+ * calls ``refreshSelectionUI()`` which re-loads the log for the
+ * currently selected node.
+ */
+function renderInspectLog(node: SopNode): string {
   const status = statusOf(node.name);
-  if (!runActive()) {
-    return '';
-  }
   const log = nodeLogFor === node.name ? nodeLog : null;
   const steps = (log?.steps ?? [])
     .map(
@@ -739,8 +789,11 @@ function renderNodeLog(node: SopNode): string {
     .join('');
   const artifacts = runStatus?.nodes.find((n) => n.name === node.name)?.artifacts ?? [];
   return `
-  <div class="agd-sop-field">
-    <span>${tr('sop.nodeLog')} ${status ? `<em class="agd-sop-run-status is-${esc(status)}">${esc(statusText(status))}</em>` : ''}</span>
+  <div class="agd-sop-card agd-sop-log-card">
+    <div class="agd-sop-card-head">
+      <span>${esc(node.name)}</span>
+      ${status ? `<em class="agd-sop-run-status is-${esc(status)}">${esc(statusText(status))}</em>` : ''}
+    </div>
     ${
       artifacts.length > 0
         ? `<div class="agd-sop-artifacts">${artifacts
@@ -751,7 +804,7 @@ function renderNodeLog(node: SopNode): string {
             .join('')}</div>`
         : ''
     }
-    <div class="agd-sop-steps">${
+    <div class="agd-sop-steps agd-sop-steps-lg">${
       steps ||
       `<p class="agd-dim">${
         status === '' || status === 'blocked' ? tr('sop.nodeLogPending') : tr('sop.nodeLogEmpty')
@@ -855,10 +908,15 @@ function mountCanvas(): void {
     view = canvas.getView();
   }
   const doc = model();
-  // Read-only *while* a run is in flight: the canvas must show the spec that
-  // was actually submitted. Once every node is terminal the graph is history,
-  // so editing resumes (and later marks the run stale).
-  const editable = !runRunning() && doc !== null && boot?.parseError === null;
+  // Read-only in inspect mode (no dragging, connecting, or renaming) and
+  // *while* a run is in flight in edit mode: the canvas must show the spec
+  // that was actually submitted. Once every node is terminal in edit mode
+  // the graph is history, so editing resumes (and later marks the run stale).
+  const editable =
+    editorMode === 'edit' &&
+    !runRunning() &&
+    doc !== null &&
+    boot?.parseError === null;
   const options = {
     editable,
     nodes: (doc?.nodes ?? []).map((node) => {
@@ -935,6 +993,20 @@ function wireEvents(): void {
     await bridge.call('setLanguage', { language: lang });
   });
   document.getElementById('agd-sop-settings')?.addEventListener('click', () => void bridge.call('openSettings'));
+  document.querySelectorAll<HTMLElement>('[data-editor-mode]').forEach((element) => {
+    element.addEventListener('click', () => {
+      const next = element.dataset.editorMode as 'edit' | 'inspect';
+      if (next === editorMode) {
+        return;
+      }
+      editorMode = next;
+      render();
+      // Load the log for the already-selected node when entering inspect.
+      if (next === 'inspect' && selected && runActive()) {
+        void loadNodeLog(selected);
+      }
+    });
+  });
   document.getElementById('agd-sop-new')?.addEventListener('click', () => void call('sop.newSop'));
   document.querySelectorAll<HTMLElement>('[data-template]').forEach((element) => {
     element.addEventListener('click', () =>

@@ -60,6 +60,7 @@ body {
 }
 .agd-sop-inspector { border-right: none; border-left: 1px solid var(--vscode-panel-border, #2e2e2e); }
 .agd-sop-main { display: grid; grid-template-rows: auto minmax(0, 1fr) auto auto; min-height: 0; }
+.agd-sop.is-inspect .agd-sop-body { grid-template-columns: 248px minmax(0, 1fr) 42%; }
 
 .agd-sop-card {
   border: 1px solid var(--vscode-panel-border, #2e2e2e); border-radius: 8px;
@@ -288,3 +289,37 @@ select.agd-input { height: 26px; }
 .agd-actions { display: flex; gap: 8px; margin-top: 14px; }
 
 .agd-sop-loading { padding: 24px; color: var(--vscode-descriptionForeground, #8b8b8b); }
+
+/* ── editor mode toggle (edit / inspect) ─────────────────────────── */
+.agd-sop-mode-toggle {
+  display: inline-flex; border-radius: 6px; overflow: hidden;
+  border: 1px solid var(--vscode-input-border, #3a3a3a);
+}
+.agd-sop-mode-btn {
+  height: 24px; padding: 0 10px; border: none; cursor: pointer;
+  background: var(--vscode-button-secondaryBackground, #2a2a2a);
+  color: var(--vscode-button-secondaryForeground, #cccccc);
+  font-size: 11px; transition: background 0.15s;
+}
+.agd-sop-mode-btn + .agd-sop-mode-btn { border-left: 1px solid var(--vscode-input-border, #3a3a3a); }
+.agd-sop-mode-btn.is-active {
+  background: var(--vscode-button-background, #0e639c);
+  color: var(--vscode-button-foreground, #ffffff);
+}
+.agd-sop-mode-btn:hover:not(.is-active) { filter: brightness(1.15); }
+
+.agd-sop-toolbar-sep {
+  width: 1px; align-self: stretch; margin: 2px 4px;
+  background: var(--vscode-panel-border, #3a3a3a);
+}
+
+/* ── inspect-mode log panel (wider, fills the inspector) ─────────── */
+.agd-sop-log-card { display: flex; flex-direction: column; min-height: 120px; }
+.agd-sop-steps-lg {
+  flex: 1; overflow: auto; min-height: 0;
+  max-height: none;
+}
+.agd-sop-steps-lg .agd-sop-stdout,
+.agd-sop-steps-lg .agd-sop-stderr {
+  max-height: 400px;
+}
