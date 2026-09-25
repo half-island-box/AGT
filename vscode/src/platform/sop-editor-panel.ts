@@ -8,7 +8,6 @@ import { looksLikeSop, minimalSpan } from '../core/sop/document';
 import type { SopPoint } from '../core/sop/layout';
 import type { EditIntent } from '../core/sop/model';
 import { fingerprint, localDaemonId } from '../core/sop/run';
-import type { SopStatus } from '../core/types';
 import {
   applyIntent,
   parseSopText,
@@ -51,6 +50,14 @@ interface RunState {
   nodes: Record<string, string>;
   startedAt: number;
 }
+
+interface RunSummary {
+  rootJobId: string;
+  startedAt: number;
+  stale: boolean;
+}
+
+const INSPECTOR_WIDTH_KEY = 'agt.sop.inspectorWidth';
 
 const STARTER_YAML = `# SOP template — edit here or on the canvas; both stay in sync.
 name: new-pipeline
@@ -118,8 +125,10 @@ export class SopEditorPanel {
   private disposables: vscode.Disposable[] = [];
   private templates: { path: string; label: string; nodeCount: number }[] = [];
   private daemonCache: { at: number; list: SopDaemonOption[] } = { at: 0, list: [] };
-  private run: RunState | null = null;
-  private lastStatus: SopStatus | null = null;
+  private runs: RunState[] = [];
+  private trackedRunId: string | null = null;
+  private selectedRunId: string | null = null;
+  private inspectorWidth: number | null = null;
 
   private constructor(ctx: SopBridgeContext) {
     this.ctx = ctx;
@@ -290,13 +299,51 @@ export class SopEditorPanel {
       parseError: this.parsed?.parseError ?? null,
       workspaceFolder: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null,
       localDaemonId: this.localDaemon(),
-      run: this.run
-        ? {
-            rootJobId: this.run.rootJobId,
-            startedAt: this.run.startedAt,
-            stale: this.run.specHash !== fingerprint(text),
+      inspectorWidth:
+        this.inspectorWidth ??
+        this.ctx.context.workspaceState.get<number>(INSPECTOR_WIDTH_KEY) ??
+        null,
+      trackedRun: this.runSummary(this.trackedRun(), text),
+      runs: this.runs.map((entry) => this.runSummary(entry, text)),
+      run: this.runSummary(
+        this.selectedRun() ?? this.trackedRun(),
+        text,
+      ),
+    };
+  }
+
+  private trackedRun(): RunState | null {
+    return this.runs.find((entry) => entry.rootJobId === this.trackedRunId) ?? null;
+  }
+
+  private selectedRun(): RunState | null {
+    return this.runs.find((entry) => entry.rootJobId === this.selectedRunId) ?? null;
+  }
+
+  private runSummary(entry: RunState | null, text: string): RunSummary | null {
+    return entry
+      ? {
+            rootJobId: entry.rootJobId,
+            startedAt: entry.startedAt,
+            stale: entry.specHash !== fingerprint(text),
           }
-        : null,
+      : null;
+  }
+
+  private upsertRun(entry: RunState): void {
+    this.runs = [
+      entry,
+      ...this.runs.filter((run) => run.rootJobId !== entry.rootJobId),
+    ].slice(0, 50);
+  }
+
+  private runPayload(entry: RunState): {
+    rootJobId: string;
+    nodes: Record<string, string>;
+  } {
+    return {
+      rootJobId: entry.rootJobId,
+      nodes: entry.nodes,
     };
   }
 
@@ -310,19 +357,37 @@ export class SopEditorPanel {
   }
 
   private runKey(uri: vscode.Uri): string {
+    return `agt.sop.runs:${uri.fsPath}`;
+  }
+
+  private legacyRunKey(uri: vscode.Uri): string {
     return `agt.sop.run:${uri.fsPath}`;
   }
 
   private async restoreRun(): Promise<void> {
     if (!this.document) {
-      this.run = null;
+      this.runs = [];
+      this.trackedRunId = null;
+      this.selectedRunId = null;
       return;
     }
-    const stored = this.ctx.context.workspaceState.get<RunState>(
-      this.runKey(this.document.uri),
-    );
-    this.run = stored ?? null;
-    this.lastStatus = null;
+    const stored =
+      this.ctx.context.workspaceState.get<unknown>(
+        this.runKey(this.document.uri),
+      ) ??
+      this.ctx.context.workspaceState.get<unknown>(
+        this.legacyRunKey(this.document.uri),
+      );
+    if (Array.isArray(stored)) {
+      this.runs = stored.filter(this.isRunState);
+    } else if (this.isRunState(stored)) {
+      // Migration: builds before run history stored only the latest run.
+      this.runs = [stored];
+    } else {
+      this.runs = [];
+    }
+    this.trackedRunId = this.runs[0]?.rootJobId ?? null;
+    this.selectedRunId = this.trackedRunId;
   }
 
   private async persistRun(): Promise<void> {
@@ -331,7 +396,29 @@ export class SopEditorPanel {
     }
     await this.ctx.context.workspaceState.update(
       this.runKey(this.document.uri),
-      this.run,
+      this.runs,
+    );
+  }
+
+  private async setInspectorWidth(width: number): Promise<void> {
+    this.inspectorWidth = Math.max(260, Math.min(900, Math.round(width)));
+    await this.ctx.context.workspaceState.update(
+      INSPECTOR_WIDTH_KEY,
+      this.inspectorWidth,
+    );
+  }
+
+  private isRunState(value: unknown): value is RunState {
+    if (typeof value !== 'object' || value === null) {
+      return false;
+    }
+    const run = value as Partial<RunState>;
+    return (
+      typeof run.rootJobId === 'string' &&
+      typeof run.specHash === 'string' &&
+      typeof run.nodes === 'object' &&
+      run.nodes !== null &&
+      typeof run.startedAt === 'number'
     );
   }
 
@@ -483,37 +570,52 @@ export class SopEditorPanel {
             cwd: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null,
             localDaemonId: this.localDaemon(),
           });
-          this.run = {
+          const entry: RunState = {
             rootJobId: submitted.root_job_id,
             specHash: fingerprint(this.document.getText()),
             nodes: submitted.nodes ?? {},
             startedAt: Date.now(),
           };
-          this.lastStatus = null;
+          this.upsertRun(entry);
+          this.trackedRunId = entry.rootJobId;
+          this.selectedRunId = entry.rootJobId;
           await this.persistRun();
           result = {
-            rootJobId: this.run.rootJobId,
-            nodes: this.run.nodes,
+            ...this.runPayload(entry),
             ...(await this.bootPayload()),
           };
           break;
         }
 
+        case 'sop.selectRun': {
+          const rootJobId = String(msg.params?.rootJobId ?? '');
+          if (!this.runs.some((run) => run.rootJobId === rootJobId)) {
+            throw new Error('unknown-run');
+          }
+          this.selectedRunId = rootJobId;
+          result = await this.bootPayload();
+          break;
+        }
+
         case 'sop.status': {
           const rootJobId =
-            String(msg.params?.rootJobId ?? '') || this.run?.rootJobId || '';
+            String(msg.params?.rootJobId ?? '') ||
+            this.trackedRun()?.rootJobId ||
+            '';
           if (rootJobId === '') {
             throw new Error('no-run');
           }
           const status = await this.ctx.lifecycle.api.sopStatus(rootJobId);
-          this.lastStatus = status;
           result = status;
           break;
         }
 
         case 'sop.nodeLog': {
           const rootJobId =
-            String(msg.params?.rootJobId ?? '') || this.run?.rootJobId || '';
+            String(msg.params?.rootJobId ?? '') ||
+            this.selectedRun()?.rootJobId ||
+            this.trackedRun()?.rootJobId ||
+            '';
           const node = String(msg.params?.node ?? '');
           if (rootJobId === '' || node === '') {
             throw new Error('no-run');
@@ -524,25 +626,27 @@ export class SopEditorPanel {
 
         case 'sop.cancelRun': {
           const rootJobId =
-            String(msg.params?.rootJobId ?? '') || this.run?.rootJobId || '';
+            String(msg.params?.rootJobId ?? '') ||
+            this.trackedRun()?.rootJobId ||
+            '';
           if (rootJobId === '') {
             throw new Error('no-run');
           }
-          const status =
-            this.lastStatus ?? (await this.ctx.lifecycle.api.sopStatus(rootJobId));
+          const status = await this.ctx.lifecycle.api.sopStatus(rootJobId);
           const terminal = new Set(['done', 'failed', 'cancelled']);
           const pending = status.nodes.filter((n) => !terminal.has(n.status));
           await Promise.all(
             pending.map((node) => this.ctx.lifecycle.api.cancelJob(node.job_id)),
           );
-          this.lastStatus = null;
           result = { cancelled: pending.map((n) => n.name) };
           break;
         }
 
         case 'sop.forgetRun': {
-          this.run = null;
-          this.lastStatus = null;
+          this.trackedRunId = null;
+          if (this.selectedRunId === null) {
+            this.selectedRunId = this.runs[0]?.rootJobId ?? null;
+          }
           await this.persistRun();
           result = await this.bootPayload();
           break;
@@ -567,6 +671,15 @@ export class SopEditorPanel {
             );
           }
           result = { ok: true };
+          break;
+        }
+
+        case 'sop.setInspectorWidth': {
+          const width = Number(msg.params?.width);
+          if (Number.isFinite(width)) {
+            await this.setInspectorWidth(width);
+          }
+          result = { ok: true, width: this.inspectorWidth };
           break;
         }
 

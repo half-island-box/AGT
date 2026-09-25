@@ -38,12 +38,20 @@ class SopSubmitResponse(BaseModel):
     nodes: dict[str, str]
 
 
+class SopArtifactSummary(BaseModel):
+    """Artifact shown in the SOP UI; ``name`` is the producer-declared file name."""
+
+    uri: str
+    name: str
+
+
 class SopNodeStatus(BaseModel):
     name: str
     job_id: str
     status: str
     depends_on: list[str] = []
     artifacts: list[str] = []
+    artifact_details: list[SopArtifactSummary] = []
     provider: str | None = None
     session_id: str | None = None
 
@@ -234,6 +242,13 @@ async def sop_status(
                 status=job.status,
                 depends_on=dep_names,
                 artifacts=[make_artifact_uri(a.artifact_id) for a in arts],
+                artifact_details=[
+                    SopArtifactSummary(
+                        uri=make_artifact_uri(a.artifact_id),
+                        name=a.name,
+                    )
+                    for a in arts
+                ],
                 provider=provider,
                 session_id=job_to_session.get(job.job_id),
             )

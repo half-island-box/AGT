@@ -39,7 +39,16 @@ interface SopBoot {
   parseError: string | null;
   workspaceFolder: string | null;
   localDaemonId: string | null;
-  run: { rootJobId: string; startedAt: number; stale: boolean } | null;
+  inspectorWidth: number | null;
+  trackedRun: SopRunSummary | null;
+  runs: SopRunSummary[];
+  run: SopRunSummary | null;
+}
+
+interface SopRunSummary {
+  rootJobId: string;
+  startedAt: number;
+  stale: boolean;
 }
 
 interface ServerValidation {
@@ -71,6 +80,8 @@ let viewInitialized = false;
 let layoutTimer: number | null = null;
 let newIdentityAlias: string | null = null;
 let runStatus: SopStatus | null = null;
+let selectedRunStatus: SopStatus | null = null;
+let selectedRunStatusRoot: string | null = null;
 let runBusy: 'run' | 'cancel' | null = null;
 let nodeLog: SopNodeLog | null = null;
 let nodeLogFor: string | null = null;
@@ -78,7 +89,11 @@ let pollTimer: number | null = null;
 let editorMode: 'edit' | 'inspect' = 'edit';
 
 function runActive(): boolean {
-  return boot?.run !== null && boot?.run !== undefined;
+  return boot?.trackedRun !== null && boot?.trackedRun !== undefined;
+}
+
+function inspectRunRoot(): string | null {
+  return boot?.run?.rootJobId ?? null;
 }
 
 function runRunning(): boolean {
@@ -87,6 +102,14 @@ function runRunning(): boolean {
 
 function statusOf(name: string): string {
   return runStatus?.nodes.find((node) => node.name === name)?.status ?? '';
+}
+
+function selectedStatusOf(name: string): string {
+  return selectedRunStatus?.nodes.find((node) => node.name === name)?.status ?? '';
+}
+
+function formatRunTime(startedAt: number): string {
+  return new Date(startedAt).toLocaleString();
 }
 
 function tr(key: MessageKey, vars?: Record<string, string | number>): string {
@@ -133,10 +156,11 @@ function allIssues(): SopIssue[] {
 function applyBoot(next: SopBoot): void {
   boot = next;
   lang = next.language;
-  if (!next.run) {
+  if (!next.trackedRun) {
     runStatus = null;
     stopPolling();
   }
+  selectedRunStatusRoot = null;
   // Local drags win over the values echoed back by the host (workspace
   // state is written on a debounce, so its copy can lag a drag).
   const merged: Record<string, SopPoint> = {};
@@ -167,7 +191,7 @@ function startPolling(): void {
     const wasTerminal = runStatus?.all_terminal ?? false;
     try {
       runStatus = await bridge.call<SopStatus>('sop.status', {
-        rootJobId: boot?.run?.rootJobId,
+        rootJobId: boot?.trackedRun?.rootJobId,
       });
     } catch (err) {
       flash(String(err instanceof Error ? err.message : err), 'error');
@@ -197,6 +221,58 @@ function stopPolling(): void {
   }
 }
 
+function clampInspectorWidth(width: number, containerWidth: number): number {
+  const max = Math.max(280, containerWidth - 248 - 320);
+  return Math.max(260, Math.min(max, width));
+}
+
+function applyInspectorWidth(width: number | null): void {
+  const root = document.querySelector<HTMLElement>('.agd-sop');
+  if (root && width !== null) {
+    root.style.setProperty('--agd-sop-inspector-width', `${Math.round(width)}px`);
+  }
+}
+
+function wireInspectorResizer(): void {
+  const handle = document.getElementById('agd-sop-inspector-resizer');
+  const container = document.querySelector<HTMLElement>('.agd-sop-body');
+  if (!handle || !container) {
+    return;
+  }
+
+  handle.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0) {
+      return;
+    }
+    event.preventDefault();
+    container.classList.add('is-resizing');
+    handle.setPointerCapture(event.pointerId);
+
+    const move = (moveEvent: PointerEvent): void => {
+      const rect = container.getBoundingClientRect();
+      const width = clampInspectorWidth(rect.right - moveEvent.clientX, rect.width);
+      if (boot) {
+        boot.inspectorWidth = width;
+      }
+      applyInspectorWidth(width);
+    };
+
+    const finish = (): void => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', finish);
+      window.removeEventListener('pointercancel', finish);
+      container.classList.remove('is-resizing');
+      if (boot?.inspectorWidth !== null && boot?.inspectorWidth !== undefined) {
+        void bridge.call('sop.setInspectorWidth', { width: boot.inspectorWidth });
+      }
+    };
+
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', finish);
+    window.addEventListener('pointercancel', finish);
+  });
+}
+
 /**
  * Update only what a status change touches (node classes, banner, log) —
  * a full re-render would tear down the canvas on every poll.
@@ -224,14 +300,21 @@ function refreshRunUI(): void {
 }
 
 async function loadNodeLog(name: string): Promise<void> {
-  if (!runActive() || name === '') {
+  const rootJobId = inspectRunRoot();
+  if (!rootJobId || name === '') {
     nodeLog = null;
     nodeLogFor = null;
+    selectedRunStatus = null;
+    selectedRunStatusRoot = null;
     return;
+  }
+  if (selectedRunStatusRoot !== rootJobId) {
+    selectedRunStatus = await bridge.call<SopStatus>('sop.status', { rootJobId });
+    selectedRunStatusRoot = rootJobId;
   }
   try {
     nodeLog = await bridge.call<SopNodeLog>('sop.nodeLog', {
-      rootJobId: boot?.run?.rootJobId,
+      rootJobId,
       node: name,
     });
     nodeLogFor = name;
@@ -240,6 +323,21 @@ async function loadNodeLog(name: string): Promise<void> {
     nodeLogFor = null;
   }
   refreshSelectionUI();
+}
+
+async function selectRun(rootJobId: string): Promise<void> {
+  if (!rootJobId || rootJobId === inspectRunRoot()) {
+    return;
+  }
+  selectedRunStatus = null;
+  selectedRunStatusRoot = null;
+  nodeLog = null;
+  nodeLogFor = null;
+  await call('sop.selectRun', { rootJobId });
+  if (selected) {
+    await loadNodeLog(selected);
+    render();
+  }
 }
 
 function flash(text: string, kind: 'info' | 'error' = 'info'): void {
@@ -349,7 +447,7 @@ async function cancelRun(): Promise<void> {
   runBusy = 'cancel';
   render();
   try {
-    await bridge.call('sop.cancelRun', { rootJobId: boot?.run?.rootJobId });
+    await bridge.call('sop.cancelRun', { rootJobId: boot?.trackedRun?.rootJobId });
     flash(tr('sop.cancelRequested'));
   } catch (err) {
     flash(String(err instanceof Error ? err.message : err), 'error');
@@ -362,7 +460,7 @@ async function cancelRun(): Promise<void> {
 
 function wireRunBanner(): void {
   document.getElementById('agd-sop-copy-root')?.addEventListener('click', async () => {
-    const id = boot?.run?.rootJobId;
+    const id = boot?.trackedRun?.rootJobId;
     if (!id) {
       return;
     }
@@ -376,7 +474,6 @@ function wireRunBanner(): void {
   document.getElementById('agd-sop-forget-run')?.addEventListener('click', async () => {
     stopPolling();
     runStatus = null;
-    nodeLog = null;
     await call('sop.forgetRun');
   });
 }
@@ -402,6 +499,7 @@ function render(): void {
     root.innerHTML = `<div class="agd-sop-loading">…</div>`;
     return;
   }
+  applyInspectorWidth(boot.inspectorWidth);
   const doc = model();
   if (!doc) {
     // No template bound yet: guide instead of showing dead chrome. The
@@ -436,7 +534,7 @@ function render(): void {
     return;
   }
   root.innerHTML = `
-  <div class="agd-sop ${editorMode === 'inspect' ? 'is-inspect' : ''}">
+    <div class="agd-sop ${editorMode === 'inspect' ? 'is-inspect' : ''}" style="--agd-sop-inspector-width:${boot.inspectorWidth ? `${Math.round(boot.inspectorWidth)}px` : '42%'}">
     <header class="agd-sop-head">
       <div class="agd-sop-brand"><span>AGT</span><small>${tr('sop.title')}</small></div>
       <nav class="agd-modes" aria-label="AGT modes">
@@ -462,6 +560,11 @@ function render(): void {
         ${showPreview ? renderPreview() : ''}
         ${renderProblems()}
       </section>
+      ${
+        editorMode === 'inspect'
+          ? `<div class="agd-sop-splitter" id="agd-sop-inspector-resizer" role="separator" aria-orientation="vertical" title="${tr('sop.resizeLogs')}"></div>`
+          : ''
+      }
       <aside class="agd-sop-inspector">
         ${renderInspector()}
       </aside>
@@ -474,6 +577,7 @@ function render(): void {
   mountCanvas();
   wireEvents();
   wireInspector();
+  wireInspectorResizer();
   wireRunBanner();
 }
 
@@ -496,6 +600,31 @@ function renderTemplates(): string {
       <button type="button" class="agd-mini-btn" id="agd-sop-new" title="${tr('sop.newSop')}">+</button>
     </div>
     ${rows || `<p class="agd-sop-empty">${tr('sop.noTemplates')}</p>`}
+  </div>`;
+}
+
+function renderRunHistory(): string {
+  const runs = boot?.runs ?? [];
+  if (runs.length === 0) {
+    return `
+    <div class="agd-sop-card agd-sop-runs-card">
+      <div class="agd-sop-card-head"><span>${tr('sop.runHistory')}</span></div>
+      <p class="agd-sop-empty agd-dim">${tr('sop.noRuns')}</p>
+    </div>`;
+  }
+  return `
+  <div class="agd-sop-card agd-sop-runs-card">
+    <div class="agd-sop-card-head"><span>${tr('sop.runHistory')}</span></div>
+    <div class="agd-sop-runs">${runs
+      .map(
+        (run) => `
+        <button type="button" class="agd-sop-run-item ${run.rootJobId === boot?.run?.rootJobId ? 'is-active' : ''}" data-run="${esc(run.rootJobId)}" title="${esc(run.rootJobId)}">
+          <span class="agd-mono">${esc(run.rootJobId.slice(0, 8))}</span>
+          <small>${esc(formatRunTime(run.startedAt))}</small>
+          ${run.stale ? `<em>${tr('sop.runStale')}</em>` : ''}
+        </button>`,
+      )
+      .join('')}</div>
   </div>`;
 }
 
@@ -588,7 +717,7 @@ function renderToolbar(): string {
 }
 
 function renderRunBanner(): string {
-  const run = boot?.run;
+  const run = boot?.trackedRun;
   if (!run) {
     return '';
   }
@@ -654,12 +783,16 @@ function renderInspector(): string {
   if (editorMode === 'inspect') {
     if (!node) {
       return `
+      ${renderRunHistory()}
       <div class="agd-sop-card agd-sop-log-card">
         <div class="agd-sop-card-head"><span>${tr('sop.modeInspect')}</span></div>
         <p class="agd-sop-empty">${tr('sop.noSelection')}</p>
       </div>`;
     }
     if (!runActive()) {
+      if (boot?.run) {
+        return renderInspectLog(node);
+      }
       return `
       <div class="agd-sop-card agd-sop-log-card">
         <div class="agd-sop-card-head"><span>${esc(node.name)}</span></div>
@@ -772,7 +905,7 @@ function renderInspector(): string {
  * currently selected node.
  */
 function renderInspectLog(node: SopNode): string {
-  const status = statusOf(node.name);
+  const status = selectedStatusOf(node.name);
   const log = nodeLogFor === node.name ? nodeLog : null;
   const steps = (log?.steps ?? [])
     .map(
@@ -787,8 +920,10 @@ function renderInspectLog(node: SopNode): string {
       </div>`,
     )
     .join('');
-  const artifacts = runStatus?.nodes.find((n) => n.name === node.name)?.artifacts ?? [];
+  const artifacts = selectedRunStatus?.nodes.find((n) => n.name === node.name)
+    ?.artifact_details ?? [];
   return `
+  ${renderRunHistory()}
   <div class="agd-sop-card agd-sop-log-card">
     <div class="agd-sop-card-head">
       <span>${esc(node.name)}</span>
@@ -798,8 +933,11 @@ function renderInspectLog(node: SopNode): string {
       artifacts.length > 0
         ? `<div class="agd-sop-artifacts">${artifacts
             .map(
-              (uri) =>
-                `<button type="button" class="agd-sop-artifact agd-mono" data-artifact="${esc(uri)}">${esc(uri)}</button>`,
+              (artifact) =>
+                `<button type="button" class="agd-sop-artifact" data-artifact="${esc(artifact.uri)}" title="${esc(artifact.uri)}">
+                   <strong>${esc(artifact.name)}</strong>
+                   <small class="agd-mono">${esc(artifact.uri)}</small>
+                 </button>`,
             )
             .join('')}</div>`
         : ''
@@ -1004,6 +1142,8 @@ function wireEvents(): void {
       // Load the log for the already-selected node when entering inspect.
       if (next === 'inspect' && selected && runActive()) {
         void loadNodeLog(selected);
+      } else if (next === 'inspect' && selected && boot?.run) {
+        void loadNodeLog(selected);
       }
     });
   });
@@ -1130,6 +1270,11 @@ function wireEvents(): void {
 
 /** Inspector bindings — re-run whenever only the inspector re-renders. */
 function wireInspector(): void {
+  document.querySelectorAll<HTMLElement>('[data-run]').forEach((element) => {
+    element.addEventListener('click', () =>
+      void selectRun(element.dataset.run ?? ''),
+    );
+  });
   const commit = (field: NodeField, value: string): void => {
     const node = selectedNode();
     if (!node) {

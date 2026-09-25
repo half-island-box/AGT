@@ -164,8 +164,14 @@ export interface SopNodeStatus {
   status: string;
   depends_on: string[];
   artifacts: string[];
+  artifact_details?: SopArtifactSummary[];
   provider: string | null;
   session_id: string | null;
+}
+
+export interface SopArtifactSummary {
+  uri: string;
+  name: string;
 }
 
 export interface SopStatus {

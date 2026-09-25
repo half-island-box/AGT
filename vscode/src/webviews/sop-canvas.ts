@@ -66,8 +66,9 @@ export class SopCanvas {
       this.offset = { ...options.view.offset };
     }
     this.host.addEventListener('pointerdown', this.onPointerDown);
-    this.host.addEventListener('pointermove', this.onPointerMove);
-    this.host.addEventListener('pointerup', this.onPointerUp);
+    window.addEventListener('pointermove', this.onPointerMove);
+    window.addEventListener('pointerup', this.onPointerUp);
+    window.addEventListener('pointercancel', this.onPointerUp);
     this.host.addEventListener('dblclick', this.onDoubleClick);
     this.host.addEventListener('wheel', this.onWheel, { passive: false });
     this.host.addEventListener('contextmenu', (event) => event.preventDefault());
@@ -105,8 +106,9 @@ export class SopCanvas {
 
   dispose(): void {
     this.host.removeEventListener('pointerdown', this.onPointerDown);
-    this.host.removeEventListener('pointermove', this.onPointerMove);
-    this.host.removeEventListener('pointerup', this.onPointerUp);
+    window.removeEventListener('pointermove', this.onPointerMove);
+    window.removeEventListener('pointerup', this.onPointerUp);
+    window.removeEventListener('pointercancel', this.onPointerUp);
     this.host.removeEventListener('dblclick', this.onDoubleClick);
     this.host.removeEventListener('wheel', this.onWheel);
   }
@@ -175,11 +177,7 @@ export class SopCanvas {
         </svg>
         ${nodes}
       </div>
-      <div class="agd-sop-canvas-hint">${
-        this.options.editable
-          ? escapeHtml(this.scaleLabel())
-          : ''
-      }</div>`;
+      <div class="agd-sop-canvas-hint">${escapeHtml(this.scaleLabel())}</div>`;
   }
 
   private scaleLabel(): string {
@@ -236,32 +234,32 @@ export class SopCanvas {
     if (event.button !== 0) {
       return;
     }
+    event.preventDefault();
+    this.host.classList.add('is-dragging');
     const target = event.target as HTMLElement;
     const port = target.closest('[data-port]') as HTMLElement | null;
     const nodeEl = target.closest('[data-node]') as HTMLElement | null;
-    if (!this.options.editable) {
-      if (nodeEl) {
-        this.options.onSelect(nodeEl.dataset.node ?? null);
-      }
-      return;
-    }
     if (port && port.dataset.port === 'out' && port.dataset.node) {
+      if (!this.options.editable) {
+        return;
+      }
       const point = this.toWorld(event.clientX, event.clientY);
       this.drag = { kind: 'link', from: port.dataset.node, x: point.x, y: point.y };
       capturePointer(this.host, event.pointerId);
       return;
     }
     if (nodeEl && nodeEl.dataset.node) {
+      const nodeName = nodeEl.dataset.node;
       const world = this.toWorld(event.clientX, event.clientY);
-      const point = this.positions[nodeEl.dataset.node] ?? { x: 0, y: 0 };
+      const point = this.positions[nodeName] ?? { x: 0, y: 0 };
       this.drag = {
         kind: 'node',
-        name: nodeEl.dataset.node,
+        name: nodeName,
         grabX: world.x - point.x,
         grabY: world.y - point.y,
       };
-      this.selectedName = nodeEl.dataset.node;
-      this.options.onSelect(nodeEl.dataset.node);
+      this.selectedName = nodeName;
+      this.options.onSelect(nodeName);
       capturePointer(this.host, event.pointerId);
       return;
     }
@@ -307,6 +305,7 @@ export class SopCanvas {
   private onPointerUp = (event: PointerEvent): void => {
     const drag = this.drag;
     this.drag = null;
+    this.host.classList.remove('is-dragging');
     if (!drag) {
       return;
     }
