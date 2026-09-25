@@ -505,7 +505,7 @@ function render(): void {
     // No template bound yet: guide instead of showing dead chrome. The
     // toolbar stays rendered but disabled (see renderToolbar).
     root.innerHTML = `
-    <div class="agd-sop">
+    <div class="agd-sop is-empty">
       <header class="agd-sop-head">
         <div class="agd-sop-brand"><span>AGT</span><small>${tr('sop.title')}</small></div>
         <nav class="agd-modes" aria-label="AGT modes">
@@ -534,13 +534,13 @@ function render(): void {
     return;
   }
   root.innerHTML = `
-    <div class="agd-sop ${editorMode === 'inspect' ? 'is-inspect' : ''}" style="--agd-sop-inspector-width:${boot.inspectorWidth ? `${Math.round(boot.inspectorWidth)}px` : '42%'}">
+    <div class="agd-sop ${editorMode === 'inspect' ? 'is-inspect' : ''}" style="--agd-sop-inspector-width:${boot.inspectorWidth ? `${Math.round(boot.inspectorWidth)}px` : '288px'}">
     <header class="agd-sop-head">
       <div class="agd-sop-brand"><span>AGT</span><small>${tr('sop.title')}</small></div>
       <nav class="agd-modes" aria-label="AGT modes">
         <button type="button" class="agd-mode" data-mode="chat">${tr('mode.chat')}</button>
         <button type="button" class="agd-mode agd-mode-active">${tr('mode.sop')}</button>
-        <button type="button" class="agd-mode" disabled title="${tr('chat.goalComing')}">${tr('mode.goal')}</button>
+        <button type="button" class="agd-mode" data-mode="goal">${tr('mode.goal')}</button>
       </nav>
       <div class="agd-sop-tools">
         <span class="agd-sop-doc">${doc ? esc(boot.templatePath ?? '') : ''}</span>
@@ -560,11 +560,7 @@ function render(): void {
         ${showPreview ? renderPreview() : ''}
         ${renderProblems()}
       </section>
-      ${
-        editorMode === 'inspect'
-          ? `<div class="agd-sop-splitter" id="agd-sop-inspector-resizer" role="separator" aria-orientation="vertical" title="${tr('sop.resizeLogs')}"></div>`
-          : ''
-      }
+      <div class="agd-sop-splitter" id="agd-sop-inspector-resizer" role="separator" aria-orientation="vertical" title="${tr('sop.resizeInspector')}"></div>
       <aside class="agd-sop-inspector">
         ${renderInspector()}
       </aside>
@@ -1125,6 +1121,7 @@ function mountCanvas(): void {
 
 function wireEvents(): void {
   document.querySelector('[data-mode="chat"]')?.addEventListener('click', () => void bridge.call('openChat'));
+  document.querySelector('[data-mode="goal"]')?.addEventListener('click', () => void bridge.call('openGoal'));
   document.getElementById('agd-sop-lang')?.addEventListener('click', async () => {
     lang = lang === 'zh' ? 'en' : 'zh';
     render();

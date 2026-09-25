@@ -196,3 +196,85 @@ export interface SopNodeLog {
   provider: string | null;
   steps: SopNodeLogStep[];
 }
+
+export interface ArtifactInfo {
+  artifact_id: string;
+  job_id: string;
+  step_id: string;
+  producer_identity_id: string | null;
+  name: string;
+  mime_type: string;
+  summary: string | null;
+  status_flag: string | null;
+  size: number;
+  sha256: string;
+  status: string;
+  uri: string;
+  created_at: string;
+}
+
+export interface GoalBudgetInfo {
+  max_depth: number;
+  max_descendants: number;
+  max_batch: number;
+}
+
+export interface GoalMetaInfo {
+  goal: string;
+  template: string | null;
+  budget: GoalBudgetInfo | null;
+  goal_sha256: string | null;
+}
+
+export interface GoalRunInfo {
+  root_job_id: string;
+  goal: string;
+  status: string;
+  provider: string;
+  identity_did: string | null;
+  daemon_id: string | null;
+  created_at: string;
+  updated_at: string;
+  total_nodes: number;
+  status_counts: Record<string, number>;
+  meta: GoalMetaInfo;
+}
+
+export interface GoalRunListInfo {
+  runs: GoalRunInfo[];
+  total: number;
+}
+
+export interface GoalSubmitResult {
+  root_job_id: string;
+  status: string;
+}
+
+export interface GoalJobTreeNode {
+  job_id: string;
+  parent_job_id: string | null;
+  status: string;
+  provider: string;
+  identity_did: string | null;
+  daemon_id: string | null;
+  session_id: string | null;
+  label: string;
+  duration: number | null;
+  current_task_id: string | null;
+  ask_question: string | null;
+  artifacts: ArtifactInfo[];
+  error: string | null;
+  children: GoalJobTreeNode[];
+}
+
+export interface GoalTreeInfo {
+  root_job_id: string;
+  goal: GoalMetaInfo | null;
+  node: GoalJobTreeNode;
+}
+
+export interface JobLogInfo {
+  job_id: string;
+  status: string;
+  steps: SopNodeLogStep[];
+}

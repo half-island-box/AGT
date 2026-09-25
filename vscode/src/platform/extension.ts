@@ -6,6 +6,7 @@ import { AgtStatusBar } from './statusbar';
 import { AgtTreeProvider } from './tree';
 import { SettingsPanel, type BridgeContext } from './settings-panel';
 import { ChatPanel, type ChatBridgeContext } from './chat-panel';
+import { GoalPanel, type GoalBridgeContext } from './goal-panel';
 import { looksLikeSop } from '../core/sop/document';
 import { SopEditorPanel, type SopBridgeContext } from './sop-editor-panel';
 
@@ -102,6 +103,7 @@ export function activate(context: vscode.ExtensionContext): void {
     },
     openSettings: () => SettingsPanel.show(bridgeContext),
     openSop: () => openSopEditor(),
+    openGoal: () => GoalPanel.show(goalContext),
   };
   const sopContext: SopBridgeContext = {
     extensionUri: context.extensionUri,
@@ -116,6 +118,24 @@ export function activate(context: vscode.ExtensionContext): void {
       );
     },
     openChat: () => ChatPanel.show(chatContext),
+    openGoal: () => GoalPanel.show(goalContext),
+    openSettings: () => SettingsPanel.show(bridgeContext),
+  };
+  const goalContext: GoalBridgeContext = {
+    extensionUri: context.extensionUri,
+    context,
+    lifecycle,
+    language: () => language,
+    setLanguage: async (next) => {
+      await vscode.workspace.getConfiguration('agt').update(
+        'language',
+        next,
+        vscode.ConfigurationTarget.Global,
+      );
+    },
+    openChat: () => ChatPanel.show(chatContext),
+    openSop: () => openSopEditor(),
+    openSopFile: (uri) => openSopEditor(uri),
     openSettings: () => SettingsPanel.show(bridgeContext),
   };
 
@@ -154,6 +174,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('agt.showSettings', () => SettingsPanel.show(bridgeContext)),
     vscode.commands.registerCommand('agt.showChat', () => ChatPanel.show(chatContext)),
     vscode.commands.registerCommand('agt.showSop', () => openSopEditor()),
+    vscode.commands.registerCommand('agt.showGoal', () => GoalPanel.show(goalContext)),
     vscode.commands.registerCommand('agt.openSopEditor', (uri?: vscode.Uri) =>
       openSopEditor(uri),
     ),
@@ -181,6 +202,7 @@ export function activate(context: vscode.ExtensionContext): void {
       lifecycle.updateOptions(config);
       ChatPanel.notifyLanguage(config.language);
       SopEditorPanel.notifyLanguage(config.language);
+      GoalPanel.notifyLanguage(config.language);
       void refresh();
     }),
     { dispose: () => clearInterval(pollTimer) },

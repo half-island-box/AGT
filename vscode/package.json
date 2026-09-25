@@ -48,6 +48,11 @@
         "icon": "$(type-hierarchy)"
       },
       {
+        "command": "agt.showGoal",
+        "title": "AGT: Open Goal",
+        "icon": "$(rocket)"
+      },
+      {
         "command": "agt.newSop",
         "title": "AGT: New SOP Template",
         "icon": "$(new-file)"
@@ -90,11 +95,16 @@
           "when": "view == agt.daemons",
           "group": "navigation"
         },
-        {
-          "command": "agt.showSop",
+      {
+        "command": "agt.showSop",
           "when": "view == agt.daemons",
           "group": "navigation"
-        },
+      },
+      {
+        "command": "agt.showGoal",
+        "when": "view == agt.daemons",
+        "group": "navigation"
+      },
         {
           "command": "agt.newSop",
           "when": "view == agt.daemons",

@@ -35,7 +35,7 @@ It is an experimental Python foundation for a future multi-agent desktop client.
 - **Daemon**: HTTP long-poll or reverse-dial WebSocket (NAT traversal), semaphore-based concurrency (`AGT_MAX_CONCURRENT`), heartbeat + runtime registration.
 - **MCP runtime catalog**: `list_runtimes` tool served at `/mcp/` (Streamable HTTP) so parent agents can discover which daemons/providers are online before spawning children. Claude Code gets it via project `.mcp.json`; Codex via global `~/.codex/config.toml`.
 - **Provider adapters**: command builders, session locators, stream sinks, resume-rejection detectors, and MCP config profiles are registered per provider — adding a new agent means adding a registry row, not touching the executor.
-- **VS Code extension (in development)**: TypeScript client in `vscode/` — activity-bar daemon tree, server + local daemon lifecycle management, status bar, settings webview, Chat mode, a visual SOP editor, and zh/en UI. It talks to the same HTTP API as the CLI; no Python logic is duplicated.
+- **VS Code extension (in development)**: TypeScript client in `vscode/` — activity-bar daemon tree, server + local daemon lifecycle management, status bar, settings webview, Chat mode, a visual SOP editor, Goal orchestration, and zh/en UI. It talks to the same HTTP API as the CLI; no Python logic is duplicated.
 
 ## Requirements
 
@@ -103,7 +103,7 @@ Remote daemons connect via HTTP or **reverse-dial WebSocket** (server dials out,
 
 ## VS Code extension (early)
 
-The `vscode/` directory holds a TypeScript UI client for the server, filled in milestone by milestone (M1 skeleton, M2 Chat, M3 SOP; Goal is next). Chat covers daemon/agent/identity selection with provider logos, daemon session history, live SSE output, multi-turn continuation and cancellation, in zh/en text; M3 adds a **visual SOP editor** for the YAML DAGs.
+The `vscode/` directory holds a TypeScript UI client for the server. Chat covers daemon/agent/identity selection with provider logos, daemon session history, live SSE output, multi-turn continuation and cancellation, in zh/en text; the **visual SOP editor** supports editable YAML DAGs and run monitoring; **Goal mode** submits open-ended goals, tracks the dynamically growing Job tree, answers `AGT-ASK` questions, cancels cascades, and exports a run as a SOP draft.
 
 ```bash
 cd vscode
@@ -128,6 +128,10 @@ Open **AGT: Open SOP Editor** (or the SOP tab in Chat) to edit a SOP as a DAG: t
 Round-trip fidelity comes from the `yaml` package's document AST (the extension's only runtime dependency), which keeps comments, key order and unknown keys for untouched parts; only `lineWidth` folding and flow-collection padding are normalized. Structural checks that the canvas needs (cycles, dangling references, duplicate outputs, `${node.output}` rules) run locally and mirror `agt/sop/dsl.py`; **server validation is the authority** and is served by `POST /api/sop/validate`, which takes the document as authored and always answers `200` with `ok`/`error`. Manual node positions are a view concern and live in workspace state, never in the template.
 
 **Run monitoring (M3)**: **Run** submits the document (`POST /api/sop/submit`, with `cwd` = workspace folder and `local_daemon_id` picked from `/api/daemons`) and then polls `GET /api/sop/{root}/status` every 1.5s until every node is terminal. While a run is in flight the canvas is read-only and each node carries its job status (queued/running/waiting/blocked/done/failed/cancelled) as outline colour; selecting a node loads `GET /api/sop/{root}/nodes/{name}/log` into the inspector, with stdout/stderr per step and artifact names plus URIs (click to copy). Inspect mode also lists recent runs for the template; selecting any run loads its node status and logs. **Cancel run** cancels every unfinished node job through `POST /api/jobs/{id}/cancel`; **Stop tracking** stops live monitoring without deleting history. Recent runs per file are kept in workspace state (up to 50), and editing the template afterwards flags each run as `template changed since submit` (fingerprint comparison) instead of silently pretending the canvas still matches the run.
+
+### Goal mode
+
+Open **AGT: Open Goal** (or the Goal tab in Chat/SOP) to submit an open-ended goal with an optional identity, provider, daemon, working directory, depth, and descendant budget. The left sidebar lists persisted runs from `GET /api/goal/runs`; selecting one loads `GET /api/jobs/{root}/tree` and polls it while the root remains non-terminal. Nodes show status, provider, daemon, duration, current Step, errors, and artifacts; selecting a node loads its Job log and polls the current Step so in-progress stdout appears alongside completed steps. If a node enters `waiting_input`, its structured `ask_question` is displayed with an answer box backed by `POST /api/jobs/{id}/input`. **Cancel run** cascades through the Job subtree, and **Export SOP draft** saves the backend-generated YAML and opens it in the SOP editor for review.
 
 ## SOP example
 

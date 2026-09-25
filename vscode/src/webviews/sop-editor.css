@@ -50,7 +50,10 @@ body {
 
 .agd-sop-body {
   display: grid;
-  grid-template-columns: 248px minmax(0, 1fr) 288px;
+  grid-template-columns: 248px minmax(240px, 1fr) 6px minmax(
+    280px,
+    var(--agd-sop-inspector-width, 288px)
+  );
   min-height: 0;
 }
 .agd-sop-side, .agd-sop-inspector {
@@ -60,11 +63,8 @@ body {
 }
 .agd-sop-inspector { border-right: none; border-left: 1px solid var(--vscode-panel-border, #2e2e2e); }
 .agd-sop-main { display: grid; grid-template-rows: auto minmax(0, 1fr) auto auto; min-height: 0; }
-.agd-sop.is-inspect .agd-sop-body {
-  grid-template-columns: 248px minmax(240px, 1fr) 6px minmax(
-    260px,
-    var(--agd-sop-inspector-width, 42%)
-  );
+.agd-sop.is-empty .agd-sop-body {
+  grid-template-columns: 248px minmax(0, 1fr) 288px;
 }
 .agd-sop-body.is-resizing {
   cursor: col-resize;

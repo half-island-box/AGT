@@ -17,6 +17,7 @@ export interface ChatBridgeContext {
   setLanguage(language: UiLanguage): Promise<void>;
   openSettings(): void;
   openSop(): void;
+  openGoal(): void;
 }
 
 interface BridgeRequest {
@@ -182,6 +183,11 @@ export class ChatPanel {
           break;
         case 'openSop':
           this.ctx.openSop();
+          result = { ok: true };
+          break;
+
+        case 'openGoal':
+          this.ctx.openGoal();
           result = { ok: true };
           break;
         case 'sessions': {

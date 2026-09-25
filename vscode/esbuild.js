@@ -56,23 +56,39 @@ const webviewSop = {
   logLevel: 'info',
 };
 
+/** Goal webview entry — browser context, also previewable standalone. */
+const webviewGoal = {
+  entryPoints: ['src/webviews/goal.ts'],
+  bundle: true,
+  platform: 'browser',
+  format: 'iife',
+  target: 'es2022',
+  outfile: 'dist/webview-goal.js',
+  sourcemap: false,
+  minify: production,
+  logLevel: 'info',
+};
+
 async function main() {
   if (watch) {
     const ctxExt = await esbuild.context(extension);
     const ctxWeb = await esbuild.context(webviewSettings);
     const ctxChat = await esbuild.context(webviewChat);
     const ctxSop = await esbuild.context(webviewSop);
+    const ctxGoal = await esbuild.context(webviewGoal);
     await Promise.all([
       ctxExt.watch(),
       ctxWeb.watch(),
       ctxChat.watch(),
       ctxSop.watch(),
+      ctxGoal.watch(),
     ]);
   } else {
     await esbuild.build(extension);
     await esbuild.build(webviewSettings);
     await esbuild.build(webviewChat);
     await esbuild.build(webviewSop);
+    await esbuild.build(webviewGoal);
   }
 }
 

@@ -4,6 +4,11 @@ import type {
   IdentityBindingInfo,
   IdentityInfo,
   IdentityWithBindings,
+  GoalJobTreeNode,
+  GoalRunListInfo,
+  GoalRunInfo,
+  GoalSubmitResult,
+  JobLogInfo,
   JobInfo,
   JobStatusInfo,
   RuntimeInfo,
@@ -207,6 +212,48 @@ export class AgtApi {
       `/api/jobs/${encodeURIComponent(jobId)}/cancel`,
       {},
     );
+  }
+
+  async submitGoal(input: {
+    goal: string;
+    identityDid?: string | null;
+    provider?: string | null;
+    daemonId?: string | null;
+    dir?: string | null;
+    maxDepth?: number;
+    maxDescendants?: number;
+  }): Promise<GoalSubmitResult> {
+    return this.post<GoalSubmitResult>('/api/goal/submit', {
+      goal: input.goal,
+      identity_did: input.identityDid ?? null,
+      provider: input.provider ?? null,
+      daemon_id: input.daemonId ?? null,
+      dir: input.dir ?? null,
+      max_depth: input.maxDepth ?? 5,
+      max_descendants: input.maxDescendants ?? 64,
+    });
+  }
+
+  async goalRuns(limit = 50, offset = 0): Promise<GoalRunListInfo> {
+    return this.request<GoalRunListInfo>(
+      `/api/goal/runs?limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset)}`,
+    );
+  }
+
+  async jobTree(jobId: string): Promise<{ root_job_id: string; goal: GoalRunInfo['meta'] | null; node: GoalJobTreeNode }> {
+    return this.request(`/api/jobs/${encodeURIComponent(jobId)}/tree`);
+  }
+
+  async jobLog(jobId: string): Promise<JobLogInfo> {
+    return this.request(`/api/jobs/${encodeURIComponent(jobId)}/log`);
+  }
+
+  async goalExport(rootJobId: string, includeFailed = false, keepPlanning = false): Promise<{ yaml: string; warnings: string[] }> {
+    const params = new URLSearchParams({
+      include_failed: String(includeFailed),
+      keep_planning: String(keepPlanning),
+    });
+    return this.request(`/api/goal/${encodeURIComponent(rootJobId)}/export?${params}`);
   }
 
   async taskStatus(taskId: string): Promise<TaskStatusInfo> {

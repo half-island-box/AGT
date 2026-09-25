@@ -266,10 +266,162 @@ function boot(): Record<string, unknown> {
   };
 }
 
+const goalArtifacts = [
+  {
+    artifact_id: 'goal-artifact-1',
+    job_id: 'goal-child-1',
+    step_id: 'goal-child-step',
+    producer_identity_id: null,
+    name: 'review-report.md',
+    mime_type: 'text/markdown',
+    summary: null,
+    status_flag: 'pass',
+    size: 2048,
+    sha256: 'mock',
+    status: 'ready',
+    uri: 'agt-artifact://goal-artifact-1',
+    created_at: '2026-09-25 10:00:00',
+  },
+];
+
+const goalNode = {
+  job_id: 'goal-root',
+  parent_job_id: null,
+  status: 'waiting_children',
+  provider: 'claude',
+  identity_did: null,
+  daemon_id: 'dev-box-1',
+  session_id: 'goal-root-session',
+  label: 'Orchestrate deployment guide',
+  duration: 42,
+  current_task_id: 'goal-root-task',
+  ask_question: null,
+  artifacts: [],
+  error: null,
+  children: [
+    {
+      job_id: 'goal-child-1',
+      parent_job_id: 'goal-root',
+      status: 'done',
+      provider: 'claude',
+      identity_did: 'did:agt:reviewer',
+      daemon_id: 'dev-box-1',
+      session_id: 'goal-child-session',
+      label: 'Review repository',
+      duration: 28,
+      current_task_id: 'goal-child-task',
+      ask_question: null,
+      artifacts: goalArtifacts,
+      error: null,
+      children: [],
+    },
+    {
+      job_id: 'goal-child-2',
+      parent_job_id: 'goal-root',
+      status: 'running',
+      provider: 'codex',
+      identity_did: null,
+      daemon_id: 'dev-box-2',
+      session_id: null,
+      label: 'Draft deployment guide',
+      duration: 16,
+      current_task_id: 'goal-child-2-task',
+      ask_question: null,
+      artifacts: [],
+      error: null,
+      children: [],
+    },
+  ],
+};
+
+const goalRun = {
+  root_job_id: 'goal-root',
+  goal: 'Write a deployment guide for the current repository',
+  status: 'waiting_children',
+  provider: 'claude',
+  identity_did: null,
+  daemon_id: 'dev-box-1',
+  created_at: '2026-09-25 09:58:00',
+  updated_at: '2026-09-25 10:01:00',
+  total_nodes: 3,
+  status_counts: { waiting_children: 1, done: 1, running: 1 },
+  meta: {
+    goal: 'Write a deployment guide for the current repository',
+    template: 'builtin',
+    budget: { max_depth: 5, max_descendants: 64, max_batch: 8 },
+    goal_sha256: 'mock-goal-sha',
+  },
+};
+
+const goalLogs = new Map<string, unknown>([
+  ['goal-root', {
+    job_id: 'goal-root',
+    status: 'waiting_children',
+    steps: [{ task_id: 'goal-root-task', status: 'completed', session_id: 'goal-root-session', exit_code: 0, stdout: 'I will split this into review and writing tasks.', stderr: '' }],
+  }],
+  ['goal-child-1', {
+    job_id: 'goal-child-1',
+    status: 'done',
+    steps: [{ task_id: 'goal-child-task', status: 'completed', session_id: 'goal-child-session', exit_code: 0, stdout: 'Review completed. Three sections need examples.', stderr: '' }],
+  }],
+  ['goal-child-2', {
+    job_id: 'goal-child-2',
+    status: 'running',
+    steps: [],
+  }],
+]);
+
+function goalBoot(): Record<string, unknown> {
+  return {
+    language,
+    state,
+    runs: [goalRun],
+    selectedRunId: 'goal-root',
+    tree: { root_job_id: 'goal-root', goal: goalRun.meta, node: goalNode },
+    selectedNodeId: 'goal-child-1',
+    identities: state === 'online' ? identities : [],
+    daemons: state === 'online' ? daemons : [],
+    workspaceFolder: '/home/you/project',
+  };
+}
+
 export async function mockCall<T>(_method: string, params?: Record<string, unknown>): Promise<T> {
   await delay(200 + Math.random() * 200);
   const method = _method;
   switch (method) {
+    case 'goal.boot':
+      return goalBoot() as T;
+    case 'goal.select':
+      return goalBoot() as T;
+    case 'goal.tree':
+      return { root_job_id: 'goal-root', goal: goalRun.meta, node: goalNode } as T;
+    case 'goal.nodeLog':
+      return (goalLogs.get(String(params?.jobId ?? '')) ?? { job_id: params?.jobId, status: 'running', steps: [] }) as T;
+    case 'goal.taskStatus': {
+      const taskId = String(params?.taskId ?? '');
+      return {
+        task_id: taskId,
+        provider: 'codex',
+        status: 'running',
+        session_id: null,
+        exit_code: null,
+        stdout: 'Writing the deployment guide...\n- installation\n- configuration\n',
+        stderr: '',
+        duration: null,
+        created_at: '2026-09-25 10:00:00',
+        updated_at: '2026-09-25 10:01:00',
+      } as T;
+    }
+    case 'goal.submit':
+      return { root_job_id: 'goal-root', status: 'queued', ...goalBoot() } as T;
+    case 'goal.answer':
+      return goalBoot() as T;
+    case 'goal.cancel':
+      return { cancelled: true } as T;
+    case 'goal.export':
+      return { canceled: false, path: '/home/you/project/goal-root.sop.yaml', warnings: [] } as T;
+    case 'openGoal':
+      return { ok: true } as T;
     case 'sop.boot':
       return sopBoot() as T;
     case 'sop.openTemplate': {

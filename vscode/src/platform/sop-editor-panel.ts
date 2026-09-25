@@ -23,6 +23,7 @@ export interface SopBridgeContext {
   language(): UiLanguage;
   setLanguage(language: UiLanguage): Promise<void>;
   openChat(): void;
+  openGoal(): void;
   openSettings(): void;
 }
 
@@ -685,6 +686,11 @@ export class SopEditorPanel {
 
         case 'openChat':
           this.ctx.openChat();
+          result = { ok: true };
+          break;
+
+        case 'openGoal':
+          this.ctx.openGoal();
           result = { ok: true };
           break;
 
