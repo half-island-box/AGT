@@ -1,5 +1,6 @@
 import type {
   ChatSessionInfo,
+  ArtifactInfo,
   DaemonInfo,
   IdentityBindingInfo,
   IdentityInfo,
@@ -258,6 +259,31 @@ export class AgtApi {
 
   async taskStatus(taskId: string): Promise<TaskStatusInfo> {
     return this.request<TaskStatusInfo>(`/api/tasks/${encodeURIComponent(taskId)}/status`);
+  }
+
+  async artifact(artifactId: string): Promise<ArtifactInfo> {
+    return this.request<ArtifactInfo>(`/api/artifacts/${encodeURIComponent(artifactId)}`);
+  }
+
+  async artifactContent(artifactId: string): Promise<Uint8Array> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 30_000);
+    try {
+      const res = await fetch(
+        `${this.baseUrl}/api/artifacts/${encodeURIComponent(artifactId)}/content`,
+        { signal: controller.signal, headers: { accept: '*/*' } },
+      );
+      if (!res.ok) {
+        let detail = `HTTP ${res.status}`;
+        try {
+          detail = `${detail}: ${(await res.text()).slice(0, 240)}`;
+        } catch {}
+        throw new Error(detail);
+      }
+      return new Uint8Array(await res.arrayBuffer());
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async *streamTask(taskId: string, signal?: AbortSignal): AsyncGenerator<TaskStreamEvent> {

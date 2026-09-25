@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { readFileSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { basename, join } from 'node:path';
+import { openArtifact } from './artifact-view';
 import { isMissingEndpoint } from '../core/api';
 import type { ServerLifecycle } from '../core/lifecycle';
 import { looksLikeSop, minimalSpan } from '../core/sop/document';
@@ -683,6 +684,16 @@ export class SopEditorPanel {
           result = { ok: true, width: this.inspectorWidth };
           break;
         }
+
+        case 'openArtifact':
+          result = await openArtifact(this.ctx.lifecycle, {
+            artifactUri: String(msg.params?.artifactUri ?? ''),
+            dir: msg.params?.dir ? String(msg.params.dir) : null,
+            workspaceFolder: msg.params?.workspaceFolder
+              ? String(msg.params.workspaceFolder)
+              : null,
+          });
+          break;
 
         case 'openChat':
           this.ctx.openChat();

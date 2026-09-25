@@ -930,7 +930,7 @@ function renderInspectLog(node: SopNode): string {
         ? `<div class="agd-sop-artifacts">${artifacts
             .map(
               (artifact) =>
-                `<button type="button" class="agd-sop-artifact" data-artifact="${esc(artifact.uri)}" title="${esc(artifact.uri)}">
+                `<button type="button" class="agd-sop-artifact" data-artifact="${esc(artifact.uri)}" title="${tr('sop.artifactOpen')}">
                    <strong>${esc(artifact.name)}</strong>
                    <small class="agd-mono">${esc(artifact.uri)}</small>
                  </button>`,
@@ -1342,11 +1342,15 @@ function wireInspector(): void {
   document.querySelectorAll<HTMLElement>('[data-artifact]').forEach((element) => {
     element.addEventListener('click', async () => {
       const uri = element.dataset.artifact ?? '';
+      const node = selectedNode();
       try {
-        await navigator.clipboard?.writeText(uri);
-        flash(tr('settings.copied'));
-      } catch {
-        flash(uri);
+        await bridge.call('openArtifact', {
+          artifactUri: uri,
+          dir: node?.dir ?? null,
+          workspaceFolder: boot?.workspaceFolder ?? null,
+        });
+      } catch (err) {
+        flash(String(err instanceof Error ? err.message : err), 'error');
       }
     });
   });

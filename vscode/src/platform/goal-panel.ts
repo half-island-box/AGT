@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { openArtifact } from './artifact-view';
 import type { ServerLifecycle } from '../core/lifecycle';
 import type {
   GoalRunInfo,
@@ -288,6 +289,16 @@ export class GoalPanel {
         case 'openSettings':
           this.ctx.openSettings();
           result = { ok: true };
+          break;
+
+        case 'openArtifact':
+          result = await openArtifact(this.ctx.lifecycle, {
+            artifactUri: String(msg.params?.artifactUri ?? ''),
+            dir: msg.params?.dir ? String(msg.params.dir) : null,
+            workspaceFolder: msg.params?.workspaceFolder
+              ? String(msg.params.workspaceFolder)
+              : null,
+          });
           break;
 
         case 'goal.setInspectorWidth': {

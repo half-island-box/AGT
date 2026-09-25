@@ -518,7 +518,7 @@ function renderDetails(): string {
   const artifacts = node.artifacts.length === 0
     ? `<p class="agd-sop-empty agd-dim">${tr('goal.noArtifacts')}</p>`
     : node.artifacts.map((artifact) => `
-      <button type="button" class="agd-sop-artifact" data-artifact="${esc(artifact.uri)}" title="${esc(artifact.uri)}">
+      <button type="button" class="agd-sop-artifact" data-artifact="${esc(artifact.uri)}" title="${tr('sop.artifactOpen')}">
         <strong>${esc(artifact.name)}</strong>
         <small class="agd-mono">${esc(artifact.uri)}</small>
       </button>
@@ -645,8 +645,15 @@ function wireEvents(): void {
     element.addEventListener('click', async () => {
       const uri = element.dataset.artifact ?? '';
       try {
-        await navigator.clipboard?.writeText(uri);
-      } catch {}
+        await bridge.call('openArtifact', {
+          artifactUri: uri,
+          dir: null,
+          workspaceFolder: boot?.workspaceFolder ?? null,
+        });
+      } catch (err) {
+        notice = String(err instanceof Error ? err.message : err);
+        render();
+      }
     });
   });
 }
