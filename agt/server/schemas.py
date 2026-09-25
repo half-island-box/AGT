@@ -535,6 +535,44 @@ class ResolveResponse(BaseModel):
     identity_did: str
 
 
+class GoalBudgetSummary(BaseModel):
+    """Per-run spawn limits persisted on a goal root."""
+
+    max_depth: int
+    max_descendants: int
+    max_batch: int
+
+
+class GoalMetaSummary(BaseModel):
+    """Plugin-facing subset of a goal root's ``goal_meta``."""
+
+    goal: str
+    template: str | None = None
+    budget: GoalBudgetSummary | None = None
+    goal_sha256: str | None = None
+
+
+class GoalRunSummary(BaseModel):
+    """One row in the goal-run history list."""
+
+    root_job_id: str
+    goal: str
+    status: str
+    provider: str
+    identity_did: str | None = None
+    daemon_id: str | None = None
+    created_at: str
+    updated_at: str
+    total_nodes: int
+    status_counts: dict[str, int]
+    meta: GoalMetaSummary
+
+
+class GoalRunListResponse(BaseModel):
+    runs: list[GoalRunSummary]
+    total: int
+
+
 ClaimResponse.model_rebuild()
 __all__ = [
     "RuntimeInfo",
@@ -576,4 +614,8 @@ __all__ = [
     "DaemonProviderOut",
     "DaemonOut",
     "ListDaemonsResponse",
+    "GoalBudgetSummary",
+    "GoalMetaSummary",
+    "GoalRunSummary",
+    "GoalRunListResponse",
 ]

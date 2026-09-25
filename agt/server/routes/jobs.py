@@ -11,8 +11,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db
 from ..models import ArtifactModel, JobModel, TaskModel
-from ..schemas import ArtifactOut, SubmitTaskRequest, SubmitTaskResponse
+from ..schemas import ArtifactOut, GoalMetaSummary, SubmitTaskRequest, SubmitTaskResponse
 from ..services.artifact_service import artifact_to_out, artifacts_for_steps
+from ..services.goal_view import ask_question, current_task_id, goal_meta_summary
 from ..services.claim_service import notify_task_available
 from ..services.job_service import append_step, cancel_job, create_job, get_job
 from ..services.selection_service import SelectionError, select_runtime
@@ -59,6 +60,8 @@ class JobTreeNode(BaseModel):
     session_id: str | None = None
     # identity slug first, else the goal / first-prompt excerpt (≤24 chars).
     label: str = ""
+    current_task_id: str | None = None
+    ask_question: str | None = None
     # Wall seconds between Job creation and last update (both are
     # "%Y-%m-%d %H:%M:%S" UTC strings).
     duration: float | None = None
@@ -71,6 +74,7 @@ class JobTreeNode(BaseModel):
 class JobTreeResponse(BaseModel):
     root_job_id: str
     node: JobTreeNode
+    goal: GoalMetaSummary | None = None
 
 
 class JobLogStep(BaseModel):
@@ -292,6 +296,8 @@ def _build_tree_node(
         daemon_id=daemon_id,
         session_id=session_id,
         label=_node_label(job),
+        current_task_id=current_task_id(job),
+        ask_question=ask_question(job),
         duration=duration,
         artifacts=[
             ArtifactOut(**artifact_to_out(r))
@@ -358,6 +364,7 @@ async def job_tree(
     return JobTreeResponse(
         root_job_id=root.job_id,
         node=_build_tree_node(root, artifacts_by_job, children_of),
+        goal=goal_meta_summary(root),
     )
 
 
