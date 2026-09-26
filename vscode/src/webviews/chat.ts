@@ -1,5 +1,7 @@
 import './mode-switcher.css';
 import './chat.css';
+import { marked } from 'marked';
+import DOMPurify from 'dompurify';
 import { t, type MessageKey } from '../core/i18n';
 import type {
   ChatSessionInfo,
@@ -27,7 +29,6 @@ interface ChatMessage {
   content: string;
   provider?: string;
   streaming?: boolean;
-  stderr?: string;
 }
 
 interface ActiveJob {
@@ -103,6 +104,19 @@ function providerColor(provider: string): string {
 
 function providerLogo(provider: string): string {
   return `<span class="agd-logo" style="--c:${providerColor(provider)}">${esc(provider.charAt(0).toUpperCase())}</span>`;
+}
+
+function renderMarkdown(value: string): string {
+  const html = marked.parse(value, {
+    async: false,
+    gfm: true,
+    breaks: true,
+  }) as string;
+  return DOMPurify.sanitize(html, {
+    USE_PROFILES: { html: true },
+    FORBID_TAGS: ['style', 'form'],
+    FORBID_ATTR: ['style'],
+  });
 }
 
 function iconLogo(kind: 'daemon' | 'identity'): string {
@@ -375,11 +389,16 @@ function renderMessages(): void {
         <span>${esc(message.provider ?? 'agent')}</span>
         ${message.streaming ? '<span class="agd-spinner" aria-hidden="true"></span>' : ''}
       </div>
-      <div class="agd-bubble agd-agent-bubble">${esc(message.content || '…')}</div>
-      ${message.stderr ? `<div class="agd-agent-stderr">${esc(message.stderr)}</div>` : ''}
+      <div class="agd-bubble agd-agent-bubble agd-md">${message.content ? renderMarkdown(message.content) : '<span class="agd-dim">…</span>'}</div>
     </div>
     `;
   }).join('');
+  container.querySelectorAll<HTMLAnchorElement>('.agd-md a[href]').forEach((anchor) => {
+    anchor.addEventListener('click', (event) => {
+      event.preventDefault();
+      void bridge.call('openExternal', { url: anchor.href });
+    });
+  });
   container.scrollTop = container.scrollHeight;
 }
 
@@ -680,7 +699,6 @@ function applyChatEvent(payload: ChatEvent): void {
     if (assistant) {
       assistant.content = String(payload.stdout ?? '');
       assistant.streaming = false;
-      assistant.stderr = payload.stderr ? String(payload.stderr) : undefined;
     }
     if (currentJob && payload.session_id) {
       currentJob.sessionId = String(payload.session_id);

@@ -96,6 +96,7 @@ export class ChatPanel {
       `style-src ${webview.cspSource} 'unsafe-inline'`,
       `script-src ${webview.cspSource}`,
       `font-src ${webview.cspSource}`,
+      "img-src https: data:",
     ].join('; ');
     return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -190,6 +191,18 @@ export class ChatPanel {
           this.ctx.openGoal();
           result = { ok: true };
           break;
+
+        case 'openExternal': {
+          const url = String(msg.params?.url ?? '');
+          const parsed = vscode.Uri.parse(url);
+          if (!['http:', 'https:', 'mailto:'].includes(parsed.scheme)) {
+            throw new Error('unsupported external link');
+          }
+          await vscode.env.openExternal(parsed);
+          result = { ok: true };
+          break;
+        }
+
         case 'sessions': {
           const daemonId = String(msg.params?.daemonId ?? '');
           result = { sessions: await this.ctx.lifecycle.api.daemonSessions(daemonId) };
@@ -274,11 +287,14 @@ export class ChatPanel {
       let finalEvent: TaskStreamEvent | undefined;
       try {
         for await (const event of api.streamTask(job.task_id, this.streamAbort.signal)) {
-          await this.emitChat({ kind: event.type, ...event });
           if (event.type === 'done') {
+            // stderr belongs in execution logs, not the chat transcript.
+            const { stderr: _stderr, ...safeDone } = event;
             finalEvent = event;
+            await this.emitChat({ kind: 'done', ...safeDone });
             break;
           }
+          await this.emitChat({ kind: event.type, ...event });
         }
       } catch (err) {
         if (this.streamAbort.signal.aborted) {
@@ -293,7 +309,6 @@ export class ChatPanel {
           type: 'done',
           status: status.status,
           stdout: status.stdout ?? '',
-          stderr: status.stderr ?? '',
           session_id: status.session_id,
           exit_code: status.exit_code,
         };
