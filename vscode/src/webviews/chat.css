@@ -247,6 +247,24 @@ body.agd-chat-body {
 }
 
 .agd-msg { margin-bottom: 14px; }
+.agd-msg-actions {
+  display: flex;
+  justify-content: flex-start;
+  margin-top: 4px;
+}
+.agd-msg-user .agd-msg-actions { justify-content: flex-end; }
+.agd-msg-actions .agd-mini-btn {
+  height: 20px;
+  width: 20px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--vscode-descriptionForeground, #8b8b8b);
+}
+.agd-msg-actions .agd-mini-btn:hover {
+  color: var(--vscode-foreground, #cccccc);
+}
 .agd-msg-user { display: flex; justify-content: flex-end; }
 .agd-msg-system { display: flex; justify-content: center; }
 .agd-msg-system .agd-bubble {
@@ -283,6 +301,7 @@ body.agd-chat-body {
   font-size: 12px;
   line-height: 1.62;
 }
+.agd-md { white-space: normal; }
 
 .agd-md > :first-child { margin-top: 0; }
 .agd-md > :last-child { margin-bottom: 0; }
@@ -330,6 +349,40 @@ body.agd-chat-body {
   border-radius: 7px;
   overflow: auto;
   background: var(--vscode-textCodeBlock-background, #1b1b1b);
+}
+.agd-code-block {
+  position: relative;
+}
+.agd-code-block pre {
+  padding-right: 36px;
+}
+.agd-code-block .agd-code-copy {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 2;
+  height: 20px;
+  width: 20px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  background: color-mix(in srgb, var(--vscode-editorWidget-background, #252526) 92%, transparent);
+  transition: opacity 0.15s ease;
+}
+.agd-copy-icon {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.agd-code-block:hover .agd-code-copy,
+.agd-code-block:focus-within .agd-code-copy {
+  opacity: 1;
 }
 .agd-md pre code {
   padding: 0;

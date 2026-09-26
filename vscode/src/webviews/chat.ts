@@ -85,6 +85,45 @@ let openDropdown: 'daemon' | 'agent' | 'identity' | null = null;
 let messageSeq = 0;
 let loadingBoot = true;
 let documentClickWired = false;
+let promptHistory: string[] = [];
+let promptHistoryIndex: number | null = null;
+let promptDraft = '';
+
+function recallPrompt(event: KeyboardEvent, input: HTMLTextAreaElement): void {
+  if (promptHistory.length === 0) return;
+  const value = input.value;
+  const selectionStart = input.selectionStart ?? 0;
+  const selectionEnd = input.selectionEnd ?? 0;
+  const onFirstLine = !value.slice(0, selectionStart).includes('\n');
+  const onLastLine = !value.slice(selectionEnd).includes('\n');
+  const caretFree = selectionStart === selectionEnd;
+
+  if (event.key === 'ArrowUp' && caretFree && onFirstLine) {
+    event.preventDefault();
+    if (promptHistoryIndex === null) {
+      promptDraft = value;
+      promptHistoryIndex = promptHistory.length - 1;
+    } else {
+      promptHistoryIndex = Math.max(0, promptHistoryIndex - 1);
+    }
+  } else if (event.key === 'ArrowDown' && promptHistoryIndex !== null && caretFree && onLastLine) {
+    event.preventDefault();
+    promptHistoryIndex += 1;
+    if (promptHistoryIndex >= promptHistory.length) {
+      promptHistoryIndex = null;
+      input.value = promptDraft;
+      input.setSelectionRange(input.value.length, input.value.length);
+      return;
+    }
+  } else {
+    return;
+  }
+
+  if (promptHistoryIndex !== null) {
+    input.value = promptHistory[promptHistoryIndex];
+    input.setSelectionRange(input.value.length, input.value.length);
+  }
+}
 
 function esc(value: unknown): string {
   return String(value ?? '')
@@ -106,6 +145,19 @@ function providerLogo(provider: string): string {
   return `<span class="agd-logo" style="--c:${providerColor(provider)}">${esc(provider.charAt(0).toUpperCase())}</span>`;
 }
 
+function copyIcon(): string {
+  return `<svg class="agd-copy-icon" viewBox="0 0 16 16" aria-hidden="true">
+    <rect x="5.75" y="5.75" width="7.5" height="7.5" rx="1.5"></rect>
+    <path d="M10.25 3.25H4.75a1.5 1.5 0 0 0-1.5 1.5v5.5"></path>
+  </svg>`;
+}
+
+function checkIcon(): string {
+  return `<svg class="agd-copy-icon" viewBox="0 0 16 16" aria-hidden="true">
+    <path d="M3 8.5 6.5 12 13 4.5"></path>
+  </svg>`;
+}
+
 function renderMarkdown(value: string): string {
   const html = marked.parse(value, {
     async: false,
@@ -117,6 +169,29 @@ function renderMarkdown(value: string): string {
     FORBID_TAGS: ['style', 'form'],
     FORBID_ATTR: ['style'],
   });
+}
+
+async function copyText(value: string, button?: HTMLButtonElement): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(value);
+  } catch {
+    const area = document.createElement('textarea');
+    area.value = value;
+    area.style.position = 'fixed';
+    area.style.opacity = '0';
+    document.body.append(area);
+    area.select();
+    document.execCommand('copy');
+    area.remove();
+  }
+  if (!button) return;
+  const previous = button.innerHTML;
+  button.innerHTML = checkIcon();
+  button.disabled = true;
+  window.setTimeout(() => {
+    button.innerHTML = previous || copyIcon();
+    button.disabled = false;
+  }, 1200);
 }
 
 function iconLogo(kind: 'daemon' | 'identity'): string {
@@ -364,6 +439,8 @@ function renderSidebar(): void {
 function renderMessages(): void {
   const container = document.getElementById('agd-messages');
   if (!container) return;
+  const nearBottom =
+    container.scrollHeight - container.scrollTop - container.clientHeight < 120;
   if (!messages.length) {
     const hint = boot?.state !== 'online'
       ? tr('chat.serverOffline')
@@ -377,10 +454,10 @@ function renderMessages(): void {
   }
   container.innerHTML = messages.map((message) => {
     if (message.role === 'user') {
-      return `<div class="agd-msg agd-msg-user"><div class="agd-bubble">${esc(message.content)}</div></div>`;
+      return `<div class="agd-msg agd-msg-user"><div class="agd-bubble">${esc(message.content)}</div><div class="agd-msg-actions"><button type="button" class="agd-mini-btn" data-copy-message="${message.id}" title="${tr('chat.copyMessage')}" aria-label="${tr('chat.copyMessage')}">${copyIcon()}</button></div></div>`;
     }
     if (message.role === 'system') {
-      return `<div class="agd-msg agd-msg-system"><div class="agd-bubble">${esc(message.content)}</div></div>`;
+      return `<div class="agd-msg agd-msg-system"><div class="agd-bubble">${esc(message.content)}</div><div class="agd-msg-actions"><button type="button" class="agd-mini-btn" data-copy-message="${message.id}" title="${tr('chat.copyMessage')}" aria-label="${tr('chat.copyMessage')}">${copyIcon()}</button></div></div>`;
     }
     return `
     <div class="agd-msg agd-msg-agent">
@@ -390,16 +467,36 @@ function renderMessages(): void {
         ${message.streaming ? '<span class="agd-spinner" aria-hidden="true"></span>' : ''}
       </div>
       <div class="agd-bubble agd-agent-bubble agd-md">${message.content ? renderMarkdown(message.content) : '<span class="agd-dim">…</span>'}</div>
+      <div class="agd-msg-actions"><button type="button" class="agd-mini-btn" data-copy-message="${message.id}" title="${tr('chat.copyMessage')}" aria-label="${tr('chat.copyMessage')}">${copyIcon()}</button></div>
     </div>
     `;
   }).join('');
+  container.querySelectorAll<HTMLButtonElement>('[data-copy-message]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const message = messages.find((item) => item.id === Number(button.dataset.copyMessage));
+      if (message) void copyText(message.content, button);
+    });
+  });
+  container.querySelectorAll<HTMLPreElement>('.agd-md pre').forEach((code) => {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'agd-code-block';
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'agd-mini-btn agd-code-copy';
+    button.title = tr('chat.copyCode');
+    button.setAttribute('aria-label', tr('chat.copyCode'));
+    button.innerHTML = copyIcon();
+    button.addEventListener('click', () => void copyText(code.textContent ?? '', button));
+    code.replaceWith(wrapper);
+    wrapper.append(code, button);
+  });
   container.querySelectorAll<HTMLAnchorElement>('.agd-md a[href]').forEach((anchor) => {
     anchor.addEventListener('click', (event) => {
       event.preventDefault();
       void bridge.call('openExternal', { url: anchor.href });
     });
   });
-  container.scrollTop = container.scrollHeight;
+  if (nearBottom) container.scrollTop = container.scrollHeight;
 }
 
 function renderControls(): void {
@@ -439,6 +536,10 @@ function wireFrame(): void {
   });
   const input = document.getElementById('agd-chat-input') as HTMLTextAreaElement | null;
   input?.addEventListener('keydown', (event) => {
+    if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+      if (input) recallPrompt(event, input);
+      return;
+    }
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
       void submit();
@@ -624,6 +725,11 @@ async function submit(): Promise<void> {
 
   if (textarea) textarea.value = '';
   messages.push({ id: ++messageSeq, role: 'user', content: prompt });
+  if (promptHistory[promptHistory.length - 1] !== prompt) {
+    promptHistory.push(prompt);
+  }
+  promptHistoryIndex = null;
+  promptDraft = '';
   messages.push({
     id: ++messageSeq,
     role: 'assistant',
