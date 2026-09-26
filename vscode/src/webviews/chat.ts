@@ -1,3 +1,4 @@
+import './mode-switcher.css';
 import './chat.css';
 import { t, type MessageKey } from '../core/i18n';
 import type {
@@ -216,9 +217,9 @@ function renderFrame(): void {
     <header class="agd-chat-head">
       <div class="agd-chat-brand"><span>AGT</span><small>${tr('app.subtitle')}</small></div>
       <nav class="agd-modes" aria-label="AGT modes">
-        <button type="button" class="agd-mode agd-mode-active">${tr('mode.chat')}</button>
-        <button type="button" class="agd-mode" id="agd-mode-sop" title="${tr('mode.sop')}">${tr('mode.sop')}</button>
-        <button type="button" class="agd-mode" id="agd-mode-goal" title="${tr('mode.goal')}">${tr('mode.goal')}</button>
+        <button type="button" class="agd-mode agd-mode-active" data-mode="chat" aria-current="page">${tr('mode.chat')}</button>
+        <button type="button" class="agd-mode" data-mode="sop" title="${tr('mode.sop')}">${tr('mode.sop')}</button>
+        <button type="button" class="agd-mode" data-mode="goal" title="${tr('mode.goal')}">${tr('mode.goal')}</button>
       </nav>
       <div class="agd-chat-tools">
         <button type="button" id="agd-chat-lang" class="agd-icon-btn">${tr('settings.langToggle')}</button>
@@ -411,10 +412,10 @@ function wireFrame(): void {
   document.getElementById('agd-chat-settings')?.addEventListener('click', () => {
     void bridge.call('openSettings');
   });
-  document.getElementById('agd-mode-sop')?.addEventListener('click', () => {
+  document.querySelector('[data-mode="sop"]')?.addEventListener('click', () => {
     void bridge.call('openSop');
   });
-  document.getElementById('agd-mode-goal')?.addEventListener('click', () => {
+  document.querySelector('[data-mode="goal"]')?.addEventListener('click', () => {
     void bridge.call('openGoal');
   });
   const input = document.getElementById('agd-chat-input') as HTMLTextAreaElement | null;

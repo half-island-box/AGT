@@ -1,4 +1,6 @@
 import * as vscode from 'vscode';
+import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import { dirname } from 'node:path';
 import type { ServerLifecycle } from '../core/lifecycle';
 
@@ -37,6 +39,16 @@ async function fileExists(uri: vscode.Uri): Promise<boolean> {
   }
 }
 
+async function sha256File(uri: vscode.Uri): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const hash = createHash('sha256');
+    const stream = createReadStream(uri.fsPath);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('error', reject);
+    stream.on('end', () => resolve(hash.digest('hex')));
+  });
+}
+
 function uniqueRoots(...roots: Array<string | null | undefined>): string[] {
   return [...new Set(roots.filter((root): root is string => {
     return typeof root === 'string' && root.trim().length > 0;
@@ -56,14 +68,18 @@ export async function openArtifact(
 
   const roots = uniqueRoots(params.dir, params.workspaceFolder);
   const candidates: vscode.Uri[] = [];
+  // `agt artifact get <id>` writes the declared name's basename into the
+  // current directory; keep plugin downloads in that same location.
+  const basename = segments[segments.length - 1];
   for (const root of roots) {
     const rootUri = vscode.Uri.file(root);
+    candidates.push(vscode.Uri.joinPath(rootUri, basename));
     candidates.push(vscode.Uri.joinPath(rootUri, ...segments));
     candidates.push(vscode.Uri.joinPath(rootUri, '.agt', 'outputs', ...segments));
-    candidates.push(vscode.Uri.joinPath(rootUri, '.agt', 'artifacts', id, ...segments));
+    candidates.push(vscode.Uri.joinPath(rootUri, '.agt', 'artifacts', id, basename));
   }
   for (const candidate of candidates) {
-    if (await fileExists(candidate)) {
+    if (await fileExists(candidate) && await sha256File(candidate) === artifact.sha256) {
       await vscode.commands.executeCommand('vscode.open', candidate);
       return { source: 'local', target: candidate.fsPath };
     }
@@ -80,13 +96,7 @@ export async function openArtifact(
     cancellable: false,
   }, async () => {
     const bytes = await lifecycle.api.artifactContent(id);
-    const target = vscode.Uri.joinPath(
-      vscode.Uri.file(workspaceRoot),
-      '.agt',
-      'artifacts',
-      id,
-      ...segments,
-    );
+    const target = vscode.Uri.joinPath(vscode.Uri.file(workspaceRoot), basename);
     await vscode.workspace.fs.createDirectory(vscode.Uri.file(dirname(target.fsPath)));
     await vscode.workspace.fs.writeFile(target, bytes);
     await vscode.commands.executeCommand('vscode.open', target);

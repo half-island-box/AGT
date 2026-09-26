@@ -1,3 +1,4 @@
+import './mode-switcher.css';
 import './sop-editor.css';
 import { t, type MessageKey } from '../core/i18n';
 import { issues as localIssues, wouldCycle } from '../core/sop/graph';
@@ -509,9 +510,9 @@ function render(): void {
       <header class="agd-sop-head">
         <div class="agd-sop-brand"><span>AGT</span><small>${tr('sop.title')}</small></div>
         <nav class="agd-modes" aria-label="AGT modes">
-          <button type="button" class="agd-mode" data-mode="chat">${tr('mode.chat')}</button>
-          <button type="button" class="agd-mode agd-mode-active">${tr('mode.sop')}</button>
-          <button type="button" class="agd-mode" disabled title="${tr('chat.goalComing')}">${tr('mode.goal')}</button>
+        <button type="button" class="agd-mode" data-mode="chat">${tr('mode.chat')}</button>
+        <button type="button" class="agd-mode agd-mode-active" data-mode="sop" aria-current="page">${tr('mode.sop')}</button>
+        <button type="button" class="agd-mode" data-mode="goal">${tr('mode.goal')}</button>
         </nav>
         <div class="agd-sop-tools">
           <button type="button" class="agd-icon-btn" id="agd-sop-lang">${tr('settings.langToggle')}</button>
@@ -539,7 +540,7 @@ function render(): void {
       <div class="agd-sop-brand"><span>AGT</span><small>${tr('sop.title')}</small></div>
       <nav class="agd-modes" aria-label="AGT modes">
         <button type="button" class="agd-mode" data-mode="chat">${tr('mode.chat')}</button>
-        <button type="button" class="agd-mode agd-mode-active">${tr('mode.sop')}</button>
+        <button type="button" class="agd-mode agd-mode-active" data-mode="sop" aria-current="page">${tr('mode.sop')}</button>
         <button type="button" class="agd-mode" data-mode="goal">${tr('mode.goal')}</button>
       </nav>
       <div class="agd-sop-tools">

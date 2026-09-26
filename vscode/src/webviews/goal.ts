@@ -1,4 +1,5 @@
 import './styles.css';
+import './mode-switcher.css';
 import './goal.css';
 import { t, type MessageKey } from '../core/i18n';
 import type {
@@ -348,7 +349,7 @@ function renderHeader(): string {
     <nav class="agd-modes" aria-label="AGT modes">
       <button type="button" class="agd-mode" data-mode="chat">${tr('mode.chat')}</button>
       <button type="button" class="agd-mode" data-mode="sop">${tr('mode.sop')}</button>
-      <button type="button" class="agd-mode agd-mode-active">${tr('mode.goal')}</button>
+      <button type="button" class="agd-mode agd-mode-active" data-mode="goal" aria-current="page">${tr('mode.goal')}</button>
     </nav>
     <div class="agd-sop-tools">
       <span class="agd-goal-state is-${esc(boot?.state ?? 'unknown')}"><i></i>${tr(`status.${boot?.state ?? 'unknown'}` as MessageKey)}</span>

@@ -133,7 +133,7 @@ Round-trip fidelity comes from the `yaml` package's document AST (the extension'
 
 Open **AGT: Open Goal** (or the Goal tab in Chat/SOP) to submit an open-ended goal with an optional identity, provider, daemon, working directory, depth, and descendant budget. The left sidebar lists persisted runs from `GET /api/goal/runs`; selecting one loads `GET /api/jobs/{root}/tree` and polls it while the root remains non-terminal. Nodes show status, provider, daemon, duration, current Step, errors, and artifacts; selecting a node loads its Job log and polls the current Step so in-progress stdout appears alongside completed steps. If a node enters `waiting_input`, its structured `ask_question` is displayed with an answer box backed by `POST /api/jobs/{id}/input`. **Cancel run** cascades through the Job subtree, and **Export SOP draft** saves the backend-generated YAML and opens it in the SOP editor for review.
 
-Artifact buttons in SOP and Goal open the file directly when it already exists in the selected node directory or workspace (including `.agt/outputs/` and a previously pulled `.agt/artifacts/` location). Otherwise the extension uses the same server artifact content path as `agt artifact get`, pulls the bytes into `<workspace>/.agt/artifacts/<artifact-id>/`, and opens the saved file.
+Artifact buttons in SOP and Goal open the file directly when a local copy with the expected sha256 already exists in the selected node directory or workspace (including `.agt/outputs/` and a previously downloaded location). Otherwise the extension uses the same server artifact content path as `agt artifact get`, pulls the bytes into `<workspace>/<artifact-name>`, and opens the saved file.
 
 ## SOP example
 
