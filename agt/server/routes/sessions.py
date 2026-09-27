@@ -309,9 +309,13 @@ async def delete_session(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="no session for id",
             )
-        daemon_links = getattr(request.app.state, "daemon_links", {})
-        link = daemon_links.get(payload.daemon_id)
-        if link is not None and link.connected:
+        if _is_local_daemon_target(request, payload.daemon_id):
+            provider_result = await _delete_local_session(
+                payload.provider, session_id, None
+            )
+        else:
+            daemon_links = getattr(request.app.state, "daemon_links", {})
+            link = daemon_links.get(payload.daemon_id)
             try:
                 provider_result = await link.delete_session(
                     session_id, payload.provider, None
@@ -329,17 +333,6 @@ async def delete_session(
                         f"{exc.body}"
                     ),
                 )
-        elif _is_local_daemon_target(request, payload.daemon_id):
-            provider_result = await _delete_local_session(
-                payload.provider, session_id, None
-            )
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=(
-                    "owning daemon is unavailable for orphan transcript deletion"
-                ),
-            )
         if provider_result.get("not_implemented"):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -469,9 +462,22 @@ async def delete_session(
     for provider, daemon_id, cwd in sorted(
         delete_targets, key=lambda item: (item[0], item[1] or "", item[2] or "")
     ):
-        daemon_links = getattr(request.app.state, "daemon_links", {})
-        link = daemon_links.get(daemon_id) if daemon_id else None
-        if link is not None and link.connected:
+        if daemon_id and _is_local_daemon_target(request, daemon_id):
+            try:
+                result = await _delete_local_session(provider, session_id, cwd)
+            except RuntimeError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"failed to delete provider transcript: {exc}",
+                )
+        else:
+            daemon_links = getattr(request.app.state, "daemon_links", {})
+            link = daemon_links.get(daemon_id) if daemon_id else None
+            if link is None or not link.connected:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="owning daemon is unavailable for session deletion",
+                )
             try:
                 result = await link.delete_session(session_id, provider, cwd)
             except (WSRPCUnavailable, WSRPCUncertain):
@@ -484,19 +490,6 @@ async def delete_session(
                     status_code=status.HTTP_502_BAD_GATEWAY,
                     detail=f"daemon rejected session deletion: {exc.body}",
                 )
-        elif daemon_id and _is_local_daemon_target(request, daemon_id):
-            try:
-                result = await _delete_local_session(provider, session_id, cwd)
-            except RuntimeError as exc:
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"failed to delete provider transcript: {exc}",
-                )
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="owning daemon is unavailable for session deletion",
-            )
 
         if result.get("not_implemented"):
             raise HTTPException(
