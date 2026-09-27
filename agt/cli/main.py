@@ -1423,6 +1423,106 @@ def _truncate(text: str, limit: int) -> str:
     return text[: limit - 1] + "…"
 
 
+# ── session management (server-side chat sessions) ────────────────
+
+
+@cli.group()
+def session() -> None:
+    """Manage chat sessions recorded by the Server."""
+
+
+@session.command("delete")
+@click.argument("session_ids", nargs=-1, required=True)
+@click.option(
+    "--daemon",
+    "daemon_id",
+    required=True,
+    help="Daemon that owns every session being deleted.",
+)
+@click.option(
+    "--provider",
+    required=True,
+    help="Provider that owns every session being deleted.",
+)
+@click.option(
+    "--yes",
+    "-y",
+    "assume_yes",
+    is_flag=True,
+    help="Skip the permanent-deletion confirmation prompt.",
+)
+@click.option(
+    "--finalize-active",
+    is_flag=True,
+    help="Cancel a waiting_input job before deleting its session.",
+)
+@click.option(
+    "--server-url",
+    default="http://127.0.0.1:8420",
+    show_default=True,
+    envvar="AGT_SERVER_URL",
+)
+def session_delete(
+    session_ids: tuple[str, ...],
+    daemon_id: str,
+    provider: str,
+    assume_yes: bool,
+    finalize_active: bool,
+    server_url: str,
+) -> None:
+    """Permanently delete one or more provider chat sessions.
+
+    Removes the AGT session pointers, the daemon-side cwd index entry, and
+    the provider transcript. SESSION_IDS must all belong to the same
+    DAEMON and PROVIDER.
+    """
+    # Preserve order while dropping duplicates from shell completion or
+    # repeated paste; deleting the same transcript twice is harmless but noisy.
+    unique_ids = list(dict.fromkeys(session_ids))
+    if not assume_yes:
+        sample = ", ".join(sid[:8] for sid in unique_ids[:3])
+        more = f" … (+{len(unique_ids) - 3})" if len(unique_ids) > 3 else ""
+        click.confirm(
+            f"Permanently delete {len(unique_ids)} {provider} session(s) "
+            f"on daemon '{daemon_id}' ({sample}{more})?",
+            abort=True,
+        )
+
+    async def _run() -> tuple[list[str], list[tuple[str, str]]]:
+        deleted: list[str] = []
+        failed: list[tuple[str, str]] = []
+        async with ServerClient(
+            base_url=server_url,
+            daemon_id="cli-direct",
+        ) as client:
+            for session_id in unique_ids:
+                try:
+                    await client.delete_session(
+                        session_id,
+                        provider=provider,
+                        daemon_id=daemon_id,
+                        finalize_active=finalize_active,
+                    )
+                    deleted.append(session_id)
+                except Exception as exc:
+                    failed.append((session_id, str(exc)))
+        return deleted, failed
+
+    try:
+        deleted, failed = asyncio.run(_run())
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    for session_id in deleted:
+        click.echo(f"🗑️  {session_id}: deleted")
+    for session_id, reason in failed:
+        click.echo(f"⚠️  {session_id}: {reason}", err=True)
+    click.echo(f"{len(deleted)} deleted, {len(failed)} failed.")
+    if failed:
+        sys.exit(1)
+
+
 # ── server (Phase 2) ──────────────────────────────────────────────
 
 

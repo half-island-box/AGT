@@ -148,6 +148,33 @@ class DaemonLink:
             timeout_ms=8000,
         )
 
+    async def delete_session(
+        self,
+        session_id: str,
+        provider: str,
+        cwd: str | None = None,
+    ) -> dict:
+        """Delete provider transcript and the daemon-side cwd session index.
+
+        The transcript must be removed on the machine that owns it. For a
+        reverse-dial daemon this is therefore a server→daemon RPC; the
+        local HTTP long-poll case is handled by the session route.
+        """
+        link = self._link
+        if link is None or link.closed or not link.supports_rpc_v1:
+            raise WSRPCUnavailable("daemon offline")
+        body: dict[str, str] = {
+            "session_id": session_id,
+            "provider": provider,
+        }
+        if cwd:
+            body["cwd"] = cwd
+        return await link.call(
+            "session.delete",
+            body,
+            timeout_ms=8000,
+        )
+
     async def fetch_artifact(
         self, artifact_id: str, local_path: str | None, sha256: str
     ) -> bytes:

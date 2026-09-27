@@ -13,20 +13,36 @@ Two query shapes (Phase 4 Step 3):
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ...agent_history import load_history
+from ...agent_history import delete_provider_session, load_history
 from ...comm.errors import RPCRejected, WSRPCUnavailable, WSRPCUncertain
 from ...net import host_of_url, is_local_host
 from ..database import get_db
 from ..models import JobModel, SessionModel, TaskModel
+from ...task.session import CwdSessionStore
 from ..schemas import SessionHistoryOut, SessionResolveOut
 from ..services.artifact_service import artifact_to_out, artifacts_for_job
+from ..services.job_service import cancel_job
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
+
+_ACTIVE_SESSION_STATUSES = {
+    "queued", "running", "waiting_input", "waiting_children", "blocked",
+}
+
+
+class SessionDeleteRequest(BaseModel):
+    confirm: bool = False
+    provider: str | None = None
+    daemon_id: str | None = None
+    finalize_active: bool = False
 
 
 @router.get("")
@@ -213,6 +229,304 @@ async def _read_local_session_history(session_id: str, provider: str) -> dict:
             for m in messages
         ],
         "not_implemented": False,
+    }
+
+
+async def _delete_local_session(
+    provider: str,
+    session_id: str,
+    cwd: str | None,
+) -> dict:
+    """Run provider/cwd deletion in the Server process for a local daemon.
+
+    This same-machine fallback exists because HTTP long-poll local daemons
+    do not have a reverse-dial link. It uses the provider files and cwd
+    store owned by the same user/home as the daemon.
+    """
+    result = await asyncio.to_thread(delete_provider_session, provider, session_id)
+    if not result.supported:
+        return {
+            "ok": False,
+            "not_implemented": True,
+            "reason": result.reason,
+            "deleted_paths": [],
+            "cwd_index_deleted": False,
+        }
+    if result.errors:
+        raise RuntimeError("; ".join(result.errors))
+
+    cwd_index_deleted = False
+    if cwd:
+        cwd_index_deleted = await asyncio.to_thread(
+            _delete_local_cwd_index, cwd, session_id, provider
+        )
+    return {
+        "ok": True,
+        "not_implemented": False,
+        "deleted_paths": [str(path) for path in result.deleted_paths],
+        "missing": result.missing,
+        "cwd_index_deleted": cwd_index_deleted,
+    }
+
+
+def _delete_local_cwd_index(cwd: str, session_id: str, provider: str) -> bool:
+    return CwdSessionStore.load_or_create(
+        Path(cwd), provider=provider
+    ).delete(session_id)
+
+
+@router.post("/{session_id}/delete")
+async def delete_session(
+    session_id: str,
+    request: Request,
+    payload: SessionDeleteRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Delete AGT session pointers and the owning provider transcript.
+
+    Job/Task execution records are intentionally retained for audit; only
+    their session pointers are cleared. A non-terminal Job is rejected so a
+    live conversation cannot be deleted underneath its next turn.
+    """
+    if not payload.confirm:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="confirm must be true to delete a session",
+        )
+
+    sessions = (
+        await db.execute(
+            select(SessionModel)
+            .where(SessionModel.session_id == session_id)
+            .order_by(SessionModel.updated_at.desc())
+        )
+    ).scalars().all()
+    if payload.provider:
+        sessions = [row for row in sessions if row.provider == payload.provider]
+    if not sessions:
+        if not payload.provider or not payload.daemon_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="no session for id",
+            )
+        daemon_links = getattr(request.app.state, "daemon_links", {})
+        link = daemon_links.get(payload.daemon_id)
+        if link is not None and link.connected:
+            try:
+                provider_result = await link.delete_session(
+                    session_id, payload.provider, None
+                )
+            except (WSRPCUnavailable, WSRPCUncertain):
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="daemon offline during orphan transcript deletion",
+                )
+            except RPCRejected as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=(
+                        "daemon rejected orphan transcript deletion: "
+                        f"{exc.body}"
+                    ),
+                )
+        elif _is_local_daemon_target(request, payload.daemon_id):
+            provider_result = await _delete_local_session(
+                payload.provider, session_id, None
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=(
+                    "owning daemon is unavailable for orphan transcript deletion"
+                ),
+            )
+        if provider_result.get("not_implemented"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    provider_result.get("reason")
+                    or "provider transcript deletion is not implemented: "
+                    f"{payload.provider}"
+                ),
+            )
+        if not provider_result.get("ok"):
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="daemon could not delete orphan provider transcript",
+            )
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "orphan_provider_transcript": True,
+            "session_rows_deleted": 0,
+            "task_pointers_cleared": 0,
+            "provider_results": [provider_result],
+        }
+    if payload.daemon_id:
+        matching_sessions: list[SessionModel] = []
+        for sess in sessions:
+            job = await db.get(JobModel, sess.job_id)
+            latest = (
+                await db.execute(
+                    select(TaskModel)
+                    .where(TaskModel.job_id == sess.job_id)
+                    .order_by(TaskModel.updated_at.desc())
+                )
+            ).scalars().first()
+            owning = latest.daemon_id if latest else None
+            if owning is None and job is not None:
+                owning = job.target_daemon_id
+            if owning == payload.daemon_id:
+                matching_sessions.append(sess)
+        if not matching_sessions:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="session does not belong to daemon",
+            )
+        sessions = matching_sessions
+
+    job_ids = {row.job_id for row in sessions}
+    jobs = {
+        job.job_id: job
+        for job in (
+            await db.execute(select(JobModel).where(JobModel.job_id.in_(job_ids)))
+        ).scalars().all()
+    }
+    active_jobs = [
+        job for job in jobs.values() if job.status in _ACTIVE_SESSION_STATUSES
+    ]
+    if active_jobs:
+        waiting_jobs = [
+            job for job in active_jobs if job.status == "waiting_input"
+        ]
+        non_waiting_jobs = [
+            job for job in active_jobs if job.status != "waiting_input"
+        ]
+        if non_waiting_jobs or not payload.finalize_active:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "session is still active; cancel it before deleting "
+                    f"(job_status={active_jobs[0].status})"
+                ),
+            )
+        if any(job.parent_job_id for job in waiting_jobs):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "waiting_input session has a parent; use cancel instead "
+                    "of finalize-active deletion"
+                ),
+            )
+        for job in waiting_jobs:
+            await cancel_job(db, job.job_id)
+        await db.flush()
+
+    if payload.finalize_active:
+        active_jobs = [
+            job for job in jobs.values() if job.status in _ACTIVE_SESSION_STATUSES
+        ]
+        if active_jobs:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "failed to finalize active session "
+                    f"(job_status={active_jobs[0].status})"
+                ),
+            )
+
+    tasks = (
+        await db.execute(
+            select(TaskModel).where(TaskModel.session_id == session_id)
+        )
+    ).scalars().all()
+    session_by_job: dict[str, SessionModel] = {
+        row.job_id: row for row in sessions
+    }
+    delete_targets: set[tuple[str, str | None, str | None]] = set()
+    for task in tasks:
+        job = jobs.get(task.job_id)
+        provider = task.provider or (
+            session_by_job.get(task.job_id).provider if task.job_id in session_by_job else None
+        )
+        daemon_id = task.daemon_id or (job.target_daemon_id if job else None)
+        cwd = task.agent_cwd or (job.agent_cwd or job.work_dir if job else None)
+        if provider:
+            delete_targets.add((provider, daemon_id, cwd))
+    for sess in sessions:
+        if sess.job_id in session_by_job:
+            job = jobs.get(sess.job_id)
+            daemon_id = None
+            cwd = job.agent_cwd or job.work_dir if job else None
+            latest = next(
+                (task for task in tasks if task.job_id == sess.job_id), None
+            )
+            if latest:
+                daemon_id = latest.daemon_id
+            delete_targets.add((sess.provider, daemon_id, cwd))
+
+    results: list[dict] = []
+    for provider, daemon_id, cwd in sorted(
+        delete_targets, key=lambda item: (item[0], item[1] or "", item[2] or "")
+    ):
+        daemon_links = getattr(request.app.state, "daemon_links", {})
+        link = daemon_links.get(daemon_id) if daemon_id else None
+        if link is not None and link.connected:
+            try:
+                result = await link.delete_session(session_id, provider, cwd)
+            except (WSRPCUnavailable, WSRPCUncertain):
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="daemon offline during session deletion",
+                )
+            except RPCRejected as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=f"daemon rejected session deletion: {exc.body}",
+                )
+        elif daemon_id and _is_local_daemon_target(request, daemon_id):
+            try:
+                result = await _delete_local_session(provider, session_id, cwd)
+            except RuntimeError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"failed to delete provider transcript: {exc}",
+                )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="owning daemon is unavailable for session deletion",
+            )
+
+        if result.get("not_implemented"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    result.get("reason")
+                    or f"provider session deletion is not implemented: {provider}"
+                ),
+            )
+        if not result.get("ok"):
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="daemon could not delete provider session",
+            )
+        results.append(result)
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    for task in tasks:
+        task.session_id = None
+        task.updated_at = now
+    for sess in sessions:
+        await db.delete(sess)
+    await db.commit()
+
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "session_rows_deleted": len(sessions),
+        "task_pointers_cleared": len(tasks),
+        "provider_results": results,
     }
 
 

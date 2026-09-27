@@ -15,7 +15,13 @@ from ..schemas import ArtifactOut, GoalMetaSummary, SubmitTaskRequest, SubmitTas
 from ..services.artifact_service import artifact_to_out, artifacts_for_steps
 from ..services.goal_view import ask_question, current_task_id, goal_meta_summary
 from ..services.claim_service import notify_task_available
-from ..services.job_service import append_step, cancel_job, create_job, get_job
+from ..services.job_service import (
+    append_step,
+    cancel_job,
+    create_job,
+    get_job,
+    stop_chat_job,
+)
 from ..services.selection_service import SelectionError, select_runtime
 from .identities import _selection_error_to_http
 from .tasks import _notify_daemons
@@ -169,6 +175,57 @@ async def job_input(
         task_id=step.task_id,
         status=job.status,
     )
+
+
+@router.post("/{job_id}/stop")
+async def job_stop(
+    job_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Stop the current chat turn and keep the Job available for input."""
+    try:
+        job, notify_list = await stop_chat_job(db, job_id)
+    except ValueError as exc:
+        payload = exc.args[0] if exc.args and isinstance(exc.args[0], dict) else {}
+        error_type = payload.get("type", "")
+        if error_type == "job_not_found":
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="job not found",
+            )
+        if error_type in {
+            "stop_not_supported",
+            "stop_has_children",
+            "no_running_step",
+        }:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=payload.get("message", str(payload)),
+            )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(payload or exc),
+        )
+    await db.commit()
+
+    # Same dual-channel cancellation used by /cancel: reverse-dial daemons
+    # receive an immediate RPC; HTTP long-poll daemons receive the cancelled
+    # task id with their next claim response.
+    daemon_links: dict = getattr(request.app.state, "daemon_links", {})
+    for daemon_id, task_id in notify_list:
+        link = daemon_links.get(daemon_id)
+        if link is not None:
+            try:
+                await link.notify_cancel(task_id)
+            except Exception:
+                pass
+    notify_task_available()
+    return {
+        "job_id": job.job_id,
+        "status": job.status,
+        "interrupted_task_ids": [task_id for _, task_id in notify_list],
+    }
 
 
 @router.post("/{job_id}/cancel")

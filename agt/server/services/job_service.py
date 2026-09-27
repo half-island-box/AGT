@@ -312,6 +312,7 @@ def _next_status(current: str, event: str) -> str:
             "step_needs_input": "waiting_input",
             "step_failed": "failed",
             "step_spawned": "waiting_children",
+            "step_interrupted": "waiting_input",
             "cancel": "cancelled",
         },
         "waiting_input": {"input_received": "running", "cancel": "cancelled"},
@@ -368,6 +369,63 @@ async def cancel_job(db: AsyncSession, job_id: str) -> tuple[JobModel, list[tupl
     if job.parent_job_id is not None:
         await on_child_done(db, job.parent_job_id)
 
+    return job, notify_list
+
+
+async def stop_chat_job(
+    db: AsyncSession, job_id: str
+) -> tuple[JobModel, list[tuple[str, str]]]:
+    """Interrupt the current chat turn but keep the conversation resumable.
+
+    This is intentionally different from :func:`cancel_job`: cancellation is
+    terminal, while stop marks the interrupted Step terminal and moves the
+    Chat Job back to ``waiting_input`` so the user can ask a follow-up turn.
+
+    Only a simple Chat Job is supported. Jobs that have spawned children use
+    the terminal cancel path; allowing their subtree to continue while the
+    parent waits for input would make the result tree ambiguous.
+    """
+    job = await get_job(db, job_id)
+    if job is None:
+        raise ValueError({"type": "job_not_found", "message": job_id})
+    if job.job_type != "chat":
+        raise ValueError({
+            "type": "stop_not_supported",
+            "message": f"job {job_id} is not a chat job",
+        })
+    if job.status == "waiting_input":
+        return job, []
+    if job.status != "running":
+        raise ValueError({
+            "type": "stop_not_supported",
+            "message": f"job {job_id} is {job.status}, expected running",
+        })
+
+    descendants = await _descendant_closure(db, job_id)
+    if descendants:
+        raise ValueError({
+            "type": "stop_has_children",
+            "message": (
+                f"job {job_id} has spawned children; use cancel instead"
+            ),
+        })
+
+    notify_list: list[tuple[str, str]] = []
+    running_steps = [
+        step for step in job.steps if step.status == "running"
+    ]
+    if not running_steps:
+        raise ValueError({
+            "type": "no_running_step",
+            "message": f"job {job_id} has no running step to stop",
+        })
+    for step in running_steps:
+        step.status = "cancelled"
+        step.updated_at = _now()
+        if step.daemon_id:
+            notify_list.append((step.daemon_id, step.task_id))
+
+    await transition_job(db, job_id, "step_interrupted")
     return job, notify_list
 
 

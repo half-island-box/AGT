@@ -169,6 +169,7 @@ agt sop validate pipeline.yaml && agt sop run pipeline.yaml
 | `agt probe` | Discover installed agent CLIs. |
 | `agt run` | Run one prompt locally or through a daemon. |
 | `agt chat` | Start, list, or resume an interactive agent session. |
+| `agt session delete` | Permanently delete one or more server-recorded chat sessions. |
 | `agt sop` | Validate / submit / run / status / log static DAG pipelines. |
 | `agt goal` | Submit / run / status / log / input / cancel / artifacts / export goal-driven runs. |
 | `agt artifact` | List and download declared deliverables. |
