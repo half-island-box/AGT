@@ -153,6 +153,8 @@ class DaemonLink:
         session_id: str,
         provider: str,
         cwd: str | None = None,
+        *,
+        dry_run: bool = False,
     ) -> dict:
         """Delete provider transcript and the daemon-side cwd session index.
 
@@ -169,6 +171,8 @@ class DaemonLink:
         }
         if cwd:
             body["cwd"] = cwd
+        if dry_run:
+            body["dry_run"] = True
         return await link.call(
             "session.delete",
             body,

@@ -32,7 +32,11 @@ from typing import Any, Awaitable, Callable
 
 from websockets.asyncio.server import ServerConnection, serve
 
-from ..agent_history import delete_provider_session, load_history
+from ..agent_history import (
+    delete_provider_session,
+    find_provider_session_files,
+    load_history,
+)
 from ..task.session import CwdSessionStore
 from ..comm.errors import WSRPCUnavailable
 from ..comm.wsrpc_link import WsRpcLink
@@ -277,11 +281,40 @@ class DaemonWsServer:
                 "type": "validation_error",
                 "message": "session.delete requires provider + session_id",
             })
+        dry_run = bool(body.get("dry_run", False))
         if cwd is not None and not isinstance(cwd, str):
             raise ValueError({
                 "type": "validation_error",
                 "message": "session.delete cwd must be a string",
             })
+
+        if dry_run:
+            try:
+                found_paths = await asyncio.to_thread(
+                    find_provider_session_files, provider, session_id
+                )
+            except NotImplementedError as exc:
+                return {
+                    "ok": False,
+                    "not_implemented": True,
+                    "dry_run": True,
+                    "reason": str(exc),
+                    "found_paths": [],
+                    "cwd_index_found": False,
+                }
+            cwd_index_found = False
+            if cwd:
+                cwd_index_found = await asyncio.to_thread(
+                    self._cwd_session_index_exists, cwd, session_id
+                )
+            return {
+                "ok": True,
+                "supported": True,
+                "dry_run": True,
+                "found_paths": [str(path) for path in found_paths],
+                "cwd_index_found": cwd_index_found,
+                "missing": not found_paths,
+            }
 
         result = await asyncio.to_thread(
             delete_provider_session, provider, session_id
@@ -318,6 +351,10 @@ class DaemonWsServer:
         return CwdSessionStore.load_or_create(
             Path(cwd), provider=provider
         ).delete(session_id)
+
+    @staticmethod
+    def _cwd_session_index_exists(cwd: str, session_id: str) -> bool:
+        return CwdSessionStore.load_or_create(Path(cwd)).get(session_id) is not None
 
     def wake_claim_loop(self) -> None:
         """Wake the daemon's claim loop immediately.

@@ -21,7 +21,11 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ...agent_history import delete_provider_session, load_history
+from ...agent_history import (
+    delete_provider_session,
+    find_provider_session_files,
+    load_history,
+)
 from ...comm.errors import RPCRejected, WSRPCUnavailable, WSRPCUncertain
 from ...net import host_of_url, is_local_host
 from ..database import get_db
@@ -269,10 +273,81 @@ async def _delete_local_session(
     }
 
 
+async def _probe_local_session(
+    provider: str,
+    session_id: str,
+    cwd: str | None,
+) -> dict:
+    """Check local provider transcript and cwd index without deleting."""
+    try:
+        found_paths = await asyncio.to_thread(
+            find_provider_session_files, provider, session_id
+        )
+    except NotImplementedError as exc:
+        return {
+            "ok": False,
+            "not_implemented": True,
+            "dry_run": True,
+            "reason": str(exc),
+            "found_paths": [],
+            "cwd_index_found": False,
+        }
+    cwd_index_found = False
+    if cwd:
+        cwd_index_found = await asyncio.to_thread(
+            _local_cwd_index_exists, cwd, session_id
+        )
+    return {
+        "ok": True,
+        "supported": True,
+        "dry_run": True,
+        "found_paths": [str(path) for path in found_paths],
+        "cwd_index_found": cwd_index_found,
+        "missing": not found_paths,
+    }
+
+
+def _local_cwd_index_exists(cwd: str, session_id: str) -> bool:
+    return CwdSessionStore.load_or_create(Path(cwd)).get(session_id) is not None
+
+
 def _delete_local_cwd_index(cwd: str, session_id: str, provider: str) -> bool:
     return CwdSessionStore.load_or_create(
         Path(cwd), provider=provider
     ).delete(session_id)
+
+
+async def _probe_remote_session(
+    link,
+    session_id: str,
+    provider: str,
+    cwd: str | None,
+) -> dict:
+    """Probe a remote daemon's delete support without mutating its files."""
+    try:
+        return await link.delete_session(
+            session_id,
+            provider,
+            cwd,
+            dry_run=True,
+        )
+    except RPCRejected as exc:
+        body = exc.body if isinstance(exc.body, dict) else {}
+        if body.get("type") == "unknown_method":
+            raise HTTPException(
+                status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                detail={
+                    "error": "remote_daemon_upgrade_required",
+                    "message": (
+                        "remote daemon does not support session.delete; "
+                        "upgrade and restart agt daemon"
+                    ),
+                },
+            )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"daemon rejected session deletion probe: {exc.body}",
+        )
 
 
 @router.post("/{session_id}/delete")
@@ -310,12 +385,35 @@ async def delete_session(
                 detail="no session for id",
             )
         if _is_local_daemon_target(request, payload.daemon_id):
+            provider_result = await _probe_local_session(
+                payload.provider, session_id, None
+            )
+            if provider_result.get("not_implemented"):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        provider_result.get("reason")
+                        or "provider transcript deletion is not implemented: "
+                        f"{payload.provider}"
+                    ),
+                )
             provider_result = await _delete_local_session(
                 payload.provider, session_id, None
             )
         else:
             daemon_links = getattr(request.app.state, "daemon_links", {})
             link = daemon_links.get(payload.daemon_id)
+            if link is None or not link.connected:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="owning daemon is unavailable for orphan transcript deletion",
+                )
+            provider_result = await _probe_remote_session(
+                link,
+                session_id,
+                payload.provider,
+                None,
+            )
             try:
                 provider_result = await link.delete_session(
                     session_id, payload.provider, None
@@ -463,6 +561,18 @@ async def delete_session(
         delete_targets, key=lambda item: (item[0], item[1] or "", item[2] or "")
     ):
         if daemon_id and _is_local_daemon_target(request, daemon_id):
+            provider_result = await _probe_local_session(
+                provider, session_id, cwd
+            )
+            if provider_result.get("not_implemented"):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        provider_result.get("reason")
+                        or "provider transcript deletion is not implemented: "
+                        f"{provider}"
+                    ),
+                )
             try:
                 result = await _delete_local_session(provider, session_id, cwd)
             except RuntimeError as exc:
@@ -476,8 +586,14 @@ async def delete_session(
             if link is None or not link.connected:
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail="owning daemon is unavailable for session deletion",
-                )
+                detail="owning daemon is unavailable for session deletion",
+            )
+            provider_result = await _probe_remote_session(
+                link,
+                session_id,
+                provider,
+                cwd,
+            )
             try:
                 result = await link.delete_session(session_id, provider, cwd)
             except (WSRPCUnavailable, WSRPCUncertain):
@@ -486,6 +602,18 @@ async def delete_session(
                     detail="daemon offline during session deletion",
                 )
             except RPCRejected as exc:
+                body = exc.body if isinstance(exc.body, dict) else {}
+                if body.get("type") == "unknown_method":
+                    raise HTTPException(
+                        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                        detail={
+                            "error": "remote_daemon_upgrade_required",
+                            "message": (
+                                "remote daemon does not support session.delete; "
+                                "upgrade and restart agt daemon"
+                            ),
+                        },
+                    )
                 raise HTTPException(
                     status_code=status.HTTP_502_BAD_GATEWAY,
                     detail=f"daemon rejected session deletion: {exc.body}",
