@@ -6,14 +6,16 @@ the other way around. The daemon needs to:
 1. Bind a public WebSocket endpoint on ``0.0.0.0:<port>`` (default 8422).
 2. Authenticate the caller — anyone on the network could connect, and we
    only want to accept connections from a Server that holds the shared
-   HMAC secret.
-3. Send a ``heartbeat_ack{rpc_v1:true}`` frame as capability negotiation.
+   secret and targets this daemon's identity.
+3. Authenticate itself back to the Server with a ``daemon_token`` embedded
+   in the ``heartbeat_ack`` frame.
 4. Expose the resulting :class:`WsRpcLink` so the daemon's claim loop
    (``_claim_loop``) can issue ``tasks.claim`` over it.
 
 Authentication uses :class:`TaskToken.verify` on an ``X-Server-Token``
-header (signed with ``sub=server:<id>``). A failed token closes the
-connection with code 1008 before any frames are read.
+header. The token MUST carry an ``aud`` claim matching this daemon's
+``daemon_id`` and an ``iss`` claim of ``agt-server``. A failed token closes
+the connection with code 1008 before any frames are read.
 
 The daemon answers two inbound RPC requests: ``tasks.available`` (wakes the
 claim loop) and ``session.history`` (reads a session transcript from this
@@ -59,11 +61,15 @@ class DaemonWsServer:
         self,
         port: int,
         secret: str,
+        daemon_id: str,
+        url: str,
         *,
         on_connect: OnConnectHook | None = None,
     ) -> None:
         self._port = port
         self._secret = secret
+        self._daemon_id = daemon_id
+        self._url = url
         self._server: serve | None = None
         self.current_link: WsRpcLink | None = None
         self._link_lock = asyncio.Lock()
@@ -110,16 +116,28 @@ class DaemonWsServer:
             await ws.close(code=1008, reason="token required")
             return
         try:
-            TaskToken.verify(token, self._secret)
+            TaskToken.verify(
+                token, self._secret, audience=self._daemon_id, issuer="agt-server"
+            )
         except PermissionError as exc:
             log.info("DaemonWsServer: invalid server token (%s); closing 1008", exc)
             await ws.close(code=1008, reason="invalid token")
             return
 
-        # 2. Handshake: capability negotiation. We don't gate the link on
-        #    this — daemon always supports rpc_v1 — but it gives the
-        #    caller a single round-trip ack.
-        await ws.send(json.dumps({"type": "heartbeat_ack", "rpc_v1": True}))
+        # 2. Handshake: capability negotiation + daemon identity proof.
+        #    The server must verify our daemon_token before accepting RPC.
+        daemon_token = TaskToken.create_daemon(
+            self._daemon_id, self._url, self._secret
+        )
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "heartbeat_ack",
+                    "rpc_v1": True,
+                    "daemon_token": daemon_token,
+                }
+            )
+        )
 
         # 3. Build the bidirectional link and start its read loop. The
         #    read loop runs until the socket drops; we then clear

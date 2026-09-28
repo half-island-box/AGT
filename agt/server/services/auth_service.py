@@ -1,41 +1,35 @@
-"""TaskToken — HMAC-SHA256 signed tokens bound to (agent, task, workspace).
+"""TaskToken — JWT-based tokens bound to (agent, task, workspace) or server/daemon identity.
 
-The token format is `<base64url(payload)>.<hex_hmac_sig>` where payload is a
-JSON dict containing `sub`, `task_id`, `workspace_id`, `iat`, `exp`.
+The token format is a standard JWT signed with HS256. We use a minimal custom
+wrapper so callers don't need to import PyJWT directly, while still benefiting
+from standard ``exp``, ``iat``, ``aud``, ``iss`` claims.
 
-Used by agent subprocesses to authenticate callbacks to the Server. The
-daemon issues a fresh token at spawn time (so each task gets its own short-
-lived credential) and injects it into the subprocess via the AGT_TASK_TOKEN
-environment variable.
+Used by:
+- Agent subprocesses to authenticate callbacks to the Server (``X-Task-Token``).
+- The Server to authenticate reverse-dial WebSocket connections to daemons
+  (``X-Server-Token``).
+- Daemons to authenticate themselves back to the Server over the same WS link
+  (``daemon_token`` embedded in the ``heartbeat_ack`` frame).
 
-Tokens are NOT JWTs — this is a minimal custom format that avoids pulling
-in a JWT library for one signing need. The signature uses hmac.compare_digest
-to defend against timing attacks.
+Tokens are issued on demand and short-lived by convention; rotation happens by
+setting a fresh ``exp`` or rolling ``AGT_SERVER_SECRET``.
 """
 
 from __future__ import annotations
 
-import base64
-import hashlib
-import hmac
-import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-
-def _b64_encode(raw: bytes) -> str:
-    """URL-safe base64 without padding."""
-    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+import jwt
 
 
-def _b64_decode(s: str) -> bytes:
-    """Inverse of _b64_encode; restores padding before decoding."""
-    padding = "=" * (-len(s) % 4)
-    return base64.urlsafe_b64decode(s + padding)
+# Algorithm whitelist. We deliberately do NOT support 'none' or any other
+# algorithm to keep the trust boundary small.
+_ALGORITHM = "HS256"
 
 
 class TaskToken:
-    """Static helpers for issuing and verifying task-scoped tokens."""
+    """Static helpers for issuing and verifying task/server/daemon tokens."""
 
     @staticmethod
     def create(
@@ -45,71 +39,93 @@ class TaskToken:
         secret: str,
         ttl_hours: int = 24,
     ) -> str:
-        """Issue a token. ``secret`` is the shared HMAC key (Server's)."""
+        """Issue a task-scoped token for agent subprocess callbacks."""
         now = datetime.now(timezone.utc)
         payload: dict[str, Any] = {
             "sub": f"agent:{agent_id}",
+            "iss": "agt-server",
             "task_id": task_id,
             "workspace_id": workspace_id,
-            "iat": int(now.timestamp()),
-            "exp": int((now + timedelta(hours=ttl_hours)).timestamp()),
+            "iat": now,
+            "exp": now + timedelta(hours=ttl_hours),
         }
-        payload_b64 = _b64_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
-        sig = hmac.new(secret.encode("utf-8"), payload_b64.encode("ascii"), hashlib.sha256).hexdigest()
-        return f"{payload_b64}.{sig}"
+        return jwt.encode(payload, secret, algorithm=_ALGORITHM)
 
     @staticmethod
-    def create_server(server_id: str, secret: str, ttl_hours: int = 24 * 365) -> str:
-        """Mint a long-lived server credential for the reverse dial (Step 3.5).
+    def create_server(
+        server_id: str,
+        secret: str,
+        daemon_id: str | None = None,
+        ttl_hours: int = 24 * 365,
+    ) -> str:
+        """Mint a server credential for the reverse dial.
 
-        Used by the Server when it dials a remote daemon over WS. The
-        daemon verifies this token (via ``TaskToken.verify``) before
-        accepting the connection, so any third party cannot impersonate
-        the Server. Same HMAC machinery as ``create``; the
-        ``sub=server:<id>`` prefix distinguishes this from an agent
-        token in audit logs.
-
-        ``ttl_hours`` defaults to a year; rotation happens by Server
-        restart (a new token is minted on demand).
+        When ``daemon_id`` is provided, the token carries an ``aud`` claim
+        binding it to that specific daemon. The daemon MUST reject tokens
+        whose ``aud`` does not match its own identity.
         """
         now = datetime.now(timezone.utc)
         payload: dict[str, Any] = {
             "sub": f"server:{server_id}",
-            "iat": int(now.timestamp()),
-            "exp": int((now + timedelta(hours=ttl_hours)).timestamp()),
+            "iss": "agt-server",
+            "iat": now,
+            "exp": now + timedelta(hours=ttl_hours),
         }
-        payload_b64 = _b64_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
-        sig = hmac.new(secret.encode("utf-8"), payload_b64.encode("ascii"), hashlib.sha256).hexdigest()
-        return f"{payload_b64}.{sig}"
+        if daemon_id is not None:
+            payload["aud"] = daemon_id
+        return jwt.encode(payload, secret, algorithm=_ALGORITHM)
 
     @staticmethod
-    def verify(token: str, secret: str) -> dict[str, Any]:
+    def create_daemon(
+        daemon_id: str,
+        url: str,
+        secret: str,
+        ttl_hours: int = 24 * 365,
+    ) -> str:
+        """Mint a daemon credential used to authenticate back to the Server.
+
+        The ``sub`` claim encodes the daemon identity so the Server can verify
+        it connected to the daemon it expected.
+        """
+        now = datetime.now(timezone.utc)
+        payload: dict[str, Any] = {
+            "sub": f"daemon:{daemon_id}",
+            "iss": "agt-daemon",
+            "url": url,
+            "iat": now,
+            "exp": now + timedelta(hours=ttl_hours),
+        }
+        return jwt.encode(payload, secret, algorithm=_ALGORITHM)
+
+    @staticmethod
+    def verify(
+        token: str,
+        secret: str,
+        *,
+        audience: str | None = None,
+        issuer: str | None = None,
+    ) -> dict[str, Any]:
         """Verify a token and return its payload claims.
 
-        Raises ``PermissionError`` on:
-          - malformed input (no "." separator)
-          - bad signature
-          - expired (``exp`` in the past)
+        Raises ``PermissionError`` on any validation failure so callers can
+        continue treating token problems uniformly.
         """
-        if "." not in token:
-            raise PermissionError("malformed token")
-        payload_b64, sig = token.rsplit(".", 1)
-        expected = hmac.new(secret.encode("utf-8"), payload_b64.encode("ascii"), hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(sig, expected):
-            raise PermissionError("invalid signature")
-
         try:
-            payload = json.loads(_b64_decode(payload_b64))
-        except (ValueError, UnicodeDecodeError) as exc:
-            raise PermissionError(f"invalid payload: {exc}") from exc
-
-        exp = payload.get("exp")
-        if not isinstance(exp, int):
-            raise PermissionError("missing exp claim")
-        if exp < int(datetime.now(timezone.utc).timestamp()):
-            raise PermissionError("token expired")
-
-        return payload
+            return jwt.decode(
+                token,
+                secret,
+                algorithms=[_ALGORITHM],
+                audience=audience,
+                issuer=issuer,
+            )
+        except jwt.ExpiredSignatureError as exc:
+            raise PermissionError("token expired") from exc
+        except jwt.InvalidAudienceError as exc:
+            raise PermissionError("invalid audience") from exc
+        except jwt.InvalidIssuerError as exc:
+            raise PermissionError("invalid issuer") from exc
+        except jwt.InvalidTokenError as exc:
+            raise PermissionError(f"invalid token: {exc}") from exc
 
 
 __all__ = ["TaskToken"]

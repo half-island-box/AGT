@@ -151,12 +151,16 @@ def test_reverse_dial_runtimes_register() -> None:
             from agt.server.daemon_link import DaemonLink
 
             port = _free_port()
-            ws_server = DaemonWsServer(port=port, secret=SECRET)
+            daemon_id = "d-uuid5-form"
+            ws_server = DaemonWsServer(
+                port=port, secret=SECRET, daemon_id=daemon_id,
+                url=f"ws://127.0.0.1:{port}",
+            )
             await ws_server.start()
 
             shutdown = asyncio.Event()
             link = DaemonLink(
-                daemon_id="d-uuid5-form",
+                daemon_id=daemon_id,
                 name="daemon-cloud-01",
                 url=f"ws://127.0.0.1:{port}",
                 secret=SECRET,
@@ -224,12 +228,16 @@ def test_reverse_dial_runtimes_register_rejects_bad_body() -> None:
             from agt.server.daemon_link import DaemonLink
 
             port = _free_port()
-            ws_server = DaemonWsServer(port=port, secret=SECRET)
+            daemon_id = "daemon-cloud-01"
+            ws_server = DaemonWsServer(
+                port=port, secret=SECRET, daemon_id=daemon_id,
+                url=f"ws://127.0.0.1:{port}",
+            )
             await ws_server.start()
 
             shutdown = asyncio.Event()
             link = DaemonLink(
-                daemon_id="daemon-cloud-01",
+                daemon_id=daemon_id,
                 url=f"ws://127.0.0.1:{port}",
                 secret=SECRET,
                 session_factory=factory,

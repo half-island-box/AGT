@@ -160,7 +160,9 @@ def test_claim_service_event_clears_after_wake() -> None:
 
 def test_ws_server_tasks_available_wakes_claim_loop() -> None:
     """Inbound ``tasks.available`` sets the daemon's claim wakeup event."""
-    server = DaemonWsServer(port=0, secret="x")
+    server = DaemonWsServer(
+        port=0, secret="x", daemon_id="test-daemon", url="ws://test"
+    )
     assert not server.claim_wakeup.is_set()
 
     result = asyncio.run(server._handle_inbound_request("tasks.available", {}))
@@ -172,7 +174,9 @@ def test_ws_server_tasks_available_wakes_claim_loop() -> None:
 def test_ws_server_unknown_method_still_rejected() -> None:
     """Methods other than ``tasks.available`` / ``session.history`` keep
     returning unknown_method."""
-    server = DaemonWsServer(port=0, secret="x")
+    server = DaemonWsServer(
+        port=0, secret="x", daemon_id="test-daemon", url="ws://test"
+    )
 
     async def _run() -> None:
         with pytest.raises(ValueError, match="unknown_method"):

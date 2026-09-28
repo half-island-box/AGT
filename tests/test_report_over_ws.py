@@ -638,12 +638,15 @@ def test_report_end_to_end_over_reverse_dial() -> None:
             await _seed_task(factory, "t-e2e", "d-e2e")
 
             port = _free_port()
-            ws_server = DaemonWsServer(port=port, secret=SECRET)
+            daemon_id = "d-e2e"
+            ws_server = DaemonWsServer(
+                port=port, secret=SECRET, daemon_id=daemon_id, url=f"ws://127.0.0.1:{port}"
+            )
             await ws_server.start()
 
             shutdown = asyncio.Event()
             link = DaemonLink(
-                daemon_id="d-e2e", url=f"ws://127.0.0.1:{port}",
+                daemon_id=daemon_id, url=f"ws://127.0.0.1:{port}",
                 secret=SECRET, session_factory=factory,
             )
             link_task = asyncio.create_task(link.run(shutdown))

@@ -266,17 +266,50 @@ class DaemonLink:
                 pass
             backoff = min(backoff * 2, _BACKOFF_CAP)
 
+    async def _authenticate_daemon(self, ws) -> None:
+        """Verify the daemon's identity from its handshake frame.
+
+        The daemon must send a ``heartbeat_ack`` containing a signed
+        ``daemon_token`` whose ``sub`` claim matches ``self.daemon_id``.
+        Raises ``PermissionError`` on any mismatch so the caller can treat
+        it as a failed connection attempt.
+        """
+        raw = await ws.recv()
+        try:
+            msg = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise PermissionError(f"invalid handshake frame: {exc}") from exc
+        if msg.get("type") != "heartbeat_ack":
+            raise PermissionError("expected heartbeat_ack from daemon")
+        if not msg.get("rpc_v1"):
+            raise PermissionError("daemon does not support rpc_v1")
+        daemon_token = msg.get("daemon_token")
+        if not isinstance(daemon_token, str) or not daemon_token:
+            raise PermissionError("missing daemon_token in handshake")
+        claims = TaskToken.verify(daemon_token, self._secret, issuer="agt-daemon")
+        expected_sub = f"daemon:{self.daemon_id}"
+        if claims.get("sub") != expected_sub:
+            raise PermissionError(
+                f"daemon_id mismatch: expected {self.daemon_id}, got {claims.get('sub')}"
+            )
+
     async def _connect_and_serve(self) -> None:
         """One connect-and-serve cycle. Raises on disconnect/dial failure."""
         ws = await websockets.connect(
             f"{self.url}/daemon",
             additional_headers={
-                "X-Server-Token": TaskToken.create_server("server", self._secret),
+                "X-Server-Token": TaskToken.create_server(
+                    "server", self._secret, daemon_id=self.daemon_id
+                ),
             },
             ping_interval=20,
             ping_timeout=20,
             open_timeout=10,
         )
+        # Bidirectional authentication: the daemon has verified our
+        # X-Server-Token; now it must prove its own identity before we
+        # accept inbound RPC.
+        await self._authenticate_daemon(ws)
         # Server → daemon capability negotiation. Without this, the
         # daemon's own ``WsRpcLink`` never receives a ``heartbeat_ack``
         # (the daemon *sends* one to us, but that marks *our* link as

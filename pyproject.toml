@@ -17,6 +17,7 @@ dependencies = [
     "aiosqlite>=0.20.0",
     "alembic>=1.13.0",
     "websockets>=12.0",
+    "pyjwt>=2.8.0",
     # Phase B: Model Context Protocol server (catalog tool). Justified: the
     # parent-agent catalog query is exposed over MCP so every agent CLI can
     # attach without a bespoke integration per provider; the SDK owns the

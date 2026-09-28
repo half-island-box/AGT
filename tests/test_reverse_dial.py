@@ -37,6 +37,8 @@ from agt.server.services.auth_service import TaskToken
 
 
 SECRET = "reverse-dial-test-secret"
+DAEMON_ID = "daemon-test-01"
+DAEMON_URL = "ws://127.0.0.1:8422"
 
 
 def _free_port() -> int:
@@ -117,12 +119,14 @@ def test_wsrpc_link_bidirectional_round_trip() -> None:
 def test_daemon_ws_server_accepts_valid_server_token() -> None:
     async def _run() -> None:
         port = _free_port()
-        server = DaemonWsServer(port=port, secret=SECRET)
+        server = DaemonWsServer(
+            port=port, secret=SECRET, daemon_id=DAEMON_ID, url=DAEMON_URL
+        )
         await server.start()
         try:
             import websockets
 
-            token = TaskToken.create_server("server-A", SECRET)
+            token = TaskToken.create_server("server-A", SECRET, daemon_id=DAEMON_ID)
             async with websockets.connect(
                 f"ws://127.0.0.1:{port}/daemon",
                 additional_headers={"X-Server-Token": token},
@@ -132,6 +136,7 @@ def test_daemon_ws_server_accepts_valid_server_token() -> None:
                 hello = json.loads(hello_raw)
                 assert hello["type"] == "heartbeat_ack"
                 assert hello.get("rpc_v1") is True
+                assert "daemon_token" in hello
         finally:
             await server.stop()
 
@@ -141,7 +146,9 @@ def test_daemon_ws_server_accepts_valid_server_token() -> None:
 def test_daemon_ws_server_rejects_bad_token_with_1008() -> None:
     async def _run() -> None:
         port = _free_port()
-        server = DaemonWsServer(port=port, secret=SECRET)
+        server = DaemonWsServer(
+            port=port, secret=SECRET, daemon_id=DAEMON_ID, url=DAEMON_URL
+        )
         await server.start()
         try:
             import websockets
@@ -167,7 +174,9 @@ def test_daemon_ws_server_rejects_bad_token_with_1008() -> None:
 def test_daemon_ws_server_rejects_missing_token_with_1008() -> None:
     async def _run() -> None:
         port = _free_port()
-        server = DaemonWsServer(port=port, secret=SECRET)
+        server = DaemonWsServer(
+            port=port, secret=SECRET, daemon_id=DAEMON_ID, url=DAEMON_URL
+        )
         await server.start()
         try:
             import websockets
@@ -183,6 +192,80 @@ def test_daemon_ws_server_rejects_missing_token_with_1008() -> None:
                 pass
         finally:
             await server.stop()
+
+    asyncio.run(_run())
+
+
+def test_daemon_ws_server_rejects_token_for_wrong_daemon() -> None:
+    """A server token whose ``aud`` claim targets a different daemon must be
+    rejected, preventing token reuse across daemons.
+    """
+
+    async def _run() -> None:
+        port = _free_port()
+        server = DaemonWsServer(
+            port=port, secret=SECRET, daemon_id=DAEMON_ID, url=DAEMON_URL
+        )
+        await server.start()
+        try:
+            import websockets
+
+            token = TaskToken.create_server("server-A", SECRET, daemon_id="other-daemon")
+            try:
+                async with websockets.connect(
+                    f"ws://127.0.0.1:{port}/daemon",
+                    additional_headers={"X-Server-Token": token},
+                    open_timeout=5,
+                ) as ws:
+                    await ws.recv()
+                    assert False, "wrong-audience token should have been rejected"
+            except (InvalidStatus, ConnectionClosedError):
+                pass
+        finally:
+            await server.stop()
+
+    asyncio.run(_run())
+
+
+def test_daemon_link_rejects_daemon_with_wrong_identity() -> None:
+    """The Server must close the connection if the daemon's self-proclaimed
+    identity does not match the configured daemon_id.
+    """
+
+    async def _run() -> None:
+        port = _free_port()
+        ws_server = DaemonWsServer(
+            port=port, secret=SECRET, daemon_id="actual-daemon", url=f"ws://127.0.0.1:{port}"
+        )
+        await ws_server.start()
+        try:
+            from agt.server.daemon_link import DaemonLink
+
+            shutdown = asyncio.Event()
+            # Server expects "configured-daemon", daemon identifies as "actual-daemon".
+            link = DaemonLink(
+                daemon_id="configured-daemon",
+                url=f"ws://127.0.0.1:{port}",
+                secret=SECRET,
+                session_factory=None,
+            )
+            link_task = asyncio.create_task(link.run(shutdown))
+            try:
+                # Give the link a few reconnect cycles; it should never become
+                # connected because the daemon identity check fails.
+                for _ in range(40):
+                    if link.connected:
+                        assert False, "link should not connect with mismatched daemon_id"
+                    await asyncio.sleep(0.05)
+            finally:
+                shutdown.set()
+                link_task.cancel()
+                try:
+                    await asyncio.wait_for(link_task, timeout=2)
+                except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                    pass
+        finally:
+            await ws_server.stop()
 
     asyncio.run(_run())
 
@@ -224,14 +307,17 @@ def test_reverse_dial_claim_round_trip() -> None:
 
         try:
             port = _free_port()
-            ws_server = DaemonWsServer(port=port, secret=SECRET)
+            daemon_id = "daemon-cloud-01"
+            ws_server = DaemonWsServer(
+                port=port, secret=SECRET, daemon_id=daemon_id, url=f"ws://127.0.0.1:{port}"
+            )
             await ws_server.start()
 
             from agt.server.daemon_link import DaemonLink
 
             shutdown = asyncio.Event()
             link = DaemonLink(
-                daemon_id="daemon-cloud-01",
+                daemon_id=daemon_id,
                 url=f"ws://127.0.0.1:{port}",
                 secret=SECRET,
                 session_factory=factory,
@@ -293,14 +379,17 @@ def test_reverse_dial_link_negotiates_rpc_v1() -> None:
 
     async def _run() -> None:
         port = _free_port()
-        ws_server = DaemonWsServer(port=port, secret=SECRET)
+        daemon_id = "d-rpcv1"
+        ws_server = DaemonWsServer(
+            port=port, secret=SECRET, daemon_id=daemon_id, url=f"ws://127.0.0.1:{port}"
+        )
         await ws_server.start()
         try:
             from agt.server.daemon_link import DaemonLink
 
             shutdown = asyncio.Event()
             link = DaemonLink(
-                daemon_id="d-rpcv1",
+                daemon_id=daemon_id,
                 url=f"ws://127.0.0.1:{port}",
                 secret=SECRET,
                 session_factory=None,  # not exercised — we only assert negotiation
@@ -363,12 +452,15 @@ def test_daemon_link_reconnects_after_drop() -> None:
         factory = make_session_factory(engine)
 
         try:
-            ws_server = DaemonWsServer(port=port, secret=SECRET)
+            daemon_id = "d-recon"
+            ws_server = DaemonWsServer(
+                port=port, secret=SECRET, daemon_id=daemon_id, url=f"ws://127.0.0.1:{port}"
+            )
             await ws_server.start()
 
             shutdown = asyncio.Event()
             link = DaemonLink(
-                daemon_id="d-recon", url=f"ws://127.0.0.1:{port}",
+                daemon_id=daemon_id, url=f"ws://127.0.0.1:{port}",
                 secret=SECRET, session_factory=factory,
             )
             link_task = asyncio.create_task(link.run(shutdown))
@@ -389,7 +481,9 @@ def test_daemon_link_reconnects_after_drop() -> None:
                     await asyncio.sleep(0.05)
 
                 # Bring server back.
-                ws_server = DaemonWsServer(port=port, secret=SECRET)
+                ws_server = DaemonWsServer(
+                    port=port, secret=SECRET, daemon_id=daemon_id, url=f"ws://127.0.0.1:{port}"
+                )
                 await ws_server.start()
                 try:
                     # DaemonLink should reconnect within a couple of
@@ -424,7 +518,9 @@ def test_claim_loop_falls_back_to_http_when_no_link() -> None:
 
     async def _run() -> None:
         # Server not started — current_link is None forever.
-        server = DaemonWsServer(port=18555, secret=SECRET)
+        server = DaemonWsServer(
+            port=18555, secret=SECRET, daemon_id=DAEMON_ID, url=DAEMON_URL
+        )
 
         link = server.current_link
         assert link is None
