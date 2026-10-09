@@ -22,44 +22,34 @@ interface BridgeRequest {
 }
 
 export class SettingsPanel {
-  private static current: SettingsPanel | undefined;
-
-  static show(ctx: BridgeContext): void {
-    if (SettingsPanel.current) {
-      SettingsPanel.current.attach(ctx);
-      SettingsPanel.current.panel.reveal();
-      void SettingsPanel.current.pushRefresh();
-      return;
-    }
-    SettingsPanel.current = new SettingsPanel(ctx);
-  }
-
-  static notifyActive(ctx: BridgeContext): void {
-    SettingsPanel.current?.attach(ctx);
-  }
-
-  private readonly panel: vscode.WebviewPanel;
+  private view: vscode.WebviewView | undefined;
   private ctx: BridgeContext;
 
-  private constructor(ctx: BridgeContext) {
+  constructor(ctx: BridgeContext) {
     this.ctx = ctx;
-    this.panel = vscode.window.createWebviewPanel(
-      'agt.settings',
-      'AGT Settings',
-      vscode.ViewColumn.Active,
-      {
-        enableScripts: true,
-        retainContextWhenHidden: true,
-        localResourceRoots: [vscode.Uri.joinPath(ctx.extensionUri, 'dist')],
-      },
-    );
-    this.panel.webview.html = this.buildHtml(ctx.extensionUri);
-    this.panel.webview.onDidReceiveMessage((msg) => void this.handle(msg as BridgeRequest));
-    this.panel.onDidDispose(() => {
-      if (SettingsPanel.current === this) {
-        SettingsPanel.current = undefined;
-      }
-    });
+  }
+
+  async present(view: vscode.WebviewView): Promise<void> {
+    this.view = view;
+    view.webview.options = {
+      enableScripts: true,
+      localResourceRoots: [vscode.Uri.joinPath(this.ctx.extensionUri, 'dist')],
+    };
+    view.webview.html = this.buildHtml(this.ctx.extensionUri);
+    await this.pushRefresh();
+  }
+
+  async deactivate(): Promise<void> {
+    this.view = undefined;
+  }
+
+  async dispatch(msg: unknown): Promise<void> {
+    await this.handle(msg as BridgeRequest);
+  }
+
+  notifyActive(ctx: BridgeContext): void {
+    this.attach(ctx);
+    void this.pushRefresh();
   }
 
   attach(ctx: BridgeContext): void {
@@ -67,7 +57,8 @@ export class SettingsPanel {
   }
 
   private buildHtml(extensionUri: vscode.Uri): string {
-    const webview = this.panel.webview;
+    const webview = this.view?.webview;
+    if (!webview) return '<!DOCTYPE html><body></body>';
     const scriptUri = webview.asWebviewUri(
       vscode.Uri.joinPath(extensionUri, 'dist', 'webview-settings.js'),
     );
@@ -123,14 +114,14 @@ export class SettingsPanel {
   }
 
   private async pushRefresh(): Promise<void> {
-    await this.panel.webview.postMessage({
+    await this.view?.webview.postMessage({
       type: 'event',
       event: 'refresh',
       payload: await this.bootPayload(),
     });
   }
 
-  private async handle(msg: BridgeRequest): Promise<void> {
+  async handle(msg: BridgeRequest): Promise<void> {
     if (!msg || msg.type !== 'request') {
       return;
     }
@@ -260,9 +251,9 @@ export class SettingsPanel {
         default:
           throw new Error(`unknown bridge method: ${msg.method}`);
       }
-      await this.panel.webview.postMessage({ type: 'response', id: msg.id, result });
+      await this.view?.webview.postMessage({ type: 'response', id: msg.id, result });
     } catch (err) {
-      await this.panel.webview.postMessage({
+      await this.view?.webview.postMessage({
         type: 'response',
         id: msg.id,
         error: String(err),

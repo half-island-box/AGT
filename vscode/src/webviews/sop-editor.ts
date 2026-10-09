@@ -516,6 +516,7 @@ function render(): void {
         </nav>
         <div class="agd-sop-tools">
           <button type="button" class="agd-icon-btn" id="agd-sop-lang">${tr('settings.langToggle')}</button>
+          <button type="button" class="agd-icon-btn" id="agd-sop-settings" title="${tr('chat.openSettings')}">⚙</button>
         </div>
       </header>
       <div class="agd-sop-body">

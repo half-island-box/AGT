@@ -82,49 +82,12 @@ tasks:
  * editor in VS Code.
  */
 export class SopEditorPanel {
-  private static current: SopEditorPanel | undefined;
-
-  static show(ctx: SopBridgeContext, uri?: vscode.Uri): void {
-    if (SopEditorPanel.current) {
-      SopEditorPanel.current.attach(ctx);
-      SopEditorPanel.current.panel.reveal();
-      if (uri) {
-        void SopEditorPanel.current.bind(uri);
-      } else {
-        void SopEditorPanel.current.pushRefresh();
-      }
-      return;
-    }
-    SopEditorPanel.current = new SopEditorPanel(ctx);
-    if (uri) {
-      void SopEditorPanel.current.bind(uri);
-    }
-  }
-
-  static notifyLanguage(language: UiLanguage): void {
-    void SopEditorPanel.current?.panel.webview.postMessage({
-      type: 'event',
-      event: 'language',
-      payload: language,
-    });
-  }
-
-  /** Path of the document currently bound to the panel (or null). */
-  static boundPath(): string | null {
-    return SopEditorPanel.current?.document?.uri.fsPath ?? null;
-  }
-
-  /** Create (and bind to) a starter template in the first workspace folder. */
-  static async newSop(ctx: SopBridgeContext): Promise<void> {
-    SopEditorPanel.show(ctx);
-    await SopEditorPanel.current?.createStarter();
-  }
-
-  private readonly panel: vscode.WebviewPanel;
+  private view: vscode.WebviewView | undefined;
   private ctx: SopBridgeContext;
   private document: vscode.TextDocument | null = null;
   private parsed: ParsedSop | null = null;
   private disposables: vscode.Disposable[] = [];
+  private documentListenersBound = false;
   private templates: { path: string; label: string; nodeCount: number }[] = [];
   private daemonCache: { at: number; list: SopDaemonOption[] } = { at: 0, list: [] };
   private runs: RunState[] = [];
@@ -132,32 +95,43 @@ export class SopEditorPanel {
   private selectedRunId: string | null = null;
   private inspectorWidth: number | null = null;
 
-  private constructor(ctx: SopBridgeContext) {
+  constructor(ctx: SopBridgeContext) {
     this.ctx = ctx;
-    this.panel = vscode.window.createWebviewPanel(
-      'agt.sopEditor',
-      'AGT SOP Editor',
-      vscode.ViewColumn.Active,
-      {
-        enableScripts: true,
-        retainContextWhenHidden: true,
-        localResourceRoots: [vscode.Uri.joinPath(ctx.extensionUri, 'dist')],
-      },
-    );
-    this.panel.webview.html = this.buildHtml(ctx.extensionUri);
-    this.panel.webview.onDidReceiveMessage((msg) =>
-      void this.handle(msg as BridgeRequest),
-    );
-    this.panel.onDidDispose(() => {
-      for (const disposable of this.disposables) {
-        disposable.dispose();
-      }
-      this.disposables = [];
-      if (SopEditorPanel.current === this) {
-        SopEditorPanel.current = undefined;
-      }
-    });
+  }
 
+  async present(view: vscode.WebviewView): Promise<void> {
+    this.view = view;
+    view.webview.options = {
+      enableScripts: true,
+      localResourceRoots: [vscode.Uri.joinPath(this.ctx.extensionUri, 'dist')],
+    };
+    view.webview.html = this.buildHtml(this.ctx.extensionUri);
+    this.bindDocumentListeners();
+    await this.pushRefresh();
+  }
+
+  async deactivate(): Promise<void> {
+    // Keep the bound YAML document and workspace listeners; the shared view may
+    // switch back to SOP mode later without losing its editing context.
+    this.view = undefined;
+  }
+
+  disposeView(): void {
+    for (const disposable of this.disposables) {
+      disposable.dispose();
+    }
+    this.disposables = [];
+    this.documentListenersBound = false;
+    this.view = undefined;
+  }
+
+  async dispatch(msg: unknown): Promise<void> {
+    await this.handle(msg as BridgeRequest);
+  }
+
+  private bindDocumentListeners(): void {
+    if (this.documentListenersBound) return;
+    this.documentListenersBound = true;
     // The YAML text stays the source of truth: whatever changes it (typing
     // in the text editor, undo, an external tool) re-renders the canvas.
     this.disposables.push(
@@ -177,6 +151,20 @@ export class SopEditorPanel {
         }
       }),
     );
+  }
+
+  notifyLanguage(language: UiLanguage): void {
+    if (!this.view) return;
+    void this.view.webview.postMessage({
+      type: 'event',
+      event: 'language',
+      payload: language,
+    });
+  }
+
+  /** Create (and bind to) a starter template in the first workspace folder. */
+  async newSop(): Promise<void> {
+    await this.createStarter();
   }
 
   attach(ctx: SopBridgeContext): void {
@@ -224,13 +212,11 @@ export class SopEditorPanel {
       await document.save();
     }
     await this.bind(target);
-    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(target), {
-      preview: false,
-    });
   }
 
   private buildHtml(extensionUri: vscode.Uri): string {
-    const webview = this.panel.webview;
+    const webview = this.view?.webview;
+    if (!webview) return '<!DOCTYPE html><body></body>';
     const scriptUri = webview.asWebviewUri(
       vscode.Uri.joinPath(extensionUri, 'dist', 'webview-sop.js'),
     );
@@ -263,7 +249,7 @@ export class SopEditorPanel {
   }
 
   private async pushRefresh(): Promise<void> {
-    await this.panel.webview.postMessage({
+    await this.view?.webview.postMessage({
       type: 'event',
       event: 'refresh',
       payload: await this.bootPayload(),
@@ -485,7 +471,7 @@ export class SopEditorPanel {
     this.templates = templates;
   }
 
-  private async handle(msg: BridgeRequest): Promise<void> {
+  async handle(msg: BridgeRequest): Promise<void> {
     if (!msg || msg.type !== 'request') {
       return;
     }
@@ -722,9 +708,9 @@ export class SopEditorPanel {
         default:
           throw new Error(`unknown bridge method: ${msg.method}`);
       }
-      await this.panel.webview.postMessage({ type: 'response', id: msg.id, result });
+      await this.view?.webview.postMessage({ type: 'response', id: msg.id, result });
     } catch (err) {
-      await this.panel.webview.postMessage({
+      await this.view?.webview.postMessage({
         type: 'response',
         id: msg.id,
         error: String(err),

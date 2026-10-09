@@ -1,3 +1,4 @@
+import './mode-switcher.css';
 import './styles.css';
 import { t, type MessageKey } from '../core/i18n';
 import type { DaemonInfo, UiLanguage } from '../core/types';
@@ -123,8 +124,13 @@ function render(): void {
   root.innerHTML = `
   <div class="agd-wrap">
     <header class="agd-head">
-      <div>
+      <div class="agd-head-main">
         <div class="agd-title">${tr('app.title')} <span class="agd-sub">${tr('app.subtitle')}</span></div>
+        <nav class="agd-modes" aria-label="AGT modes">
+          <button type="button" class="agd-mode" data-mode="chat">${tr('mode.chat')}</button>
+          <button type="button" class="agd-mode" data-mode="sop">${tr('mode.sop')}</button>
+          <button type="button" class="agd-mode" data-mode="goal">${tr('mode.goal')}</button>
+        </nav>
       </div>
       <div class="agd-head-tools">
         <button type="button" id="agd-lang" class="agd-lang">${tr('settings.langToggle')}</button>
@@ -207,6 +213,9 @@ function applyBoot(next: BootInfo): void {
 }
 
 function wireEvents(): void {
+  document.querySelector('[data-mode="chat"]')?.addEventListener('click', () => void bridge.call('openChat'));
+  document.querySelector('[data-mode="sop"]')?.addEventListener('click', () => void bridge.call('openSop'));
+  document.querySelector('[data-mode="goal"]')?.addEventListener('click', () => void bridge.call('openGoal'));
   document.getElementById('agd-lang')?.addEventListener('click', async () => {
     lang = lang === 'zh' ? 'en' : 'zh';
     render();

@@ -4,11 +4,12 @@ import { ServerLifecycle } from '../core/lifecycle';
 import type { DaemonInfo, UiLanguage } from '../core/types';
 import { AgtStatusBar } from './statusbar';
 import { AgtTreeProvider } from './tree';
-import { SettingsPanel, type BridgeContext } from './settings-panel';
-import { ChatPanel, type ChatBridgeContext } from './chat-panel';
-import { GoalPanel, type GoalBridgeContext } from './goal-panel';
+import type { BridgeContext } from './settings-panel';
+import type { ChatBridgeContext } from './chat-panel';
+import type { GoalBridgeContext } from './goal-panel';
 import { looksLikeSop } from '../core/sop/document';
-import { SopEditorPanel, type SopBridgeContext } from './sop-editor-panel';
+import type { SopBridgeContext } from './sop-editor-panel';
+import { WorkspacePanel } from './workspace-panel';
 
 interface AgtConfig {
   serverUrl: string;
@@ -65,6 +66,8 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   };
 
+  let workspaceView: WorkspacePanel;
+
   async function refresh(opts?: { ensure?: boolean }): Promise<void> {
     const online = opts?.ensure ? await lifecycle.ensureStarted() : await lifecycle.probe();
     if (online && opts?.ensure) {
@@ -80,7 +83,7 @@ export function activate(context: vscode.ExtensionContext): void {
     tree.setDaemons(daemons);
     tree.setServerInfo(lifecycle.state, config.serverUrl, lifecycle.latencyMs);
     statusbar.update(lifecycle.state, tree.daemonCount, language);
-    SettingsPanel.notifyActive(bridgeContext);
+    workspaceView.notifyActive(bridgeContext);
   }
 
   const bridgeContext: BridgeContext = {
@@ -101,9 +104,9 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.ConfigurationTarget.Global,
       );
     },
-    openSettings: () => SettingsPanel.show(bridgeContext),
-    openSop: () => openSopEditor(),
-    openGoal: () => GoalPanel.show(goalContext),
+    openSettings: () => void workspaceView.show('settings'),
+    openSop: () => void openSopEditor(),
+    openGoal: () => void workspaceView.show('goal'),
   };
   const sopContext: SopBridgeContext = {
     extensionUri: context.extensionUri,
@@ -117,9 +120,9 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.ConfigurationTarget.Global,
       );
     },
-    openChat: () => ChatPanel.show(chatContext),
-    openGoal: () => GoalPanel.show(goalContext),
-    openSettings: () => SettingsPanel.show(bridgeContext),
+    openChat: () => void workspaceView.show('chat'),
+    openGoal: () => void workspaceView.show('goal'),
+    openSettings: () => void workspaceView.show('settings'),
   };
   const goalContext: GoalBridgeContext = {
     extensionUri: context.extensionUri,
@@ -133,10 +136,10 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.ConfigurationTarget.Global,
       );
     },
-    openChat: () => ChatPanel.show(chatContext),
-    openSop: () => openSopEditor(),
-    openSopFile: (uri) => openSopEditor(uri),
-    openSettings: () => SettingsPanel.show(bridgeContext),
+    openChat: () => void workspaceView.show('chat'),
+    openSop: () => void openSopEditor(),
+    openSopFile: (uri) => void openSopEditor(uri),
+    openSettings: () => void workspaceView.show('settings'),
   };
 
   /** Only YAML that plausibly is a SOP is worth opening in the editor. */
@@ -162,8 +165,15 @@ export function activate(context: vscode.ExtensionContext): void {
         target = active;
       }
     }
-    SopEditorPanel.show(sopContext, target);
+    void workspaceView.show('sop', target);
   }
+
+  workspaceView = new WorkspacePanel({
+    chat: chatContext,
+    sop: sopContext,
+    goal: goalContext,
+    settings: bridgeContext,
+  });
 
   const pollTimer = setInterval(() => void refresh(), 15000);
 
@@ -171,14 +181,14 @@ export function activate(context: vscode.ExtensionContext): void {
     statusbar,
     tree,
     treeView,
-    vscode.commands.registerCommand('agt.showSettings', () => SettingsPanel.show(bridgeContext)),
-    vscode.commands.registerCommand('agt.showChat', () => ChatPanel.show(chatContext)),
+    vscode.commands.registerCommand('agt.showSettings', () => void workspaceView.show('settings')),
+    vscode.commands.registerCommand('agt.showChat', () => void workspaceView.show('chat')),
     vscode.commands.registerCommand('agt.showSop', () => openSopEditor()),
-    vscode.commands.registerCommand('agt.showGoal', () => GoalPanel.show(goalContext)),
+    vscode.commands.registerCommand('agt.showGoal', () => void workspaceView.show('goal')),
     vscode.commands.registerCommand('agt.openSopEditor', (uri?: vscode.Uri) =>
       openSopEditor(uri),
     ),
-    vscode.commands.registerCommand('agt.newSop', () => void SopEditorPanel.newSop(sopContext)),
+    vscode.commands.registerCommand('agt.newSop', () => void workspaceView.newSop()),
     vscode.commands.registerCommand('agt.refresh', () => void refresh({ ensure: false })),
     vscode.commands.registerCommand('agt.startServer', () => void refresh({ ensure: true })),
     vscode.commands.registerCommand('agt.stopServer', async () => {
@@ -193,6 +203,7 @@ export function activate(context: vscode.ExtensionContext): void {
       await lifecycle.stopDaemon();
       await refresh();
     }),
+    vscode.window.registerWebviewViewProvider('agt.workspace', workspaceView),
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (!e.affectsConfiguration('agt')) {
         return;
@@ -200,9 +211,7 @@ export function activate(context: vscode.ExtensionContext): void {
       config = readConfig();
       language = config.language;
       lifecycle.updateOptions(config);
-      ChatPanel.notifyLanguage(config.language);
-      SopEditorPanel.notifyLanguage(config.language);
-      GoalPanel.notifyLanguage(config.language);
+      workspaceView.notifyLanguage(config.language);
       void refresh();
     }),
     { dispose: () => clearInterval(pollTimer) },

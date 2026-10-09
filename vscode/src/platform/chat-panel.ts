@@ -28,50 +28,41 @@ interface BridgeRequest {
 }
 
 export class ChatPanel {
-  private static current: ChatPanel | undefined;
-
-  static show(ctx: ChatBridgeContext): void {
-    if (ChatPanel.current) {
-      ChatPanel.current.attach(ctx);
-      ChatPanel.current.panel.reveal();
-      void ChatPanel.current.pushRefresh();
-      return;
-    }
-    ChatPanel.current = new ChatPanel(ctx);
-  }
-
-  static notifyLanguage(language: UiLanguage): void {
-    void ChatPanel.current?.panel.webview.postMessage({
-      type: 'event',
-      event: 'language',
-      payload: language,
-    });
-  }
-
-  private readonly panel: vscode.WebviewPanel;
+  private view: vscode.WebviewView | undefined;
   private ctx: ChatBridgeContext;
   private streamAbort: AbortController | undefined;
   private streaming = false;
 
-  private constructor(ctx: ChatBridgeContext) {
+  constructor(ctx: ChatBridgeContext) {
     this.ctx = ctx;
-    this.panel = vscode.window.createWebviewPanel(
-      'agt.chat',
-      'AGT Chat',
-      vscode.ViewColumn.Active,
-      {
-        enableScripts: true,
-        retainContextWhenHidden: true,
-        localResourceRoots: [vscode.Uri.joinPath(ctx.extensionUri, 'dist')],
-      },
-    );
-    this.panel.webview.html = this.buildHtml(ctx.extensionUri);
-    this.panel.webview.onDidReceiveMessage((msg) => void this.handle(msg as BridgeRequest));
-    this.panel.onDidDispose(() => {
-      this.streamAbort?.abort();
-      if (ChatPanel.current === this) {
-        ChatPanel.current = undefined;
-      }
+  }
+
+  async present(view: vscode.WebviewView): Promise<void> {
+    this.view = view;
+    view.webview.options = {
+      enableScripts: true,
+      localResourceRoots: [vscode.Uri.joinPath(this.ctx.extensionUri, 'dist')],
+    };
+    view.webview.html = this.buildHtml(this.ctx.extensionUri);
+    await this.pushRefresh();
+  }
+
+  async deactivate(): Promise<void> {
+    this.streamAbort?.abort();
+    this.streaming = false;
+    this.view = undefined;
+  }
+
+  async dispatch(msg: unknown): Promise<void> {
+    await this.handle(msg as BridgeRequest);
+  }
+
+  notifyLanguage(language: UiLanguage): void {
+    if (!this.view) return;
+    void this.view.webview.postMessage({
+      type: 'event',
+      event: 'language',
+      payload: language,
     });
   }
 
@@ -80,7 +71,8 @@ export class ChatPanel {
   }
 
   private buildHtml(extensionUri: vscode.Uri): string {
-    const webview = this.panel.webview;
+    const webview = this.view?.webview;
+    if (!webview) return '<!DOCTYPE html><body></body>';
     const scriptUri = webview.asWebviewUri(
       vscode.Uri.joinPath(extensionUri, 'dist', 'webview-chat.js'),
     );
@@ -114,7 +106,7 @@ export class ChatPanel {
   }
 
   private async pushRefresh(): Promise<void> {
-    await this.panel.webview.postMessage({
+    await this.view?.webview.postMessage({
       type: 'event',
       event: 'refresh',
       payload: await this.bootPayload(),
@@ -152,14 +144,14 @@ export class ChatPanel {
   }
 
   private async emitChat(payload: Record<string, unknown>): Promise<void> {
-    await this.panel.webview.postMessage({
+    await this.view?.webview.postMessage({
       type: 'event',
       event: 'chat',
       payload,
     });
   }
 
-  private async handle(msg: BridgeRequest): Promise<void> {
+  async handle(msg: BridgeRequest): Promise<void> {
     if (!msg || msg.type !== 'request') return;
     try {
       let result: unknown;
@@ -251,9 +243,9 @@ export class ChatPanel {
         default:
           throw new Error(`unknown bridge method: ${msg.method}`);
       }
-      await this.panel.webview.postMessage({ type: 'response', id: msg.id, result });
+      await this.view?.webview.postMessage({ type: 'response', id: msg.id, result });
     } catch (err) {
-      await this.panel.webview.postMessage({
+      await this.view?.webview.postMessage({
         type: 'response',
         id: msg.id,
         error: cleanError(err),

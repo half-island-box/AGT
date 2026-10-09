@@ -7,7 +7,7 @@
   "license": "MIT",
   "private": true,
   "engines": {
-    "vscode": "^1.85.0"
+    "vscode": "^1.104.0"
   },
   "categories": [
     "AI",
@@ -22,17 +22,32 @@
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "agt",
+          "id": "agt-daemons",
+          "title": "AGT Daemons",
+          "icon": "media/agt.svg"
+        }
+      ],
+      "secondarySidebar": [
+        {
+          "id": "agt-sidebar",
           "title": "AGT",
           "icon": "media/agt.svg"
         }
       ]
     },
     "views": {
-      "agt": [
+      "agt-daemons": [
         {
           "id": "agt.daemons",
           "name": "Daemons"
+        }
+      ],
+      "agt-sidebar": [
+        {
+          "id": "agt.workspace",
+          "name": "AGT",
+          "type": "webview",
+          "visibility": "visible"
         }
       ]
     },
@@ -193,7 +208,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
-    "@types/vscode": "^1.85.0",
+    "@types/vscode": "^1.104.0",
     "esbuild": "^0.24.0",
     "typescript": "^5.7.0"
   },
