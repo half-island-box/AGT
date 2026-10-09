@@ -40,3 +40,8 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["agt"]
+
+[tool.pytest.ini_options]
+markers = [
+    "no_server_secret: tests that run without AGT_SERVER_SECRET configured",
+]
