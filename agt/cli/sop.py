@@ -140,10 +140,15 @@ def _render(st: dict) -> None:
     for node in st["nodes"]:
         sid = node.get("session_id") or "—"
         prov = node.get("provider") or "—"
+        name = node["name"]
+        if node.get("iteration"):
+            name = f"{name}#{node['iteration']}"
+        if node.get("loop_name"):
+            name = f"{name} ({node['loop_name']})"
         deps = f"  (← {','.join(node['depends_on'])})" if node["depends_on"] else ""
         arts = f"  [{len(node['artifacts'])} artifact(s)]" if node["artifacts"] else ""
         click.echo(
-            f"{node['name']:<20} {node['status']:<12} {prov:<10} {sid:<36}{deps}{arts}"
+            f"{name:<30} {node['status']:<12} {prov:<10} {sid:<36}{deps}{arts}"
         )
 
 
@@ -158,7 +163,13 @@ def _render_log(log: dict) -> None:
         click.echo("\n(no steps yet — node not activated)")
         return
 
+    current_iteration = None
     for step in steps:
+        iteration = step.get("iteration") or 0
+        if iteration != current_iteration:
+            current_iteration = iteration
+            label = f"iteration {iteration}" if iteration else "non-loop"
+            click.echo(f"\n=== {label} ===")
         click.echo(f"\n--- step {step['task_id']} ({step['status']}) ---")
         if step.get("session_id"):
             click.echo(f"session_id: {step['session_id']}")

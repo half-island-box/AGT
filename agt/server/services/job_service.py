@@ -81,6 +81,9 @@ async def create_job(
     root_job_id: str | None = None,
     sop_node: str | None = None,
     goal_meta: str | None = None,
+    sop_loop_name: str | None = None,
+    sop_iteration: int = 0,
+    sop_loop_meta: str | None = None,
 ) -> JobModel:
     """Create a Job and (by default) its first pending Step.
 
@@ -128,6 +131,9 @@ async def create_job(
         agent_cwd=agent_cwd,
         sop_node=sop_node,
         goal_meta=goal_meta,
+        sop_loop_name=sop_loop_name,
+        sop_iteration=sop_iteration,
+        sop_loop_meta=sop_loop_meta,
         created_at=now,
         updated_at=now,
     )
@@ -723,7 +729,16 @@ async def try_wake_dependents(db: AsyncSession, terminal_job_id: str) -> list[st
     The activation itself may end in ``failed`` (missing upstream
     output); sop_service re-invokes this function there so failure
     propagates down the chain (review G1).
+
+    Phase 5 loops: a terminal loop job may also allow the next iteration
+    (or loop completion) to proceed.
     """
+    terminal_job = await db.get(JobModel, terminal_job_id)
+    if terminal_job is not None and terminal_job.sop_loop_name:
+        from .sop_loop_service import check_loop_advance
+
+        await check_loop_advance(db, terminal_job.root_job_id)
+
     dep_rows = (
         await db.execute(
             select(JobParentModel.job_id).where(
