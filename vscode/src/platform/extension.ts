@@ -67,6 +67,29 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   let workspaceView: WorkspacePanel;
+  let lastTreeOpenClick: { key: string; at: number } | undefined;
+
+  /**
+   * TreeItem.command runs on each click. Keep the activation on the second
+   * click so the daemon tree behaves like a conventional double-click picker.
+   */
+  function openChatFromTree(daemonId?: string, provider?: string): void {
+    if (!daemonId) return;
+    const key = provider ? `${daemonId}:${provider}` : daemonId;
+    const now = Date.now();
+    if (
+      !lastTreeOpenClick ||
+      lastTreeOpenClick.key !== key ||
+      now - lastTreeOpenClick.at > 450
+    ) {
+      lastTreeOpenClick = { key, at: now };
+      return;
+    }
+    lastTreeOpenClick = undefined;
+    void workspaceView.show('chat', {
+      chatSelection: { daemonId, provider },
+    });
+  }
 
   async function refresh(opts?: { ensure?: boolean }): Promise<void> {
     const online = opts?.ensure ? await lifecycle.ensureStarted() : await lifecycle.probe();
@@ -165,7 +188,7 @@ export function activate(context: vscode.ExtensionContext): void {
         target = active;
       }
     }
-    void workspaceView.show('sop', target);
+    void workspaceView.show('sop', { sopUri: target });
   }
 
   workspaceView = new WorkspacePanel({
@@ -181,6 +204,9 @@ export function activate(context: vscode.ExtensionContext): void {
     statusbar,
     tree,
     treeView,
+    vscode.commands.registerCommand('agt.treeOpenChat', (daemonId?: string, provider?: string) =>
+      openChatFromTree(daemonId, provider),
+    ),
     vscode.commands.registerCommand('agt.showSettings', () => void workspaceView.show('settings')),
     vscode.commands.registerCommand('agt.showChat', () => void workspaceView.show('chat')),
     vscode.commands.registerCommand('agt.showSop', () => openSopEditor()),
@@ -204,6 +230,8 @@ export function activate(context: vscode.ExtensionContext): void {
       await refresh();
     }),
     vscode.window.registerWebviewViewProvider('agt.workspace', workspaceView),
+    vscode.window.onDidChangeActiveTextEditor(() => workspaceView.notifyWorkspaceRoot()),
+    vscode.workspace.onDidChangeWorkspaceFolders(() => workspaceView.notifyWorkspaceRoot()),
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (!e.affectsConfiguration('agt')) {
         return;

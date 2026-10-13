@@ -105,6 +105,8 @@ Remote daemons connect via HTTP or **reverse-dial WebSocket** (server dials out,
 
 The `vscode/` directory holds a TypeScript UI client for the server. Chat covers daemon/agent/identity selection with provider logos, daemon session history, live SSE output, multi-turn continuation and cancellation, in zh/en text; the **visual SOP editor** supports editable YAML DAGs and run monitoring; **Goal mode** submits open-ended goals, tracks the dynamically growing Job tree, answers `AGT-ASK` questions, cancels cascades, and exports a run as a SOP draft.
 
+In the daemon tree, double-click a daemon or provider to open the docked Chat page with that target preselected. Chat defaults its agent working directory to the active VS Code workspace folder, and its configuration/session sidebar can be collapsed, expanded, and dragged to a custom width.
+
 ```bash
 cd vscode
 npm install

@@ -10,6 +10,11 @@ import type {
   UiLanguage,
 } from '../core/types';
 
+export interface ChatSelection {
+  daemonId: string;
+  provider?: string;
+}
+
 export interface ChatBridgeContext {
   extensionUri: vscode.Uri;
   lifecycle: ServerLifecycle;
@@ -27,11 +32,25 @@ interface BridgeRequest {
   params?: Record<string, unknown>;
 }
 
+/**
+ * Prefer the folder containing the active editor, then the first workspace
+ * folder. This keeps the chat working directory aligned with the directory the
+ * user currently has open in VS Code.
+ */
+function activeWorkspaceRoot(): string {
+  const activeUri = vscode.window.activeTextEditor?.document.uri;
+  const activeFolder = activeUri ? vscode.workspace.getWorkspaceFolder(activeUri) : undefined;
+  return (
+    activeFolder?.uri.fsPath ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? ''
+  );
+}
+
 export class ChatPanel {
   private view: vscode.WebviewView | undefined;
   private ctx: ChatBridgeContext;
   private streamAbort: AbortController | undefined;
   private streaming = false;
+  private preferredSelection: ChatSelection | undefined;
 
   constructor(ctx: ChatBridgeContext) {
     this.ctx = ctx;
@@ -55,6 +74,28 @@ export class ChatPanel {
 
   async dispatch(msg: unknown): Promise<void> {
     await this.handle(msg as BridgeRequest);
+  }
+
+  selectTarget(selection: ChatSelection): void {
+    // A running turn is pinned to its original daemon/provider; avoid changing
+    // the visible selection underneath an active stream.
+    if (this.streaming) return;
+    this.preferredSelection = selection;
+    if (!this.view) return;
+    void this.view.webview.postMessage({
+      type: 'event',
+      event: 'selection',
+      payload: selection,
+    });
+  }
+
+  notifyWorkspaceRoot(): void {
+    if (!this.view) return;
+    void this.view.webview.postMessage({
+      type: 'event',
+      event: 'workspaceRoot',
+      payload: activeWorkspaceRoot(),
+    });
   }
 
   notifyLanguage(language: UiLanguage): void {
@@ -124,6 +165,8 @@ export class ChatPanel {
         identities: [],
         sessions: [],
         workspaceFolders: [],
+        workspaceRoot: activeWorkspaceRoot(),
+        selection: this.preferredSelection,
       };
     }
     const api = this.ctx.lifecycle.api;
@@ -140,6 +183,8 @@ export class ChatPanel {
       identities,
       sessions: [],
       workspaceFolders: vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath) ?? [],
+      workspaceRoot: activeWorkspaceRoot(),
+      selection: this.preferredSelection,
     };
   }
 
@@ -158,6 +203,7 @@ export class ChatPanel {
       switch (msg.method) {
         case 'boot':
           result = await this.bootPayload();
+          this.preferredSelection = undefined;
           break;
         case 'refresh':
           result = await this.bootPayload();

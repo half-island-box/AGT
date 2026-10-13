@@ -21,6 +21,13 @@ interface ChatBoot {
   identities: IdentityWithBindings[];
   sessions: ChatSessionInfo[];
   workspaceFolders: string[];
+  workspaceRoot: string;
+  selection?: ChatSelection;
+}
+
+interface ChatSelection {
+  daemonId: string;
+  provider?: string;
 }
 
 interface ChatMessage {
@@ -57,6 +64,12 @@ type ChatEvent = Record<string, unknown> & { kind?: string };
 type MockSendResult = { events?: ChatEvent[] };
 type BusyState = 'idle' | 'sending' | 'settling' | 'cancelling';
 
+const SIDEBAR_WIDTH_KEY = 'agt.chat.sidebarWidth';
+const SIDEBAR_COLLAPSED_KEY = 'agt.chat.sidebarCollapsed';
+const DEFAULT_SIDEBAR_WIDTH = 292;
+const MIN_SIDEBAR_WIDTH = 180;
+const MAX_SIDEBAR_WIDTH = 520;
+
 const PROVIDER_COLORS: Record<string, string> = {
   claude: '#D97757',
   codex: '#10A37F',
@@ -74,6 +87,7 @@ let selectedDaemonId: string | null = null;
 let selectedProvider: string | null = null;
 let selectedIdentityDid = '';
 let agentCwd = '';
+let agentCwdTouched = false;
 let sessions: ChatSessionInfo[] = [];
 let sessionsLoading = false;
 let activeSessionId: string | null = null;
@@ -88,6 +102,16 @@ let documentClickWired = false;
 let promptHistory: string[] = [];
 let promptHistoryIndex: number | null = null;
 let promptDraft = '';
+
+function storedSidebarWidth(): number {
+  const value = Number(window.localStorage.getItem(SIDEBAR_WIDTH_KEY));
+  return Number.isFinite(value)
+    ? Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, Math.round(value)))
+    : DEFAULT_SIDEBAR_WIDTH;
+}
+
+let sidebarWidth = storedSidebarWidth();
+let sidebarCollapsed = window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === '1';
 
 function recallPrompt(event: KeyboardEvent, input: HTMLTextAreaElement): void {
   if (promptHistory.length === 0) return;
@@ -234,8 +258,36 @@ function identitiesForSelection(): IdentityWithBindings[] {
   );
 }
 
+function syncWorkspaceRoot(): void {
+  if (agentCwdTouched || activeSessionId || currentJob) return;
+  agentCwd = boot?.workspaceRoot || boot?.workspaceFolders[0] || '';
+}
+
+function applyChatSelection(selection: ChatSelection): void {
+  if (busy !== 'idle') return;
+  const daemonChanged = selectedDaemonId !== selection.daemonId;
+  const providerChanged = selectedProvider !== (selection.provider ?? null);
+  if (!daemonChanged && !providerChanged) return;
+
+  openDropdown = null;
+  selectedDaemonId = selection.daemonId;
+  selectedProvider = selection.provider ?? null;
+  selectedIdentityDid = '';
+  normalizeInitialSelection();
+  clearConversation();
+  renderSidebar();
+  renderMessages();
+  renderControls();
+  if (daemonChanged) void loadSessions();
+}
+
 function normalizeInitialSelection(): void {
   if (!boot) return;
+  if (boot.selection) {
+    selectedDaemonId = boot.selection.daemonId;
+    selectedProvider = boot.selection.provider ?? null;
+    selectedIdentityDid = '';
+  }
   const daemons = boot.daemons.filter((daemon) => daemon.online);
   if (!selectedDaemonId || !daemons.some((daemon) => daemon.daemon_id === selectedDaemonId)) {
     const withAgent = daemons.find((daemon) =>
@@ -259,9 +311,7 @@ function normalizeInitialSelection(): void {
     )?.did ?? identities[0]?.did ?? '';
   }
 
-  if (!agentCwd) {
-    agentCwd = boot.workspaceFolders[0] ?? '';
-  }
+  syncWorkspaceRoot();
 }
 
 function canSend(): boolean {
@@ -302,7 +352,10 @@ function renderFrame(): void {
     return;
   }
   root.innerHTML = `
-  <div class="agd-chat">
+  <div
+    class="agd-chat ${sidebarCollapsed ? 'is-collapsed' : ''}"
+    style="--agd-chat-sidebar-width:${sidebarWidth}px"
+  >
     <header class="agd-chat-head">
       <div class="agd-chat-brand"><span>AGT</span><small>${tr('app.subtitle')}</small></div>
       <nav class="agd-modes" aria-label="AGT modes">
@@ -316,6 +369,22 @@ function renderFrame(): void {
       </div>
     </header>
     <aside id="agd-chat-sidebar" class="agd-chat-side"></aside>
+    <div
+      id="agd-chat-side-boundary"
+      class="agd-chat-side-boundary"
+      role="separator"
+      aria-orientation="vertical"
+      title="${tr('chat.toggleSidebar')}"
+    >
+      <button
+        type="button"
+        id="agd-chat-sidebar-toggle"
+        class="agd-sidebar-toggle"
+        aria-expanded="${sidebarCollapsed ? 'false' : 'true'}"
+        aria-label="${tr('chat.toggleSidebar')}"
+        title="${tr('chat.toggleSidebar')}"
+      >${sidebarCollapsed ? '›' : '‹'}</button>
+    </div>
     <section class="agd-chat-main">
       <div id="agd-messages" class="agd-messages"></div>
       <footer class="agd-composer">
@@ -545,6 +614,8 @@ function wireFrame(): void {
       void submit();
     }
   });
+  wireSidebarBoundary();
+
   if (!documentClickWired) {
     documentClickWired = true;
     document.addEventListener('click', (event) => {
@@ -557,6 +628,59 @@ function wireFrame(): void {
       }
     });
   }
+}
+
+function wireSidebarBoundary(): void {
+  const shell = document.querySelector<HTMLElement>('.agd-chat');
+  const boundary = document.getElementById('agd-chat-side-boundary');
+  const toggle = document.getElementById('agd-chat-sidebar-toggle');
+  if (!shell || !boundary || !toggle) return;
+
+  const renderToggle = () => {
+    shell.classList.toggle('is-collapsed', sidebarCollapsed);
+    toggle.textContent = sidebarCollapsed ? '›' : '‹';
+    toggle.setAttribute('aria-expanded', sidebarCollapsed ? 'false' : 'true');
+  };
+
+  toggle.addEventListener('click', () => {
+    sidebarCollapsed = !sidebarCollapsed;
+    window.localStorage.setItem(SIDEBAR_COLLAPSED_KEY, sidebarCollapsed ? '1' : '0');
+    renderToggle();
+  });
+
+  boundary.addEventListener('pointerdown', (event) => {
+    if ((event.target as HTMLElement | null)?.closest('#agd-chat-sidebar-toggle')) return;
+    event.preventDefault();
+    boundary.setPointerCapture(event.pointerId);
+    const wasCollapsed = sidebarCollapsed;
+    const startWidth = wasCollapsed ? 0 : sidebarWidth;
+    const startX = event.clientX;
+
+    if (wasCollapsed) {
+      sidebarCollapsed = false;
+      sidebarWidth = Math.max(MIN_SIDEBAR_WIDTH, DEFAULT_SIDEBAR_WIDTH);
+      shell.style.setProperty('--agd-chat-sidebar-width', `${sidebarWidth}px`);
+      renderToggle();
+    }
+
+    const move = (moveEvent: PointerEvent) => {
+      sidebarWidth = Math.min(
+        MAX_SIDEBAR_WIDTH,
+        Math.max(MIN_SIDEBAR_WIDTH, startWidth + moveEvent.clientX - startX),
+      );
+      shell.style.setProperty('--agd-chat-sidebar-width', `${sidebarWidth}px`);
+    };
+    const stop = (stopEvent: PointerEvent) => {
+      boundary.releasePointerCapture(stopEvent.pointerId);
+      boundary.removeEventListener('pointermove', move);
+      boundary.removeEventListener('pointerup', stop);
+      boundary.removeEventListener('pointercancel', stop);
+      window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidth));
+    };
+    boundary.addEventListener('pointermove', move);
+    boundary.addEventListener('pointerup', stop);
+    boundary.addEventListener('pointercancel', stop);
+  });
 }
 
 function wireSidebar(): void {
@@ -582,6 +706,8 @@ function wireSidebar(): void {
   document.getElementById('agd-chat-new')?.addEventListener('click', () => {
     if (busy !== 'idle') return;
     clearConversation();
+    agentCwdTouched = false;
+    syncWorkspaceRoot();
     renderSidebar();
     renderMessages();
     renderControls();
@@ -592,6 +718,7 @@ function wireSidebar(): void {
   document.getElementById('agd-chat-cwd')?.addEventListener('change', (event) => {
     if (busy !== 'idle') return;
     agentCwd = (event.target as HTMLInputElement).value.trim();
+    agentCwdTouched = true;
     if (currentJob) {
       currentJob = null;
       activeSessionId = null;
@@ -887,6 +1014,13 @@ async function main(): Promise<void> {
       normalizeInitialSelection();
       renderPreservingComposer();
       if (previousDaemon !== selectedDaemonId) void loadSessions();
+    } else if (event === 'selection') {
+      applyChatSelection(payload as ChatSelection);
+    } else if (event === 'workspaceRoot') {
+      if (!boot) return;
+      boot.workspaceRoot = String(payload ?? '');
+      syncWorkspaceRoot();
+      renderSidebar();
     } else if (event === 'language') {
       lang = payload as UiLanguage;
       renderPreservingComposer();

@@ -263,6 +263,7 @@ function boot(): Record<string, unknown> {
     identities: state === 'online' ? identities : [],
     sessions: [],
     workspaceFolders: ['/home/you/project'],
+    workspaceRoot: '/home/you/project',
   };
 }
 

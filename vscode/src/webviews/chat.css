@@ -14,7 +14,10 @@ body.agd-chat-body {
 .agd-chat {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
-  grid-template-columns: 292px minmax(0, 1fr);
+  grid-template-columns:
+    minmax(0, clamp(180px, var(--agd-chat-sidebar-width, 292px), 520px))
+    12px
+    minmax(0, 1fr);
   background: var(--vscode-editor-background, #1f1f1f);
 }
 
@@ -55,13 +58,74 @@ body.agd-chat-body {
 }
 .agd-icon-btn:hover { filter: brightness(1.15); }
 
+.agd-chat.is-collapsed {
+  grid-template-columns: 0px 12px minmax(0, 1fr);
+}
+
 .agd-chat-side {
+  grid-column: 1;
+  grid-row: 2;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  border-right: 1px solid var(--vscode-panel-border, #2e2e2e);
   background: var(--vscode-sideBar-background, #202020);
   overflow: hidden;
+}
+
+.agd-chat.is-collapsed .agd-chat-side {
+  display: none;
+}
+
+.agd-chat-side-boundary {
+  grid-column: 2;
+  grid-row: 2;
+  position: relative;
+  z-index: 4;
+  min-height: 0;
+  cursor: col-resize;
+  touch-action: none;
+  background: transparent;
+}
+
+.agd-chat-side-boundary::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 5px;
+  width: 2px;
+  background: var(--vscode-panel-border, #2e2e2e);
+  opacity: 0.65;
+  transition: background 0.15s ease, opacity 0.15s ease;
+}
+
+.agd-chat-side-boundary:hover::before,
+.agd-chat-side-boundary:focus-within::before {
+  background: var(--vscode-focusBorder, #3794ff);
+  opacity: 1;
+}
+
+.agd-sidebar-toggle {
+  position: absolute;
+  z-index: 2;
+  top: 18px;
+  left: -6px;
+  width: 16px;
+  height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--vscode-panel-border, #2e2e2e);
+  border-radius: 999px;
+  background: var(--vscode-editorWidget-background, #252526);
+  color: var(--vscode-descriptionForeground, #8b8b8b);
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.agd-sidebar-toggle:hover {
+  color: var(--vscode-foreground, #ccc);
+  border-color: var(--vscode-focusBorder, #3794ff);
 }
 
 .agd-side-section {
@@ -226,6 +290,8 @@ body.agd-chat-body {
 }
 
 .agd-chat-main {
+  grid-column: 3;
+  grid-row: 2;
   min-width: 0;
   min-height: 0;
   display: grid;
@@ -464,9 +530,6 @@ body.agd-chat-body {
 .agd-chat-controls { display: flex; gap: 7px; }
 
 @media (max-width: 780px) {
-  .agd-chat {
-    grid-template-columns: 232px minmax(0, 1fr);
-  }
   .agd-chat-brand small { display: none; }
   .agd-bubble,
   .agd-md { max-width: 94%; }

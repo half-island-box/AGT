@@ -237,6 +237,7 @@ const zh = {
   'chat.sopComing': 'SOP 模式将在 M3 提供',
   'chat.goalComing': 'Goal 模式将在 M4 提供',
   'chat.openSettings': '打开设置',
+  'chat.toggleSidebar': '收起/展开侧栏',
 };
 
 const en: Record<keyof typeof zh, string> = {
@@ -472,6 +473,7 @@ const en: Record<keyof typeof zh, string> = {
   'chat.sopComing': 'SOP mode arrives in M3',
   'chat.goalComing': 'Goal mode arrives in M4',
   'chat.openSettings': 'Open settings',
+  'chat.toggleSidebar': 'Collapse/expand sidebar',
 };
 
 const dictionaries: Record<UiLanguage, Record<string, string>> = { zh, en };

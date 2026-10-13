@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { ChatPanel, type ChatBridgeContext } from './chat-panel';
+import { ChatPanel, type ChatBridgeContext, type ChatSelection } from './chat-panel';
 import { GoalPanel, type GoalBridgeContext } from './goal-panel';
 import { SettingsPanel, type BridgeContext } from './settings-panel';
 import { SopEditorPanel, type SopBridgeContext } from './sop-editor-panel';
@@ -20,9 +20,14 @@ interface WorkspacePanelContext {
   settings: BridgeContext;
 }
 
+interface RevealOptions {
+  sopUri?: vscode.Uri;
+  chatSelection?: ChatSelection;
+}
+
 interface PendingReveal {
   mode: WorkspaceMode;
-  sopUri?: vscode.Uri;
+  options?: RevealOptions;
 }
 
 /**
@@ -58,27 +63,30 @@ export class WorkspacePanel implements vscode.WebviewViewProvider {
     this.pendingReveal = undefined;
     view.webview.onDidReceiveMessage((msg) => void this.handleMessage(msg));
     view.onDidDispose(() => this.disposeViews());
-    await this.present(pending.mode, pending.sopUri);
+    await this.present(pending.mode, pending.options);
   }
 
-  async show(mode: WorkspaceMode, sopUri?: vscode.Uri): Promise<void> {
+  async show(mode: WorkspaceMode, options?: RevealOptions): Promise<void> {
     if (!this.view) {
-      this.pendingReveal = { mode, sopUri };
+      this.pendingReveal = { mode, options };
       await vscode.commands.executeCommand('agt.workspace.focus');
       return;
     }
     this.view.show(true);
+    if (mode === 'chat' && options?.chatSelection) {
+      this.chat.selectTarget(options.chatSelection);
+    }
     if (this.mode === mode) {
-      if (mode === 'sop' && sopUri) {
-        await this.sop.bind(sopUri);
+      if (mode === 'sop' && options?.sopUri) {
+        await this.sop.bind(options.sopUri);
       }
       return;
     }
     await this.controller(this.mode).deactivate();
     this.mode = mode;
     await this.controller(mode).present(this.view);
-    if (mode === 'sop' && sopUri) {
-      await this.sop.bind(sopUri);
+    if (mode === 'sop' && options?.sopUri) {
+      await this.sop.bind(options.sopUri);
     }
   }
 
@@ -89,6 +97,12 @@ export class WorkspacePanel implements vscode.WebviewViewProvider {
 
   notifyActive(ctx: BridgeContext): void {
     this.settings.notifyActive(ctx);
+  }
+
+  notifyWorkspaceRoot(): void {
+    if (this.mode === 'chat') {
+      this.chat.notifyWorkspaceRoot();
+    }
   }
 
   notifyLanguage(language: Parameters<ChatPanel['notifyLanguage']>[0]): void {
@@ -122,12 +136,15 @@ export class WorkspacePanel implements vscode.WebviewViewProvider {
     }
   }
 
-  private async present(mode: WorkspaceMode, sopUri?: vscode.Uri): Promise<void> {
+  private async present(mode: WorkspaceMode, options?: RevealOptions): Promise<void> {
     if (!this.view) return;
     this.mode = mode;
+    if (mode === 'chat' && options?.chatSelection) {
+      this.chat.selectTarget(options.chatSelection);
+    }
     await this.controller(mode).present(this.view);
-    if (mode === 'sop' && sopUri) {
-      await this.sop.bind(sopUri);
+    if (mode === 'sop' && options?.sopUri) {
+      await this.sop.bind(options.sopUri);
     }
   }
 

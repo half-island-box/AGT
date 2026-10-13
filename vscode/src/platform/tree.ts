@@ -2,10 +2,10 @@ import * as vscode from 'vscode';
 import { t } from '../core/i18n';
 import type { DaemonInfo, DaemonProvider, ServerState, UiLanguage } from '../core/types';
 
-type TreeNode =
+export type TreeNode =
   | { kind: 'server' }
   | { kind: 'daemon'; daemon: DaemonInfo }
-  | { kind: 'provider'; provider: DaemonProvider };
+  | { kind: 'provider'; daemonId: string; provider: DaemonProvider };
 
 export class AgtTreeProvider implements vscode.TreeDataProvider<TreeNode>, vscode.Disposable {
   private readonly changeEmitter = new vscode.EventEmitter<TreeNode | undefined>();
@@ -71,6 +71,11 @@ export class AgtTreeProvider implements vscode.TreeDataProvider<TreeNode>, vscod
         d.online ? undefined : new vscode.ThemeColor('descriptionForeground'),
       );
       item.contextValue = d.online ? 'daemon-online' : 'daemon-offline';
+      item.command = {
+        command: 'agt.treeOpenChat',
+        title: t(lang, 'chat.title'),
+        arguments: [d.daemon_id],
+      };
       return item;
     }
     const p = node.provider;
@@ -78,6 +83,11 @@ export class AgtTreeProvider implements vscode.TreeDataProvider<TreeNode>, vscod
     item.description = `${p.name} · ${p.version}`;
     item.tooltip = `${p.provider} — ${p.name} ${p.version} (${p.status})`;
     item.iconPath = new vscode.ThemeIcon('terminal');
+    item.command = {
+      command: 'agt.treeOpenChat',
+      title: t(lang, 'chat.title'),
+      arguments: [node.daemonId, p.provider],
+    };
     return item;
   }
 
@@ -88,7 +98,11 @@ export class AgtTreeProvider implements vscode.TreeDataProvider<TreeNode>, vscod
       return [server, ...daemons];
     }
     if (element.kind === 'daemon') {
-      return element.daemon.providers.map((p) => ({ kind: 'provider', provider: p }));
+      return element.daemon.providers.map((p) => ({
+        kind: 'provider',
+        daemonId: element.daemon.daemon_id,
+        provider: p,
+      }));
     }
     return [];
   }
