@@ -23,10 +23,11 @@ from ..comm.wsrpc_link import WsRpcLink
 from ..probe.scanner import AgentProbe
 from ..runtime.models import Runtime
 from ..server.services.auth_service import TaskToken
-from .config import DaemonConfig
+from .config import DaemonConfig, DaemonConfigError
 from .daemon import Daemon
 from .local_server import LocalResourceServer
 from .mcp_proxy import ProxyMcpServer
+from .pidfile import default_pid_file as _PID_FILE, read_daemon_pidfile
 from .ws_claim import (
     ClaimStateMachine,
     claim_tasks_ws_first,
@@ -38,7 +39,7 @@ from .ws_server import DaemonWsServer
 log = logging.getLogger("agt.daemon")
 
 
-PID_FILE = Path.home() / ".agt" / "daemon.pid"
+PID_FILE = _PID_FILE
 HEARTBEAT_INTERVAL = 30
 CLAIM_INTERVAL = 1
 MAX_HEARTBEAT_FAILURES = 3
@@ -68,30 +69,13 @@ def _runtime_snapshot(daemon: Daemon) -> list[dict]:
     ]
 
 
-def _pidfile_alive(pid: int) -> bool:
-    """Return True if a process with this pid is alive AND belongs to a daemon."""
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    # Best-effort: check /proc for the command line; tolerate failure on non-Linux.
-    try:
-        cmdline = Path(f"/proc/{pid}/cmdline").read_text(errors="replace")
-        return "agt" in cmdline and "daemon" in cmdline
-    except OSError:
-        return True  # can't verify, assume alive
-
-
 def _read_pidfile() -> int | None:
-    if not PID_FILE.exists():
-        return None
-    try:
-        pid = int(PID_FILE.read_text().strip())
-    except (ValueError, OSError):
-        return None
-    return pid if _pidfile_alive(pid) else None
+    """Return the live pid from the canonical daemon pid file.
+
+    Delegates to ``agt.daemon.pidfile`` so the CLI can perform the same
+    check without importing the full daemon startup path.
+    """
+    return read_daemon_pidfile(PID_FILE)
 
 
 def _write_pidfile() -> None:
@@ -868,7 +852,15 @@ def cmd_start(args: argparse.Namespace) -> int:
     _ensure_local_daemons_entry(
         int(os.environ.get("AGT_DAEMON_WS_PORT", str(DaemonConfig().ws_listen_port)))
     )
-    config = DaemonConfig.from_env()
+    try:
+        config = DaemonConfig.from_env()
+    except DaemonConfigError as exc:
+        print(f"Failed to load daemon configuration: {exc}", file=sys.stderr)
+        print(
+            "Fix or remove ~/.agt/daemon.json and restart the daemon.",
+            file=sys.stderr,
+        )
+        return 2
     if args.server_url:
         config.server_url = args.server_url
     try:

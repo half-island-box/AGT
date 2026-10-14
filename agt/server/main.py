@@ -27,6 +27,7 @@ from .pidfile import (
     _read_pidfile,
     _signal_pid,
 )
+from .routes.daemon_config import router as daemon_config_router
 from .routes.daemons import router as daemons_router
 from .routes.heartbeat import router as heartbeat_router
 from .routes.identities import router as identities_router
@@ -178,6 +179,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     app.mount("/mcp", catalog_mcp_asgi(app.state.mcp))
 
     app.include_router(runtimes_router)
+    app.include_router(daemon_config_router)
     app.include_router(daemons_router)
     app.include_router(tasks_router)
     app.include_router(jobs_router)

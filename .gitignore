@@ -31,3 +31,5 @@ htmlcov/
 openspec/
 tests/
 .agents/
+.claude/
+.codex/
