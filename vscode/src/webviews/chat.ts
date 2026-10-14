@@ -60,6 +60,11 @@ interface SelectSessionResult {
   historyError?: string;
 }
 
+interface DeleteSessionResult {
+  deleted: { ok: boolean };
+  sessions: ChatSessionInfo[];
+}
+
 type ChatEvent = Record<string, unknown> & { kind?: string };
 type MockSendResult = { events?: ChatEvent[] };
 type BusyState = 'idle' | 'sending' | 'settling' | 'cancelling';
@@ -90,6 +95,9 @@ let agentCwd = '';
 let agentCwdTouched = false;
 let sessions: ChatSessionInfo[] = [];
 let sessionsLoading = false;
+let pendingDeleteSession: ChatSessionInfo | null = null;
+let pendingDeleteDaemonId: string | null = null;
+let deletingSession = false;
 let activeSessionId: string | null = null;
 let currentJob: ActiveJob | null = null;
 let messages: ChatMessage[] = [];
@@ -179,6 +187,16 @@ function copyIcon(): string {
 function checkIcon(): string {
   return `<svg class="agd-copy-icon" viewBox="0 0 16 16" aria-hidden="true">
     <path d="M3 8.5 6.5 12 13 4.5"></path>
+  </svg>`;
+}
+
+function trashIcon(): string {
+  return `<svg viewBox="0 0 16 16" aria-hidden="true">
+    <path d="M2.75 4.75h10.5"></path>
+    <path d="M6.25 4.75V3.4a.65.65 0 0 1 .65-.65h2.2a.65.65 0 0 1 .65.65v1.35"></path>
+    <path d="M4.4 4.75l.45 7.5a.9.9 0 0 0 .9.85h4.5a.9.9 0 0 0 .9-.85l.45-7.5"></path>
+    <path d="M6.5 7v4"></path>
+    <path d="M9.5 7v4"></path>
   </svg>`;
 }
 
@@ -329,6 +347,7 @@ function render(): void {
   renderSidebar();
   renderMessages();
   renderControls();
+  renderDeleteModal();
 }
 
 function renderPreservingComposer(): void {
@@ -395,7 +414,8 @@ function renderFrame(): void {
         </div>
       </footer>
     </section>
-  </div>`;
+  </div>
+  <div id="agd-chat-modal-root"></div>`;
   wireFrame();
 }
 
@@ -466,13 +486,22 @@ function renderSidebar(): void {
   if (!sidebar) return;
   const sessionItems = sessions
     .map((session) => `
-      <button type="button" class="agd-session ${session.session_id === activeSessionId ? 'is-selected' : ''}" data-session-id="${esc(session.session_id)}">
-        <span class="agd-session-line">
-          ${providerLogo(session.provider)}
-          <strong>${esc(firstLine(session.first_prompt) || session.session_id)}</strong>
-        </span>
-        <small>${esc(session.last_seen_at)}${session.dir ? ` · ${esc(session.dir)}` : ''}</small>
-      </button>
+      <div class="agd-session ${session.session_id === activeSessionId ? 'is-selected' : ''}" data-session-id="${esc(session.session_id)}">
+        <button type="button" class="agd-session-main">
+          <span class="agd-session-line">
+            ${providerLogo(session.provider)}
+            <strong>${esc(firstLine(session.first_prompt) || session.session_id)}</strong>
+          </span>
+          <small>${esc(session.last_seen_at)}${session.dir ? ` · ${esc(session.dir)}` : ''}</small>
+        </button>
+        <button
+          type="button"
+          class="agd-session-delete"
+          data-delete-session-id="${esc(session.session_id)}"
+          title="${tr('chat.deleteSession')}"
+          aria-label="${tr('chat.deleteSession')}: ${esc(firstLine(session.first_prompt) || session.session_id)}"
+        >${trashIcon()}</button>
+      </div>
     `)
     .join('');
 
@@ -698,9 +727,21 @@ function wireSidebar(): void {
       selectOption(option.dataset.kind ?? '', option.dataset.value ?? '');
       return;
     }
-    const session = (event.target as HTMLElement | null)?.closest<HTMLElement>('.agd-session');
-    if (session?.dataset.sessionId) {
-      void selectSession(session.dataset.sessionId);
+    const deleteButton = (event.target as HTMLElement | null)?.closest<HTMLElement>(
+      '[data-delete-session-id]',
+    );
+    if (deleteButton) {
+      const sessionId = deleteButton.dataset.deleteSessionId ?? '';
+      const session = sessions.find((item) => item.session_id === sessionId);
+      if (session) openDeleteSessionDialog(session);
+      return;
+    }
+    const sessionMain = (event.target as HTMLElement | null)?.closest<HTMLElement>(
+      '.agd-session-main',
+    );
+    if (sessionMain) {
+      const session = sessionMain.closest<HTMLElement>('.agd-session');
+      if (session?.dataset.sessionId) void selectSession(session.dataset.sessionId);
     }
   });
   document.getElementById('agd-chat-new')?.addEventListener('click', () => {
@@ -782,6 +823,97 @@ async function loadSessions(): Promise<void> {
   } finally {
     sessionsLoading = false;
     renderSidebar();
+  }
+}
+
+function renderDeleteModal(): void {
+  const modalRoot = document.getElementById('agd-chat-modal-root');
+  if (!modalRoot) return;
+  if (!pendingDeleteSession) {
+    modalRoot.innerHTML = '';
+    return;
+  }
+
+  const label = firstLine(pendingDeleteSession.first_prompt) || pendingDeleteSession.session_id;
+  modalRoot.innerHTML = `
+  <div class="agd-modal-backdrop" role="presentation">
+    <div class="agd-modal" role="dialog" aria-modal="true" aria-labelledby="agd-chat-delete-title">
+      <h3 id="agd-chat-delete-title">${tr('chat.deleteSessionTitle')}</h3>
+      <p>${tr('chat.deleteSessionBody')}</p>
+      <div class="agd-modal-target">${esc(label)}</div>
+      <div class="agd-modal-actions">
+        <button type="button" id="agd-chat-delete-cancel" class="agd-btn" ${deletingSession ? 'disabled' : ''}>
+          ${tr('chat.cancelDelete')}
+        </button>
+        <button type="button" id="agd-chat-delete-confirm" class="agd-btn agd-modal-danger" ${deletingSession ? 'disabled' : ''}>
+          ${deletingSession ? '<span class="agd-spinner" aria-hidden="true"></span>' : ''}${tr('chat.delete')}
+        </button>
+      </div>
+    </div>
+  </div>`;
+
+  document.getElementById('agd-chat-delete-cancel')?.addEventListener('click', () => {
+    if (!deletingSession) closeDeleteSessionDialog();
+  });
+  document.getElementById('agd-chat-delete-confirm')?.addEventListener('click', () => {
+    void confirmDeleteSession();
+  });
+  modalRoot.querySelector('.agd-modal-backdrop')?.addEventListener('mousedown', (event) => {
+    if (event.target === event.currentTarget && !deletingSession) closeDeleteSessionDialog();
+  });
+  modalRoot.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && !deletingSession) closeDeleteSessionDialog();
+  });
+  requestAnimationFrame(() => {
+    if (deletingSession) return;
+    document.getElementById('agd-chat-delete-cancel')?.focus();
+  });
+}
+
+function openDeleteSessionDialog(session: ChatSessionInfo): void {
+  if (deletingSession || !selectedDaemonId) return;
+  pendingDeleteSession = session;
+  pendingDeleteDaemonId = selectedDaemonId;
+  renderDeleteModal();
+}
+
+function closeDeleteSessionDialog(): void {
+  if (deletingSession) return;
+  pendingDeleteSession = null;
+  pendingDeleteDaemonId = null;
+  renderDeleteModal();
+}
+
+async function confirmDeleteSession(): Promise<void> {
+  if (!pendingDeleteSession || !pendingDeleteDaemonId || deletingSession) return;
+  const target = pendingDeleteSession;
+  const daemonId = pendingDeleteDaemonId;
+  deletingSession = true;
+  renderDeleteModal();
+  try {
+    const result = await bridge.call<DeleteSessionResult>('deleteSession', {
+      sessionId: target.session_id,
+      provider: target.provider,
+      daemonId,
+      finalizeActive: true,
+    });
+    sessions = result.sessions;
+    if (activeSessionId === target.session_id) clearConversation();
+    pendingDeleteSession = null;
+    pendingDeleteDaemonId = null;
+    notice = tr('chat.deleteSessionDone');
+  } catch (err) {
+    pendingDeleteSession = null;
+    pendingDeleteDaemonId = null;
+    notice = tr('chat.deleteSessionFailed', {
+      message: err instanceof Error ? err.message : String(err),
+    });
+  } finally {
+    deletingSession = false;
+    renderDeleteModal();
+    renderSidebar();
+    renderMessages();
+    renderControls();
   }
 }
 
@@ -892,9 +1024,10 @@ async function cancelTurn(): Promise<void> {
   busy = 'cancelling';
   renderControls();
   try {
-    await bridge.call('cancel', { jobId: currentJob.jobId });
+    await bridge.call('stop', { jobId: currentJob.jobId });
   } catch (err) {
     notice = err instanceof Error ? err.message : String(err);
+    busy = lastAssistant()?.streaming ? 'sending' : 'settling';
     renderControls();
   }
 }

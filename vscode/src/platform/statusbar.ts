@@ -16,7 +16,7 @@ export class AgtStatusBar implements vscode.Disposable {
     switch (state) {
       case 'online':
         this.item.text = `$(check) ${t(lang, 'statusbar.online', { count: daemonCount })}`;
-        this.item.backgroundColor = undefined;
+        this.item.backgroundColor = new vscode.ThemeColor('statusBarItem.prominentBackground');
         this.item.tooltip = t(lang, 'status.online');
         break;
       case 'starting':

@@ -104,7 +104,7 @@ Remote daemons connect via HTTP or **reverse-dial WebSocket** (server dials out,
 
 ## VS Code extension (early)
 
-The `vscode/` directory holds a TypeScript UI client for the server. The current milestone includes server lifecycle, daemon tree, status bar, settings, and Chat mode. Chat supports daemon/agent/identity selection with provider logos, daemon session history, live SSE output, multi-turn continuation, cancellation, and zh/en static text; SOP and Goal modes are planned in later milestones.
+The `vscode/` directory holds a TypeScript UI client for the server. The current milestone includes server lifecycle, daemon tree, status bar, settings, and Chat mode. Chat supports daemon/agent/identity selection with provider logos, daemon session history, live SSE output, multi-turn continuation, resumable turn stopping, confirmed session deletion, and zh/en static text; SOP and Goal modes are planned in later milestones.
 
 ```bash
 cd vscode

@@ -649,6 +649,32 @@ export async function mockCall<T>(_method: string, params?: Record<string, unkno
         },
       } as T;
     }
+    case 'stop': {
+      const jobId = String(params?.jobId ?? '');
+      if (!jobId) throw new Error('mock: no active chat job');
+      return {
+        job_id: jobId,
+        status: 'waiting_input',
+        interrupted_task_ids: [`task-${jobId}`],
+      } as T;
+    }
+    case 'deleteSession': {
+      const sessionId = String(params?.sessionId ?? '');
+      const daemonId = String(params?.daemonId ?? '');
+      const list = sessionsByDaemon[daemonId] ?? [];
+      const index = list.findIndex((session) => session.session_id === sessionId);
+      if (index < 0) throw new Error('mock: session not found');
+      list.splice(index, 1);
+      return {
+        deleted: {
+          ok: true,
+          session_id: sessionId,
+          session_rows_deleted: 1,
+          task_pointers_cleared: 1,
+        },
+        sessions: list,
+      } as T;
+    }
     case 'send': {
       const p = (params ?? {}) as { prompt?: string; currentJobId?: string | null };
       const jobId = p.currentJobId ?? `job-${Math.random().toString(16).slice(2, 8)}`;

@@ -74,9 +74,9 @@ body {
   border-radius: 50%;
   background: currentColor;
 }
-.agd-goal-state.is-online { color: #3fb950; background: color-mix(in srgb, #3fb950 13%, transparent); }
-.agd-goal-state.is-offline { color: #f85149; background: color-mix(in srgb, #f85149 13%, transparent); }
-.agd-goal-state.is-starting { color: #d29922; background: color-mix(in srgb, #d29922 13%, transparent); }
+.agd-goal-state.is-online { color: var(--agd-color-success); background: color-mix(in srgb, var(--agd-color-success) 13%, transparent); }
+.agd-goal-state.is-offline { color: var(--agd-color-error); background: color-mix(in srgb, var(--agd-color-error) 13%, transparent); }
+.agd-goal-state.is-starting { color: var(--agd-color-warning); background: color-mix(in srgb, var(--agd-color-warning) 13%, transparent); }
 
 .agd-icon-btn {
   height: 26px;
@@ -88,8 +88,11 @@ body {
   color: var(--vscode-button-secondaryForeground, #cccccc);
   font-size: 11px;
   cursor: pointer;
+  transition: filter var(--agd-motion-duration) var(--agd-motion-ease), transform var(--agd-motion-duration) var(--agd-motion-ease);
 }
-.agd-icon-btn:hover { filter: brightness(1.15); }
+.agd-icon-btn:hover:not(:disabled) { filter: brightness(1.15); }
+.agd-icon-btn:active:not(:disabled) { transform: translateY(1px); }
+.agd-icon-btn:focus-visible { outline: 1px solid var(--vscode-focusBorder, #3794ff); outline-offset: 1px; }
 
 /* Three-pane shell. */
 .agd-goal-body {
@@ -211,9 +214,9 @@ body {
   border-color: transparent;
 }
 .agd-btn-danger {
-  color: #f85149;
-  border-color: color-mix(in srgb, #f85149 38%, transparent);
-  background: color-mix(in srgb, #f85149 8%, transparent);
+  color: var(--agd-color-error);
+  border-color: color-mix(in srgb, var(--agd-color-error) 38%, transparent);
+  background: color-mix(in srgb, var(--agd-color-error) 8%, transparent);
 }
 .agd-mini-btn {
   width: 21px;
@@ -223,8 +226,10 @@ body {
   background: transparent;
   color: var(--vscode-descriptionForeground, #8b8b8b);
   cursor: pointer;
+  transition: color var(--agd-motion-duration) var(--agd-motion-ease), filter var(--agd-motion-duration) var(--agd-motion-ease);
 }
-.agd-mini-btn:hover { color: var(--vscode-foreground, #cccccc); filter: brightness(1.2); }
+.agd-mini-btn:hover:not(:disabled) { color: var(--vscode-foreground, #cccccc); filter: brightness(1.2); }
+.agd-mini-btn:focus-visible { outline: 1px solid var(--vscode-focusBorder, #3794ff); outline-offset: 1px; }
 
 .agd-chip {
   display: inline-flex;
@@ -260,10 +265,10 @@ body {
   gap: 5px;
   margin: -3px 0 10px;
 }
-.agd-goal-chip-dot.is-total { color: var(--vscode-descriptionForeground, #8b8b8b); }
-.agd-goal-chip-dot.is-running { color: #58a6ff; }
-.agd-goal-chip-dot.is-done { color: #3fb950; }
-.agd-goal-chip-dot.is-failed { color: #f85149; }
+.agd-goal-chip-dot.is-total { color: var(--agd-color-muted); }
+.agd-goal-chip-dot.is-running { color: var(--agd-color-running); }
+.agd-goal-chip-dot.is-done { color: var(--agd-color-success); }
+.agd-goal-chip-dot.is-failed { color: var(--agd-color-error); }
 .agd-goal-submit { width: 100%; margin-top: 2px; }
 
 .agd-goal-runs-card {
@@ -414,17 +419,17 @@ body {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--vscode-descriptionForeground, #8b8b8b);
+  background: var(--agd-color-muted);
 }
-.agd-goal-node.is-done .agd-goal-node-rail i { color: #3fb950; background: #3fb950; }
+.agd-goal-node.is-done .agd-goal-node-rail i { color: var(--agd-color-success); background: var(--agd-color-success); }
 .agd-goal-node.is-running .agd-goal-node-rail i,
-.agd-goal-node.is-queued .agd-goal-node-rail i { color: #58a6ff; background: #58a6ff; }
+.agd-goal-node.is-queued .agd-goal-node-rail i { color: var(--agd-color-running); background: var(--agd-color-running); }
 .agd-goal-node.is-running .agd-goal-node-rail i { animation: agd-goal-pulse 1.5s ease-in-out infinite; }
 .agd-goal-node.is-waiting_children .agd-goal-node-rail i,
-.agd-goal-node.is-blocked .agd-goal-node-rail i { color: #d29922; background: #d29922; }
-.agd-goal-node.is-waiting_input .agd-goal-node-rail i { color: #a371f7; background: #a371f7; }
-.agd-goal-node.is-failed .agd-goal-node-rail i { color: #f85149; background: #f85149; }
-.agd-goal-node.is-cancelled .agd-goal-node-rail i { color: #6e7681; background: #6e7681; }
+.agd-goal-node.is-blocked .agd-goal-node-rail i { color: var(--agd-color-warning); background: var(--agd-color-warning); }
+.agd-goal-node.is-waiting_input .agd-goal-node-rail i { color: var(--agd-color-waiting); background: var(--agd-color-waiting); }
+.agd-goal-node.is-failed .agd-goal-node-rail i { color: var(--agd-color-error); background: var(--agd-color-error); }
+.agd-goal-node.is-cancelled .agd-goal-node-rail i { color: var(--agd-color-muted); background: var(--agd-color-muted); }
 .agd-goal-node-main { min-width: 0; }
 .agd-goal-node-title {
   display: block;
@@ -466,22 +471,22 @@ body {
   color: var(--vscode-descriptionForeground, #8b8b8b);
   white-space: nowrap;
 }
-.agd-goal-pill.is-running { color: #58a6ff; background: color-mix(in srgb, #58a6ff 14%, transparent); }
-.agd-goal-pill.is-queued { color: #58a6ff; background: color-mix(in srgb, #58a6ff 10%, transparent); }
-.agd-goal-pill.is-waiting_children { color: #d29922; background: color-mix(in srgb, #d29922 14%, transparent); }
-.agd-goal-pill.is-blocked { color: #d29922; background: color-mix(in srgb, #d29922 10%, transparent); }
-.agd-goal-pill.is-waiting_input { color: #a371f7; background: color-mix(in srgb, #a371f7 15%, transparent); }
-.agd-goal-pill.is-done { color: #3fb950; background: color-mix(in srgb, #3fb950 14%, transparent); }
-.agd-goal-pill.is-failed { color: #f85149; background: color-mix(in srgb, #f85149 14%, transparent); }
-.agd-goal-pill.is-cancelled { color: #8b949e; background: color-mix(in srgb, #8b949e 14%, transparent); }
+.agd-goal-pill.is-running { color: var(--agd-color-running); background: color-mix(in srgb, var(--agd-color-running) 14%, transparent); }
+.agd-goal-pill.is-queued { color: var(--agd-color-running); background: color-mix(in srgb, var(--agd-color-running) 10%, transparent); }
+.agd-goal-pill.is-waiting_children { color: var(--agd-color-warning); background: color-mix(in srgb, var(--agd-color-warning) 14%, transparent); }
+.agd-goal-pill.is-blocked { color: var(--agd-color-warning); background: color-mix(in srgb, var(--agd-color-warning) 10%, transparent); }
+.agd-goal-pill.is-waiting_input { color: var(--agd-color-waiting); background: color-mix(in srgb, var(--agd-color-waiting) 15%, transparent); }
+.agd-goal-pill.is-done { color: var(--agd-color-success); background: color-mix(in srgb, var(--agd-color-success) 14%, transparent); }
+.agd-goal-pill.is-failed { color: var(--agd-color-error); background: color-mix(in srgb, var(--agd-color-error) 14%, transparent); }
+.agd-goal-pill.is-cancelled { color: var(--agd-color-muted); background: color-mix(in srgb, var(--agd-color-muted) 14%, transparent); }
 .agd-goal-ask {
   display: inline-flex;
   align-items: center;
   height: 20px;
   padding: 0 6px;
   border-radius: 999px;
-  background: color-mix(in srgb, #a371f7 16%, transparent);
-  color: #a371f7;
+  background: color-mix(in srgb, var(--agd-color-waiting) 16%, transparent);
+  color: var(--agd-color-waiting);
   font-size: 10px;
   font-weight: 800;
 }
@@ -498,8 +503,8 @@ body {
   font-size: 10px;
 }
 @keyframes agd-goal-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, #58a6ff 35%, transparent); }
-  50% { box-shadow: 0 0 0 4px color-mix(in srgb, #58a6ff 0%, transparent); }
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--agd-color-running) 35%, transparent); }
+  50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--agd-color-running) 0%, transparent); }
 }
 
 /* Inspector. */
@@ -623,10 +628,10 @@ body {
 
 .agd-goal-error {
   padding: 7px 16px;
-  border-bottom: 1px solid color-mix(in srgb, #f85149 28%, transparent);
-  color: #f85149;
+  border-bottom: 1px solid color-mix(in srgb, var(--agd-color-error) 28%, transparent);
+  color: var(--agd-color-error);
   font-size: 11.5px;
-  background: color-mix(in srgb, #f85149 6%, transparent);
+  background: color-mix(in srgb, var(--agd-color-error) 6%, transparent);
 }
 .agd-sop-loading {
   height: 100vh;

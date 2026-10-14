@@ -278,12 +278,28 @@ export class ChatPanel {
           result = { accepted: true };
           break;
         }
-        case 'cancel': {
+        case 'stop': {
           const jobId = String(msg.params?.jobId ?? '');
           if (!jobId) throw new Error('no active chat job');
-          await this.ctx.lifecycle.api.cancelJob(jobId);
-          await this.emitChat({ kind: 'cancelling', jobId });
-          result = { cancelled: true };
+          const stopped = await this.ctx.lifecycle.api.stopChatJob(jobId);
+          await this.emitChat({ kind: 'cancelling', jobId, status: stopped.status });
+          result = { stopped: true, status: stopped.status };
+          break;
+        }
+        case 'deleteSession': {
+          const sessionId = String(msg.params?.sessionId ?? '');
+          const provider = String(msg.params?.provider ?? '');
+          const daemonId = String(msg.params?.daemonId ?? '');
+          if (!sessionId || !provider || !daemonId) {
+            throw new Error('session id, provider, and daemon id are required');
+          }
+          const deleted = await this.ctx.lifecycle.api.deleteSession(sessionId, {
+            provider,
+            daemonId,
+            finalizeActive: true,
+          });
+          const sessions = await this.ctx.lifecycle.api.daemonSessions(daemonId);
+          result = { deleted, sessions };
           break;
         }
         default:

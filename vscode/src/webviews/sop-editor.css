@@ -27,7 +27,7 @@ body {
 .agd-sop-brand small { font-size: 10.5px; font-weight: 400; color: var(--vscode-descriptionForeground, #8b8b8b); }
 .agd-sop-tools { margin-left: auto; display: flex; align-items: center; gap: 10px; }
 .agd-sop-doc { font-size: 11px; color: var(--vscode-descriptionForeground, #8b8b8b); max-width: 34vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.agd-sop-dirty { font-size: 11px; color: #d29922; }
+.agd-sop-dirty { font-size: 11px; color: var(--agd-color-warning); }
 
 .agd-icon-btn {
   height: 24px; min-width: 24px; padding: 0 8px;
@@ -35,8 +35,11 @@ body {
   background: var(--vscode-button-secondaryBackground, #2a2a2a);
   color: var(--vscode-button-secondaryForeground, #cccccc);
   font-size: 11px; cursor: pointer;
+  transition: filter var(--agd-motion-duration) var(--agd-motion-ease), transform var(--agd-motion-duration) var(--agd-motion-ease);
 }
-.agd-icon-btn:hover { filter: brightness(1.15); }
+.agd-icon-btn:hover:not(:disabled) { filter: brightness(1.15); }
+.agd-icon-btn:active:not(:disabled) { transform: translateY(1px); }
+.agd-icon-btn:focus-visible { outline: 1px solid var(--vscode-focusBorder, #3794ff); outline-offset: 1px; }
 
 .agd-sop-body {
   display: grid;

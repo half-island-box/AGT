@@ -7,6 +7,23 @@ export type TreeNode =
   | { kind: 'daemon'; daemon: DaemonInfo }
   | { kind: 'provider'; daemonId: string; provider: DaemonProvider };
 
+const KNOWN_PROVIDERS: Record<string, { icon: string; color: string }> = {
+  claude: { icon: 'hubot', color: 'debugIcon.breakpointForeground' },
+  codex: { icon: 'copilot', color: 'debugIcon.startForeground' },
+  qwen: { icon: 'sparkle', color: 'debugIcon.pauseForeground' },
+  kimi: { icon: 'comment', color: 'debugIcon.startForeground' },
+  copilot: { icon: 'copilot', color: 'debugIcon.breakpointForeground' },
+  cursor: { icon: 'edit', color: 'descriptionForeground' },
+  opencode: { icon: 'code', color: 'debugIcon.startForeground' },
+  openclaw: { icon: 'claw', color: 'debugIcon.pauseForeground' },
+};
+
+function providerIcon(provider: string): vscode.ThemeIcon {
+  const key = provider.toLowerCase();
+  const meta = KNOWN_PROVIDERS[key] ?? { icon: 'terminal', color: 'descriptionForeground' };
+  return new vscode.ThemeIcon(meta.icon, new vscode.ThemeColor(meta.color));
+}
+
 export class AgtTreeProvider implements vscode.TreeDataProvider<TreeNode>, vscode.Disposable {
   private readonly changeEmitter = new vscode.EventEmitter<TreeNode | undefined>();
   readonly onDidChangeTreeData = this.changeEmitter.event;
@@ -47,6 +64,11 @@ export class AgtTreeProvider implements vscode.TreeDataProvider<TreeNode>, vscod
       item.tooltip = this.serverUrl;
       item.iconPath = new vscode.ThemeIcon(
         this.serverState === 'online' ? 'server' : 'server-process',
+        this.serverState === 'online'
+          ? new vscode.ThemeColor('testing.iconPassed')
+          : this.serverState === 'starting'
+            ? new vscode.ThemeColor('debugIcon.pauseForeground')
+            : new vscode.ThemeColor('testing.iconFailed'),
       );
       item.contextValue = 'server';
       return item;
@@ -68,7 +90,7 @@ export class AgtTreeProvider implements vscode.TreeDataProvider<TreeNode>, vscod
       );
       item.iconPath = new vscode.ThemeIcon(
         d.online ? 'circle-filled' : 'circle-outline',
-        d.online ? undefined : new vscode.ThemeColor('descriptionForeground'),
+        d.online ? new vscode.ThemeColor('testing.iconPassed') : new vscode.ThemeColor('testing.iconFailed'),
       );
       item.contextValue = d.online ? 'daemon-online' : 'daemon-offline';
       item.command = {
@@ -81,8 +103,10 @@ export class AgtTreeProvider implements vscode.TreeDataProvider<TreeNode>, vscod
     const p = node.provider;
     const item = new vscode.TreeItem(p.provider, vscode.TreeItemCollapsibleState.None);
     item.description = `${p.name} · ${p.version}`;
-    item.tooltip = `${p.provider} — ${p.name} ${p.version} (${p.status})`;
-    item.iconPath = new vscode.ThemeIcon('terminal');
+    item.tooltip = new vscode.MarkdownString(
+      [`**${p.provider}**`, `${p.name} ${p.version}`, `status: ${p.status}`].join('\n\n'),
+    );
+    item.iconPath = providerIcon(p.provider);
     item.command = {
       command: 'agt.treeOpenChat',
       title: t(lang, 'chat.title'),

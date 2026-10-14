@@ -184,6 +184,31 @@ export class AgtApi {
     );
   }
 
+  async deleteSession(
+    sessionId: string,
+    input: {
+      provider: string;
+      daemonId: string;
+      finalizeActive?: boolean;
+    },
+  ): Promise<{
+    ok: boolean;
+    session_id: string;
+    session_rows_deleted: number;
+    task_pointers_cleared: number;
+  }> {
+    return this.post(
+      `/api/sessions/${encodeURIComponent(sessionId)}/delete`,
+      {
+        confirm: true,
+        provider: input.provider,
+        daemon_id: input.daemonId,
+        finalize_active: input.finalizeActive ?? false,
+      },
+      10_000,
+    );
+  }
+
   async createChatJob(input: {
     prompt: string;
     provider: string;
@@ -213,6 +238,14 @@ export class AgtApi {
       `/api/jobs/${encodeURIComponent(jobId)}/cancel`,
       {},
     );
+  }
+
+  async stopChatJob(jobId: string): Promise<{
+    job_id: string;
+    status: string;
+    interrupted_task_ids: string[];
+  }> {
+    return this.post(`/api/jobs/${encodeURIComponent(jobId)}/stop`, {});
   }
 
   async submitGoal(input: {
