@@ -15,6 +15,7 @@ const extension = {
   sourcemap: !production,
   minify: production,
   logLevel: 'info',
+  loader: { '.svg': 'text' },
 };
 
 /** Settings webview entry — browser context, also previewable standalone. */
@@ -28,6 +29,7 @@ const webviewSettings = {
   sourcemap: false,
   minify: production,
   logLevel: 'info',
+  loader: { '.svg': 'text' },
 };
 
 /** Chat webview entry — browser context, also previewable standalone. */
@@ -41,6 +43,7 @@ const webviewChat = {
   sourcemap: false,
   minify: production,
   logLevel: 'info',
+  loader: { '.svg': 'text' },
 };
 
 /** SOP editor webview entry — browser context, also previewable standalone. */
@@ -54,6 +57,7 @@ const webviewSop = {
   sourcemap: false,
   minify: production,
   logLevel: 'info',
+  loader: { '.svg': 'text' },
 };
 
 /** Goal webview entry — browser context, also previewable standalone. */
@@ -67,6 +71,7 @@ const webviewGoal = {
   sourcemap: false,
   minify: production,
   logLevel: 'info',
+  loader: { '.svg': 'text' },
 };
 
 async function main() {

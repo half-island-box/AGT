@@ -168,6 +168,16 @@ body {
   background: var(--c, #6E7681); color: #fff;
   font-size: 8.5px; font-weight: 800; line-height: 1; vertical-align: -2px;
 }
+.agd-logo.is-md { width: 20px; height: 20px; border-radius: 6px; font-size: 10px; }
+
+.agd-provider-logo {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 14px; height: 14px; flex: none;
+  color: var(--c, #6E7681);
+  vertical-align: -2px;
+}
+.agd-provider-logo svg { width: 100%; height: 100%; fill: currentColor; }
+.agd-provider-logo.is-md { width: 20px; height: 20px; }
 
 .agd-note { font-size: 11px; margin: 10px 0 0; }
 .agd-mock-note {

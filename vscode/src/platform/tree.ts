@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { providerIconDataUrl } from '../core/icons';
 import { t } from '../core/i18n';
 import type { DaemonInfo, DaemonProvider, ServerState, UiLanguage } from '../core/types';
 
@@ -7,7 +8,7 @@ export type TreeNode =
   | { kind: 'daemon'; daemon: DaemonInfo }
   | { kind: 'provider'; daemonId: string; provider: DaemonProvider };
 
-const KNOWN_PROVIDERS: Record<string, { icon: string; color: string }> = {
+const FALLBACK_PROVIDERS: Record<string, { icon: string; color: string }> = {
   claude: { icon: 'hubot', color: 'debugIcon.breakpointForeground' },
   codex: { icon: 'copilot', color: 'debugIcon.startForeground' },
   qwen: { icon: 'sparkle', color: 'debugIcon.pauseForeground' },
@@ -18,9 +19,13 @@ const KNOWN_PROVIDERS: Record<string, { icon: string; color: string }> = {
   openclaw: { icon: 'claw', color: 'debugIcon.pauseForeground' },
 };
 
-function providerIcon(provider: string): vscode.ThemeIcon {
+function providerIcon(provider: string): vscode.Uri | vscode.ThemeIcon {
+  const dataUrl = providerIconDataUrl(provider);
+  if (dataUrl) {
+    return vscode.Uri.parse(dataUrl);
+  }
   const key = provider.toLowerCase();
-  const meta = KNOWN_PROVIDERS[key] ?? { icon: 'terminal', color: 'descriptionForeground' };
+  const meta = FALLBACK_PROVIDERS[key] ?? { icon: 'terminal', color: 'descriptionForeground' };
   return new vscode.ThemeIcon(meta.icon, new vscode.ThemeColor(meta.color));
 }
 

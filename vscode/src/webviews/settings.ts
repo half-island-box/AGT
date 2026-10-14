@@ -1,23 +1,9 @@
 import './mode-switcher.css';
 import './styles.css';
 import { t, type MessageKey } from '../core/i18n';
+import { providerLogo } from '../core/icons';
 import type { DaemonConfigInfo, DaemonInfo, UiLanguage } from '../core/types';
 import { bridge, type BootInfo } from './bridge';
-
-const PROVIDER_COLORS: Record<string, string> = {
-  claude: '#D97757',
-  codex: '#10A37F',
-  qwen: '#615CED',
-  kimi: '#0EA5E9',
-  copilot: '#8B5CF6',
-  cursor: '#F2F2F2',
-  opencode: '#14B8A6',
-  openclaw: '#F59E0B',
-};
-
-function providerColor(provider: string): string {
-  return PROVIDER_COLORS[provider.toLowerCase()] ?? '#6E7681';
-}
 
 function esc(value: unknown): string {
   return String(value ?? '')
@@ -25,11 +11,6 @@ function esc(value: unknown): string {
     .replaceAll('<', '&lt;')
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;');
-}
-
-function logo(provider: string): string {
-  const letter = provider.charAt(0).toUpperCase();
-  return `<span class="agd-logo" style="--c:${providerColor(provider)}">${esc(letter)}</span>`;
 }
 
 let boot: BootInfo | undefined;
@@ -230,7 +211,7 @@ function providerChips(daemon: DaemonInfo): string {
   return daemon.providers
     .map(
       (p) =>
-        `<span class="agd-chip">${logo(p.provider)}${esc(p.provider)}</span>`,
+        `<span class="agd-chip">${providerLogo(p.provider)}${esc(p.provider)}</span>`,
     )
     .join('');
 }

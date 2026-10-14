@@ -1,6 +1,7 @@
 import './styles.css';
 import './mode-switcher.css';
 import './goal.css';
+import { providerLogo } from '../core/icons';
 import { t, type MessageKey } from '../core/i18n';
 import type {
   GoalJobTreeNode,
@@ -62,25 +63,6 @@ function esc(value: unknown): string {
     .replaceAll('<', '&lt;')
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;');
-}
-
-const PROVIDER_COLORS: Record<string, string> = {
-  claude: '#D97757',
-  codex: '#10A37F',
-  qwen: '#615CED',
-  kimi: '#0EA5E9',
-  copilot: '#8B5CF6',
-  cursor: '#F2F2F2',
-  opencode: '#14B8A6',
-  openclaw: '#F59E0B',
-};
-
-function providerColor(provider: string): string {
-  return PROVIDER_COLORS[provider.toLowerCase()] ?? '#6E7681';
-}
-
-function providerLogo(provider: string, size: 'sm' | 'md' = 'sm'): string {
-  return `<span class="agd-logo is-${size}" style="--c:${providerColor(provider)}">${esc(provider.charAt(0).toUpperCase())}</span>`;
 }
 
 function statusPill(status: string): string {

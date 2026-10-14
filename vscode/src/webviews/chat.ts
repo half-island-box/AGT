@@ -2,6 +2,7 @@ import './mode-switcher.css';
 import './chat.css';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
+import { providerLogo } from '../core/icons';
 import { t, type MessageKey } from '../core/i18n';
 import type {
   ChatSessionInfo,
@@ -74,17 +75,6 @@ const SIDEBAR_COLLAPSED_KEY = 'agt.chat.sidebarCollapsed';
 const DEFAULT_SIDEBAR_WIDTH = 292;
 const MIN_SIDEBAR_WIDTH = 180;
 const MAX_SIDEBAR_WIDTH = 520;
-
-const PROVIDER_COLORS: Record<string, string> = {
-  claude: '#D97757',
-  codex: '#10A37F',
-  qwen: '#615CED',
-  kimi: '#0EA5E9',
-  copilot: '#8B5CF6',
-  cursor: '#F2F2F2',
-  opencode: '#14B8A6',
-  openclaw: '#F59E0B',
-};
 
 let boot: ChatBoot | undefined;
 let lang: UiLanguage = 'zh';
@@ -167,14 +157,6 @@ function esc(value: unknown): string {
 
 function tr(key: MessageKey, vars?: Record<string, string | number>): string {
   return t(lang, key, vars);
-}
-
-function providerColor(provider: string): string {
-  return PROVIDER_COLORS[provider.toLowerCase()] ?? '#6E7681';
-}
-
-function providerLogo(provider: string): string {
-  return `<span class="agd-logo" style="--c:${providerColor(provider)}">${esc(provider.charAt(0).toUpperCase())}</span>`;
 }
 
 function copyIcon(): string {
