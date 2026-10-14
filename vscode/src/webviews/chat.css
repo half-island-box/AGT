@@ -430,6 +430,25 @@ body.agd-chat-body {
   border-radius: 10px;
   background: color-mix(in srgb, var(--vscode-descriptionForeground, #8b8b8b) 12%, transparent);
 }
+.agd-chat-empty.has-logo::before {
+  display: none;
+}
+.agd-chat-empty-logo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+}
+.agd-chat-empty-logo .agd-provider-logo,
+.agd-chat-empty-logo .agd-logo {
+  width: 100%;
+  height: 100%;
+}
+.agd-chat-empty-logo .agd-logo {
+  border-radius: 12px;
+  font-size: 22px;
+}
 .agd-chat-loading::after {
   content: "";
   width: 16px;

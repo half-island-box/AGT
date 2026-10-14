@@ -67,25 +67,13 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   let workspaceView: WorkspacePanel;
-  let lastTreeOpenClick: { key: string; at: number } | undefined;
 
   /**
-   * TreeItem.command runs on each click. Keep the activation on the second
-   * click so the daemon tree behaves like a conventional double-click picker.
+   * Clicking a daemon or provider in the activity-bar tree jumps straight to
+   * Chat and pre-selects the target.
    */
   function openChatFromTree(daemonId?: string, provider?: string): void {
     if (!daemonId) return;
-    const key = provider ? `${daemonId}:${provider}` : daemonId;
-    const now = Date.now();
-    if (
-      !lastTreeOpenClick ||
-      lastTreeOpenClick.key !== key ||
-      now - lastTreeOpenClick.at > 450
-    ) {
-      lastTreeOpenClick = { key, at: now };
-      return;
-    }
-    lastTreeOpenClick = undefined;
     void workspaceView.show('chat', {
       chatSelection: { daemonId, provider },
     });

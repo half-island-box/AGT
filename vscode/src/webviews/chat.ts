@@ -529,7 +529,12 @@ function renderMessages(): void {
         : !selectedAgent()
           ? tr('chat.noAgents')
           : tr('chat.empty');
-    container.innerHTML = `<div class="agd-chat-empty">${esc(hint)}</div>`;
+    const hasSelection = boot?.state === 'online' && selectedDaemon() && selectedAgent();
+    const logo = hasSelection
+      ? `<div class="agd-chat-empty-logo">${providerLogo(selectedProvider ?? '')}</div>`
+      : '';
+    const emptyClass = logo ? 'agd-chat-empty has-logo' : 'agd-chat-empty';
+    container.innerHTML = `<div class="${emptyClass}">${logo}<span>${esc(hint)}</span></div>`;
     return;
   }
   container.innerHTML = messages.map((message) => {
