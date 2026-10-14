@@ -1,7 +1,7 @@
 import './mode-switcher.css';
+import './markdown.css';
 import './chat.css';
-import { marked } from 'marked';
-import DOMPurify from 'dompurify';
+import { renderMarkdown } from './markdown';
 import { providerLogo } from '../core/icons';
 import { t, type MessageKey } from '../core/i18n';
 import type {
@@ -180,19 +180,6 @@ function trashIcon(): string {
     <path d="M6.5 7v4"></path>
     <path d="M9.5 7v4"></path>
   </svg>`;
-}
-
-function renderMarkdown(value: string): string {
-  const html = marked.parse(value, {
-    async: false,
-    gfm: true,
-    breaks: true,
-  }) as string;
-  return DOMPurify.sanitize(html, {
-    USE_PROFILES: { html: true },
-    FORBID_TAGS: ['style', 'form'],
-    FORBID_ATTR: ['style'],
-  });
 }
 
 async function copyText(value: string, button?: HTMLButtonElement): Promise<void> {

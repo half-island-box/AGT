@@ -360,3 +360,7 @@ select.agd-input { height: 26px; }
 .agd-sop-steps-lg .agd-sop-stderr {
   max-height: 400px;
 }
+.agd-sop-stdout.agd-md,
+.agd-sop-stderr.agd-md {
+  white-space: normal;
+}

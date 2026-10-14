@@ -1,5 +1,7 @@
 import './mode-switcher.css';
+import './markdown.css';
 import './sop-editor.css';
+import { renderMarkdown } from './markdown';
 import { t, type MessageKey } from '../core/i18n';
 import { issues as localIssues, wouldCycle } from '../core/sop/graph';
 import { computeLayout, type SopPoint } from '../core/sop/layout';
@@ -913,8 +915,8 @@ function renderInspectLog(node: SopNode): string {
           <span class="agd-mono">${esc(step.task_id.slice(0, 8))}</span>
           <span class="agd-dim">${esc(step.status)}${step.exit_code === null ? '' : ` · exit ${step.exit_code}`}</span>
         </div>
-        ${step.stdout ? `<pre class="agd-sop-stdout">${esc(step.stdout)}</pre>` : ''}
-        ${step.stderr ? `<pre class="agd-sop-stderr">${esc(step.stderr)}</pre>` : ''}
+        ${step.stdout ? `<div class="agd-sop-stdout agd-md">${renderMarkdown(step.stdout)}</div>` : ''}
+        ${step.stderr ? `<div class="agd-sop-stderr agd-md">${renderMarkdown(step.stderr)}</div>` : ''}
       </div>`,
     )
     .join('');
@@ -1354,6 +1356,12 @@ function wireInspector(): void {
       } catch (err) {
         flash(String(err instanceof Error ? err.message : err), 'error');
       }
+    });
+  });
+  document.querySelectorAll<HTMLAnchorElement>('.agd-sop-log-card .agd-md a[href]').forEach((anchor) => {
+    anchor.addEventListener('click', (event) => {
+      event.preventDefault();
+      void bridge.call('openExternal', { url: anchor.href });
     });
   });
 }
