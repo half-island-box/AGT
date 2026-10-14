@@ -14,6 +14,7 @@ export interface BootInfo {
   state: ServerState;
   latencyMs: number | null;
   daemons: DaemonInfo[];
+  localDaemonId: string | null;
 }
 
 declare function acquireVsCodeApi(): {

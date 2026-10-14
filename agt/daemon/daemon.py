@@ -25,9 +25,9 @@ class Daemon:
         config: DaemonConfig | None = None,
         probe: AgentProbe | None = None,
     ) -> None:
-        self.config = config or DaemonConfig.from_env()
-        self.probe = probe or AgentProbe()
-        self._runtimes: dict[str, Runtime] = {}
+        self.config = config or DaemonConfig.from_env() #daemon配置
+        self.probe = probe or AgentProbe() #agent探测器
+        self._runtimes: dict[str, Runtime] = {} #provider → Runtime
         self._started = False
 
     # ── Lifecycle ───────────────────────────────────────────────
@@ -127,22 +127,13 @@ class Daemon:
                 f"Provider '{provider}' not found. Run `agt probe` to scan."
             )
 
-        effective_task_id = task_id or uuid.uuid4().hex[:8]
+        effective_task_id = task_id or uuid.uuid4().hex[:8] #生成任务id
 
         if agt_meta_dir is not None:
-            # Explicit meta dir (e.g. ``--work-dir`` override, ``--no-work-dir``
-            # legacy, or a server-supplied value). Use it verbatim.
             meta_dir: Path | None = agt_meta_dir
         elif agent_cwd is not None:
-            # Caller supplied the agent's cwd directly (e.g. bare ``agt chat``,
-            # which stopped creating ``<cwd>/.agt/tasks/<id>/`` in this
-            # iteration). No per-task meta dir — the session index lives at
-            # ``<agent_cwd>/.agt/sessions.json``. We deliberately do NOT fall
-            # back to ``work_dir_root`` here: that would silently re-create
-            # the dead subdir under the daemon's home on a different machine.
             meta_dir = None
         else:
-            # Neither given: legacy daemon-local layout.
             meta_dir = self.config.work_dir_root / provider / effective_task_id
 
         # cwd injection (Phase 4 workdir supplement): when the caller /

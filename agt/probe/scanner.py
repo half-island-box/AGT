@@ -70,7 +70,7 @@ def _resolve_command_path(command: str) -> str | None:
 
     return None
 
-
+#agent探测器
 class AgentProbe:
     """Discovers installed AI agent CLIs on the local machine.
 

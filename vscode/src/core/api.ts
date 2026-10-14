@@ -1,5 +1,6 @@
 import type {
   ChatSessionInfo,
+  DaemonConfigInfo,
   ArtifactInfo,
   DaemonInfo,
   IdentityBindingInfo,
@@ -92,6 +93,28 @@ export class AgtApi {
   async daemons(): Promise<DaemonInfo[]> {
     const res = await this.request<{ daemons: DaemonInfo[] }>('/api/daemons');
     return res.daemons;
+  }
+
+  async daemonConfig(): Promise<DaemonConfigInfo> {
+    return this.request<DaemonConfigInfo>('/api/daemon/config', {}, 10_000);
+  }
+
+  async setDaemonConfig(input: {
+    maxConcurrent?: number;
+    agentTimeout?: number;
+    workDir?: string;
+    agentCwdAllowlist?: string[];
+  }): Promise<DaemonConfigInfo> {
+    return this.post<DaemonConfigInfo>(
+      '/api/daemon/config',
+      {
+        max_concurrent: input.maxConcurrent,
+        agent_timeout: input.agentTimeout,
+        work_dir: input.workDir,
+        agent_cwd_allowlist: input.agentCwdAllowlist,
+      },
+      10_000,
+    );
   }
 
   async runtimes(): Promise<RuntimeInfo[]> {

@@ -144,6 +144,16 @@ body {
 }
 .agd-table td { padding: 7px 8px; border-bottom: 1px solid color-mix(in srgb, var(--vscode-panel-border, #2e2e2e) 60%, transparent); }
 .agd-table tr:last-child td { border-bottom: none; }
+.agd-table tr.is-clickable { cursor: pointer; }
+.agd-table tr.is-clickable:hover td {
+  background: color-mix(in srgb, var(--vscode-list-hoverBackground, #2a2d2e) 70%, transparent);
+}
+.agd-table-action { width: 44px; text-align: right; }
+.agd-daemon-config-button {
+  width: 28px;
+  justify-content: center;
+  padding: 0;
+}
 
 .agd-chips { display: inline-flex; flex-wrap: wrap; gap: 5px; }
 .agd-chip {
@@ -184,6 +194,75 @@ body {
   border-radius: 8px;
   padding: 12px;
   margin-bottom: 12px;
+}
+.agd-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: color-mix(in srgb, #000 45%, transparent);
+}
+.agd-modal {
+  width: min(620px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  padding: 16px;
+  border: 1px solid var(--vscode-panel-border, #2e2e2e);
+  border-radius: 10px;
+  background: var(--vscode-editorWidget-background, #252526);
+  box-shadow: 0 18px 48px rgb(0 0 0 / 32%);
+}
+.agd-modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.agd-modal-head h3 {
+  margin: 0;
+  font-size: 13px;
+}
+.agd-modal-head p {
+  margin: 2px 0 0;
+  font-size: 11px;
+}
+.agd-modal-actions {
+  margin-top: 8px;
+}
+.agd-daemon-config .agd-note {
+  margin-top: 0;
+  margin-bottom: 10px;
+  overflow-wrap: anywhere;
+}
+.agd-daemon-config-field {
+  margin-bottom: 11px;
+}
+.agd-daemon-config-meta {
+  overflow-wrap: anywhere;
+  font-size: 10.5px;
+}
+.agd-daemon-config-warning {
+  color: var(--agd-color-warning);
+  font-size: 10.5px;
+}
+.agd-daemon-config-textarea {
+  height: auto;
+  min-height: 82px;
+  resize: vertical;
+  line-height: 1.5;
+}
+.agd-daemon-config-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 120px;
+  color: var(--vscode-descriptionForeground, #8b8b8b);
+  font-size: 12px;
 }
 .agd-form-err {
   color: var(--vscode-errorForeground, #f85149);

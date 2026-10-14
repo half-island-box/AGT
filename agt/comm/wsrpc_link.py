@@ -59,12 +59,6 @@ class WsRpcLink:
 
     Constructed around an already-open ``websockets`` connection. Call
     ``start()`` to begin the read loop; call ``close()`` to tear down.
-
-    ``on_request`` is invoked for every inbound ``rpc_request`` frame.
-    Its return value (sync or coroutine) is sent back as the matching
-    ``rpc_response``. Exceptions raised by ``on_request`` are converted
-    into ``rpc_response`` carrying ``{"type":"handler_error","message":...}``
-    so a buggy handler can't take the socket down.
     """
 
     def __init__(
@@ -80,9 +74,6 @@ class WsRpcLink:
         self._grace = grace
 
         self._pending: dict[str, asyncio.Future[dict]] = {}
-        # ``generation`` is bumped on ``close()`` to invalidate stale
-        # responses. Callers that reconnect can seed the next link with
-        # ``prev + 1`` to keep the public counter monotonic.
         self._generation = generation
         self._rpc_v1_supported = False
         self._read_task: asyncio.Task | None = None

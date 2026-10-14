@@ -1,73 +1,25 @@
-"""Identity injection + reclaim helpers for daemon spawn (Phase 4 Step 4).
-
-When the daemon handles a task with an ``identity_did``, we "stack" the
-identity onto the agent's working directory: write the identity's
-``AGENTS.md`` body into the spawn cwd as ``IDENTITY.md`` and append a
-marker block to the spawn cwd's project-instructions file. That file
-is provider-aware: Claude Code reads ``CLAUDE.md`` natively (it does
-not pick up ``AGENTS.md`` by default), so for ``provider == "claude"``
-the marker goes to ``CLAUDE.md``; every other agent follows the
-``AGENTS.md`` convention. When the spawn completes (or crashes), we
-undo it.
-
-The ``AGENTS.md`` body arrives as the ``identity_md`` parameter
-(Option D: server-rendered, bundled into the claim payload). For
-daemons running outside the server path we still fall back to reading
-``~/.agt/identities/<slug>/AGENTS.md`` from disk.
-
-Design notes:
-
-- **Idempotent**: ``_inject_identity`` always reclaims first, so a
-  crash-leftover marker/IDENTITY.md is cleaned up before injection.
-  Safe to call twice; safe to call against a cwd with stale state —
-  including a leftover in the *other* provider's file (reclaim strips
-  both).
-- **Non-destructive**: the user's existing file is never overwritten —
-  we only append the marker block to its end. If the file didn't
-  exist, we create it and remember (via a hidden sidecar file) that it
-  was ours so reclaim deletes it back.
-- **Pure file IO**: no DB, no daemon-state. Reclaim is a pure
-  function of cwd contents — must succeed (or no-op) even after
-  daemon restart.
-"""
-
 from __future__ import annotations
 
 import re
 from pathlib import Path
 
-# Sidecar stem that records "we created this file this time". Existence
-# means reclaim is allowed to delete the file when it ends up empty
-# (i.e. the user never had content of their own). One sidecar per
-# target file: ``.agt-identity-managed-AGENTS.md`` /
-# ``.agt-identity-managed-CLAUDE.md``.
 _MANAGED_MARKER = ".agt-identity-managed"
 
-# Marker block bounds. We match the WHOLE block (START line + content +
-# END line) and remove it on reclaim.
+# 注入内容的标记块。注入的身份信息被包裹在这个标记块中，方便后续回收和清理。
 _START_RE = re.compile(
     r"^<!--\s*AGT-IDENTITY-START:\s*(?P<did>[^\s]+)\s*-->\s*$"
 )
 _END_RE = re.compile(r"^<!--\s*AGT-IDENTITY-END\s*-->\s*$")
 
-# Every file a marker block can land in. Reclaim strips blocks from all
-# of them so a crash leftover from a run of the *other* provider is
-# healed too (e.g. a claude run's CLAUDE.md leftover before a codex run).
+# 注入到Agents/Claude.md中
 _MARKER_FILES = ("AGENTS.md", "CLAUDE.md")
 
-# Deliverables-contract block (Phase 2). A SEPARATE tag from the identity
-# marker so the two inject/reclaim cycles never eat each other's blocks.
+
 _OUTPUTS_START = "<!-- AGT-OUTPUTS-START -->"
 _OUTPUTS_END = "<!-- AGT-OUTPUTS-END -->"
 
-
+# Claude Code特殊处理
 def _marker_filename(provider: str | None) -> str:
-    """The project-instructions file a provider reads natively.
-
-    Claude Code reads ``CLAUDE.md`` and does not pick up ``AGENTS.md``
-    by default; every other agent follows the AGENTS.md convention.
-    ``None`` (legacy callers) keeps the old AGENTS.md behavior.
-    """
     return "CLAUDE.md" if provider == "claude" else "AGENTS.md"
 
 
@@ -85,18 +37,7 @@ def _source_path(identity_did: str) -> Path:
 def _resolve_identity_md(
     identity_did: str, identity_md: str | None,
 ) -> str | None:
-    """Pick the AGENTS.md body for an inject.
 
-    Option D (server-supplied): when ``identity_md`` is set, return it
-    verbatim — the server already rendered the current identity state
-    and bundled it into the claim payload. The daemon never has to
-    reach back to the Server (impossible in reverse-dial).
-
-    Legacy fallback: when ``identity_md`` is None, fall back to reading
-    ``~/.agt/identities/<slug>/AGENTS.md`` so a daemon running outside
-    the server path still works. Returns ``None`` if the file is
-    absent — the caller will silently skip injection in that case.
-    """
     if identity_md is not None:
         return identity_md
     src = _source_path(identity_did)
@@ -106,14 +47,7 @@ def _resolve_identity_md(
 
 
 def _marker_block(identity_did: str) -> str:
-    """The text appended (or written) to ``AGENTS.md`` at inject time.
-
-    Inline summary (DID slug + pointer to IDENTITY.md). We deliberately
-    do NOT pull name/capabilities from the Server here — the executor
-    doesn't carry them and a per-spawn fetch would couple agent
-    spawn to a round trip. IDENTITY.md (a copy of the identity's
-    AGENTS.md) carries the full description for the model.
-    """
+ 
     slug = identity_did.split(":")[-1]
     return (
         f"\n<!-- AGT-IDENTITY-START: {identity_did} -->\n"
@@ -155,7 +89,7 @@ def _strip_marker_block(text: str, did: str | None = None) -> str:
         result += "\n"
     return result
 
-
+# 身份注入核心代码
 def _inject_identity(
     cwd: Path,
     identity_did: str,
@@ -163,35 +97,11 @@ def _inject_identity(
     *,
     identity_md: str | None = None,
 ) -> None:
-    """Inject the identity into ``cwd``. Idempotent (reclaim-first).
 
-    ``identity_md`` (Option D) takes priority: when provided, the
-    server already rendered the identity's AGENTS.md body and bundled
-    it into the claim payload — we use it verbatim. When ``None``, we
-    fall back to reading ``~/.agt/identities/<slug>/AGENTS.md`` from
-    disk (legacy local path). If both are absent, the call silently
-    skips.
-
-    Steps (full rationale in the module docstring):
-
-    1. Reclaim any prior injection (idempotent / crash-self-heal — in
-       both AGENTS.md and CLAUDE.md).
-    2. Resolve the AGENTS.md body (server-rendered or disk-fallback).
-       If absent, skip silently.
-    3. Ensure ``cwd/.agt`` exists; write the body → ``cwd/IDENTITY.md``.
-    4. Append (or create) the provider's instructions file
-       (``CLAUDE.md`` for claude, else ``AGENTS.md``) with the marker
-       block. Track whether we created the file (per-file sidecar) so
-       reclaim can delete it if it ends up empty.
-    """
     cwd = Path(cwd)
     cwd.mkdir(parents=True, exist_ok=True)
 
-    # 1. Idempotent reclaim — handles crash leftovers from a prior run.
-    #    Keep sidecars: the outputs-inject may have just touched the same
-    #    per-file sidecar (same target file), and we're about to inject
-    #    again, so ownership must survive this heal. Only the FINAL
-    #    reclaim (the executor's ``finally``) may drop the sidecar.
+
     _reclaim_identity(cwd, _keep_sidecars=True)
 
     # 2. Resolve body.
@@ -223,21 +133,6 @@ def _reclaim_identity(
     did: str | None = None,
     _keep_sidecars: bool = False,
 ) -> None:
-    """Undo a prior ``_inject_identity``. Idempotent.
-
-    Steps:
-
-    1. Strip any AGT-IDENTITY marker blocks (the one we just added,
-       or leftovers from a crashed prior run) from **every** potential
-       marker file — a crash leftover may sit in the other provider's
-       file.
-    2. Delete ``cwd/IDENTITY.md`` if present.
-    3. For each file we created ourselves (per-file sidecar present)
-       that is now empty, delete it — restoring the pre-injection
-       "file didn't exist" state. A legacy bare sidecar (pre per-file
-       sidecars) still authorizes deleting AGENTS.md.
-    4. Clean up the sidecars.
-    """
     cwd = Path(cwd)
     aagt_dir = cwd / ".agt"
     identity_file = cwd / "IDENTITY.md"
@@ -340,14 +235,6 @@ def _inject_outputs_instruction(
 
 
 def _reclaim_outputs_instruction(cwd: Path) -> None:
-    """Strip every AGT-OUTPUTS block from the potential marker files.
-
-    Strip-only by design: it never deletes an emptied file. The identity
-    reclaim runs after this in the executor's ``finally`` and owns the
-    "delete the file we created when it ends up empty" decision — the two
-    reclaims must keep that ordering or a CLAUDE.md AGT created could be
-    left behind as an empty file.
-    """
     cwd = Path(cwd)
     for name in _MARKER_FILES:
         target = cwd / name

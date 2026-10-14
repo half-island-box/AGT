@@ -4,6 +4,7 @@ import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { ServerLifecycle } from '../core/lifecycle';
+import { localDaemonId } from '../core/sop/run';
 import type { DaemonInfo, UiLanguage } from '../core/types';
 
 export interface BridgeContext {
@@ -97,6 +98,7 @@ export class SettingsPanel {
   private async bootPayload(): Promise<Record<string, unknown>> {
     const cfg = this.config();
     const lifecycle = this.ctx.lifecycle;
+    const daemons = lifecycle.state === 'online' ? await this.ctx.getDaemons() : [];
     return {
       serverUrl: cfg.get<string>('serverUrl'),
       autoStart: cfg.get<boolean>('autoStart'),
@@ -109,7 +111,14 @@ export class SettingsPanel {
       language: this.ctx.language(),
       state: lifecycle.state,
       latencyMs: lifecycle.latencyMs,
-      daemons: lifecycle.state === 'online' ? await this.ctx.getDaemons() : [],
+      daemons,
+      localDaemonId: localDaemonId(
+        daemons.map((daemon) => ({
+          daemon_id: daemon.daemon_id,
+          url: daemon.url,
+        })),
+        serverUrlHost(this.config().get<string>('serverUrl') ?? ''),
+      ),
     };
   }
 
@@ -134,10 +143,18 @@ export class SettingsPanel {
         case 'testConnection': {
           const online = await this.ctx.lifecycle.probe();
           this.ctx.onConfigOrStateChange();
+          const daemons = online ? await this.ctx.getDaemons() : [];
           result = {
             state: this.ctx.lifecycle.state,
             latencyMs: this.ctx.lifecycle.latencyMs,
-            daemons: online ? await this.ctx.getDaemons() : [],
+            daemons,
+            localDaemonId: localDaemonId(
+              daemons.map((daemon) => ({
+                daemon_id: daemon.daemon_id,
+                url: daemon.url,
+              })),
+              serverUrlHost(this.config().get<string>('serverUrl') ?? ''),
+            ),
           };
           break;
         }
@@ -248,6 +265,36 @@ export class SettingsPanel {
           };
           break;
         }
+        case 'daemonConfigShow': {
+          const daemonId = String(msg.params?.daemonId ?? '');
+          if (!daemonId) {
+            throw new Error('daemon-id-required');
+          }
+          if (daemonId !== await this.currentLocalDaemonId()) {
+            throw new Error('remote-daemon-config-unsupported');
+          }
+          result = await this.ctx.lifecycle.api.daemonConfig();
+          break;
+        }
+        case 'daemonConfigSet': {
+          const p = msg.params ?? {};
+          const daemonId = String(p.daemonId ?? '');
+          if (!daemonId) {
+            throw new Error('daemon-id-required');
+          }
+          if (daemonId !== await this.currentLocalDaemonId()) {
+            throw new Error('remote-daemon-config-unsupported');
+          }
+          result = await this.ctx.lifecycle.api.setDaemonConfig({
+            maxConcurrent: typeof p.maxConcurrent === 'number' ? p.maxConcurrent : undefined,
+            agentTimeout: typeof p.agentTimeout === 'number' ? p.agentTimeout : undefined,
+            workDir: typeof p.workDir === 'string' ? p.workDir : undefined,
+            agentCwdAllowlist: Array.isArray(p.agentCwdAllowlist)
+              ? p.agentCwdAllowlist.filter((item): item is string => typeof item === 'string')
+              : undefined,
+          });
+          break;
+        }
         default:
           throw new Error(`unknown bridge method: ${msg.method}`);
       }
@@ -260,8 +307,30 @@ export class SettingsPanel {
       });
     }
   }
+
+  private async currentLocalDaemonId(): Promise<string | null> {
+    if (this.ctx.lifecycle.state !== 'online') {
+      return null;
+    }
+    const daemons = await this.ctx.getDaemons();
+    return localDaemonId(
+      daemons.map((daemon) => ({
+        daemon_id: daemon.daemon_id,
+        url: daemon.url,
+      })),
+      serverUrlHost(this.config().get<string>('serverUrl') ?? ''),
+    );
+  }
 }
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+function serverUrlHost(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return '';
+  }
 }

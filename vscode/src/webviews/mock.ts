@@ -1,5 +1,6 @@
 import type {
   ChatSessionInfo,
+  DaemonConfigInfo,
   DaemonInfo,
   IdentityWithBindings,
   RuntimeInfo,
@@ -67,6 +68,40 @@ const startCommand = 'uv run agt server start --detach';
 const stopCommand = 'uv run agt server stop';
 const daemonStartCommand = 'uv run agt daemon start --detach';
 const daemonStopCommand = 'uv run agt daemon stop';
+
+let daemonConfigInfo: DaemonConfigInfo = {
+  config_file: '/home/you/.agt/daemon.json',
+  settings: {
+    max_concurrent: {
+      value: 4,
+      source: 'env',
+      saved: 2,
+      default: 1,
+      env_name: 'AGT_MAX_CONCURRENT',
+    },
+    agent_timeout: {
+      value: 1800,
+      source: 'file',
+      saved: 1800,
+      default: 600,
+      env_name: 'AGT_AGENT_TIMEOUT',
+    },
+    work_dir: {
+      value: '/home/you/.agt/workspaces',
+      source: 'default',
+      saved: null,
+      default: '/home/you/.agt/workspaces',
+      env_name: 'AGT_WORK_DIR',
+    },
+    agent_cwd_allowlist: {
+      value: ['/home/you/project', '/data/repos'],
+      source: 'file',
+      saved: ['/home/you/project', '/data/repos'],
+      default: ['/home/you'],
+      env_name: 'AGT_AGENT_CWD_ALLOWLIST',
+    },
+  },
+};
 
 const runtimes: RuntimeInfo[] = [
   { name: 'Claude Code', type: 'claude', version: '2.1.266', status: 'online', device_name: 'local', daemon_id: 'dev-box-1', daemon_name: '本地开发机' },
@@ -259,6 +294,7 @@ function boot(): Record<string, unknown> {
     state,
     latencyMs: state === 'online' ? 12 : null,
     daemons: state === 'online' ? daemons : [],
+    localDaemonId: 'dev-box-1',
     runtimes: state === 'online' ? runtimes : [],
     identities: state === 'online' ? identities : [],
     sessions: [],
@@ -616,6 +652,46 @@ export async function mockCall<T>(_method: string, params?: Record<string, unkno
       return { ok: true } as T;
     case 'openSettings':
       return { ok: true } as T;
+    case 'daemonConfigShow': {
+      const daemonId = String(params?.daemonId ?? '');
+      if (daemonId !== 'dev-box-1') {
+        throw new Error('remote-daemon-config-unsupported');
+      }
+      return daemonConfigInfo as T;
+    }
+    case 'daemonConfigSet': {
+      const daemonId = String(params?.daemonId ?? '');
+      if (daemonId !== 'dev-box-1') {
+        throw new Error('remote-daemon-config-unsupported');
+      }
+      const p = params ?? {};
+      if (typeof p.maxConcurrent === 'number') {
+        daemonConfigInfo.settings.max_concurrent.saved = p.maxConcurrent;
+        if (daemonConfigInfo.settings.max_concurrent.source !== 'env') {
+          daemonConfigInfo.settings.max_concurrent.value = p.maxConcurrent;
+        }
+      }
+      if (typeof p.agentTimeout === 'number') {
+        daemonConfigInfo.settings.agent_timeout.saved = p.agentTimeout;
+        if (daemonConfigInfo.settings.agent_timeout.source !== 'env') {
+          daemonConfigInfo.settings.agent_timeout.value = p.agentTimeout;
+        }
+      }
+      if (typeof p.workDir === 'string') {
+        daemonConfigInfo.settings.work_dir.saved = p.workDir;
+        if (daemonConfigInfo.settings.work_dir.source !== 'env') {
+          daemonConfigInfo.settings.work_dir.value = p.workDir;
+        }
+      }
+      if (Array.isArray(p.agentCwdAllowlist)) {
+        const allowlist = p.agentCwdAllowlist.filter((item): item is string => typeof item === 'string');
+        daemonConfigInfo.settings.agent_cwd_allowlist.saved = allowlist;
+        if (daemonConfigInfo.settings.agent_cwd_allowlist.source !== 'env') {
+          daemonConfigInfo.settings.agent_cwd_allowlist.value = allowlist;
+        }
+      }
+      return daemonConfigInfo as T;
+    }
     case 'sessions': {
       const daemonId = String(params?.daemonId ?? '');
       return { sessions: sessionsByDaemon[daemonId] ?? [] } as T;

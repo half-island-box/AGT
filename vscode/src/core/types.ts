@@ -20,6 +20,26 @@ export interface DaemonInfo {
   capabilities: string[];
 }
 
+export type DaemonConfigValue = number | string | string[];
+
+export interface DaemonConfigSetting {
+  value: DaemonConfigValue;
+  source: 'env' | 'file' | 'default' | string;
+  saved: DaemonConfigValue | null;
+  default: DaemonConfigValue | null;
+  env_name: string | null;
+}
+
+export interface DaemonConfigInfo {
+  config_file: string;
+  settings: {
+    max_concurrent: DaemonConfigSetting;
+    agent_timeout: DaemonConfigSetting;
+    work_dir: DaemonConfigSetting;
+    agent_cwd_allowlist: DaemonConfigSetting;
+  };
+}
+
 export interface RuntimeInfo {
   name: string;
   type: string;
