@@ -53,6 +53,8 @@ _PLACEHOLDER_RE = re.compile(r"\$\{([A-Za-z0-9_.-]+)\}")
 class SOPExpansion:
     root_job_id: str
     node_jobs: dict[str, str] = field(default_factory=dict)
+    loop_node_jobs: dict[str, dict[int, str]] = field(default_factory=dict)
+    sentinel_jobs: dict[str, str] = field(default_factory=dict)
 
 
 def _node_meta(node, identities, cwd=None, local_daemon_id=None) -> dict:
@@ -75,6 +77,35 @@ def _node_meta(node, identities, cwd=None, local_daemon_id=None) -> dict:
         "cwd": cwd,
         "local_daemon_id": local_daemon_id,
     }
+
+
+def _loop_meta_json(loop) -> str:
+    return json.dumps(
+        {"name": loop.name, "max_iterations": loop.max_iterations, "entry": loop.entry},
+        ensure_ascii=False,
+    )
+
+
+async def _create_loop_sentinel(
+    db: AsyncSession, loop, root_job_id: str
+) -> str:
+    """Create a blocked sentinel job that represents loop completion.
+
+    The sentinel has no ``sop_node`` so it does not show up as a DAG node
+    in status queries; loop metadata lives in ``sop_loop_*`` columns. It
+    becomes terminal after the final iteration, waking external dependents.
+    """
+    job = await create_job(
+        db,
+        provider="claude",
+        prompt="",
+        with_step=False,
+        root_job_id=root_job_id,
+        sop_loop_name=loop.name,
+        sop_iteration=0,
+        sop_loop_meta=_loop_meta_json(loop),
+    )
+    return job.job_id
 
 
 async def _validate_explicit_targets(db: AsyncSession, spec) -> None:
@@ -241,6 +272,11 @@ async def expand_sop(
     ``root_job_id`` (review G2: SOP nodes have no spawn parent, the
     default root=self would silently break the shared-root invariant).
 
+    Phase 5 loops: nodes inside a declared ``loops:`` block are expanded
+    into one job per iteration. Non-loop nodes depend on loop sentinels
+    instead of individual iteration jobs; loop-internal edges stay inside
+    the same iteration.
+
     ``cwd`` / ``local_daemon_id`` carry the submitter's pwd and local
     daemon id so ``activate_job`` can default an un-pinned node's
     ``agent_cwd`` to pwd when it lands on the local daemon (and refuse a
@@ -250,11 +286,22 @@ async def expand_sop(
     await _validate_identities(db, spec)
     await _validate_routability(db, spec)
 
-    no_deps = [n for n in spec.nodes if not n.depends_on]
-    if not no_deps:
+    node_by_name = {n.name: n for n in spec.nodes}
+    loop_by_name = {l.name: l for l in spec.loops}
+
+    non_loop_nodes = [n for n in spec.nodes if not n.loop_name]
+    loop_nodes = [n for n in spec.nodes if n.loop_name]
+
+    # Determine root: prefer a non-loop no-dep node, else the first loop entry.
+    no_dep_non_loop = [n for n in non_loop_nodes if not n.depends_on]
+    root_node: SOPNode
+    if no_dep_non_loop:
+        root_node = no_dep_non_loop[0]
+    elif spec.loops:
+        root_node = node_by_name[spec.loops[0].entry]
+    else:
         raise ValueError({"type": "sop_no_entry", "message": "DAG has no entry node"})
 
-    root_node = no_deps[0]
     root = await create_job(
         db,
         provider=root_node.provider
@@ -273,27 +320,97 @@ async def expand_sop(
         ),
     )
     expansion = SOPExpansion(root_job_id=root.job_id)
-    expansion.node_jobs[root_node.name] = root.job_id
 
-    for node in spec.nodes:
+    # If the root is itself inside a loop, stamp loop metadata on it.
+    if root_node.loop_name:
+        loop = loop_by_name[root_node.loop_name]
+        root.sop_loop_name = loop.name
+        root.sop_iteration = 1
+        root.sop_loop_meta = _loop_meta_json(loop)
+        root_meta = json.loads(root.sop_node) if root.sop_node else {}
+        root_meta["loop_name"] = loop.name
+        root_meta["iteration"] = 1
+        root.sop_node = json.dumps(root_meta, ensure_ascii=False)
+        expansion.loop_node_jobs[root_node.name] = {1: root.job_id}
+    else:
+        expansion.node_jobs[root_node.name] = root.job_id
+
+    # Create loop sentinel jobs first — non-loop nodes may depend on them.
+    for loop in spec.loops:
+        sentinel = await _create_loop_sentinel(db, loop, root.job_id)
+        expansion.sentinel_jobs[loop.name] = sentinel
+
+    # Create non-loop DAG jobs.
+    for node in non_loop_nodes:
         if node.name == root_node.name:
             continue
         meta = _node_meta(node, spec.identities, cwd, local_daemon_id)
+        parents: list[str] = []
+        for dep in node.depends_on:
+            dep_node = node_by_name[dep]
+            if dep_node.loop_name:
+                parents.append(expansion.sentinel_jobs[dep_node.loop_name])
+            else:
+                parents.append(expansion.node_jobs[dep])
         job = await create_job(
             db,
             provider=meta["provider_hint"] or "claude",
             prompt="",
             identity_did=meta["identity_did"],
             with_step=False,
-            parents=[expansion.node_jobs[d] for d in node.depends_on],
+            parents=parents,
             root_job_id=root.job_id,
             sop_node=json.dumps(meta, ensure_ascii=False),
         )
         expansion.node_jobs[node.name] = job.job_id
 
-    # Entry nodes are runnable now — uniform activation path.
-    for node in no_deps:
-        await activate_job(db, await _by_id(db, expansion.node_jobs[node.name]))
+    # Create iteration 1 jobs for loop nodes.
+    for node in loop_nodes:
+        if node.name == root_node.name:
+            continue
+        loop = loop_by_name[node.loop_name]
+        meta = _node_meta(node, spec.identities, cwd, local_daemon_id)
+        meta["loop_name"] = loop.name
+        meta["iteration"] = 1
+        parents: list[str] = []
+        for dep in node.depends_on:
+            dep_node = node_by_name[dep]
+            if dep_node.loop_name == node.loop_name:
+                parents.append(expansion.loop_node_jobs[dep_node.name][1])
+            elif dep_node.loop_name:
+                parents.append(expansion.sentinel_jobs[dep_node.loop_name])
+            else:
+                parents.append(expansion.node_jobs[dep])
+        job = await create_job(
+            db,
+            provider=meta["provider_hint"] or "claude",
+            prompt="",
+            identity_did=meta["identity_did"],
+            with_step=False,
+            parents=parents,
+            root_job_id=root.job_id,
+            sop_node=json.dumps(meta, ensure_ascii=False),
+            sop_loop_name=loop.name,
+            sop_iteration=1,
+            sop_loop_meta=_loop_meta_json(loop),
+        )
+        expansion.loop_node_jobs.setdefault(node.name, {})[1] = job.job_id
+
+    await db.flush()
+
+    # Activate entry nodes: non-loop no-dep nodes and loop entry nodes with
+    # no external (cross-loop / non-loop) parents.
+    for node in non_loop_nodes:
+        if not node.depends_on:
+            await activate_job(db, await _by_id(db, expansion.node_jobs[node.name]))
+    for loop in spec.loops:
+        entry_node = node_by_name[loop.entry]
+        has_external_deps = any(
+            node_by_name[d].loop_name != loop.name for d in entry_node.depends_on
+        )
+        if not has_external_deps:
+            await activate_job(db, await _by_id(db, expansion.loop_node_jobs[entry_node.name][1]))
+
     return expansion
 
 
@@ -331,22 +448,35 @@ async def _resolve_placeholders(
     equals the declared output name — the scan stage already folds the
     manifest-declared name into ``ArtifactModel.name``, so manifest
     naming wins naturally and the bare filename is the fallback.
+
+    Loop-aware resolution: references to a node inside the same loop use
+    the current iteration (or the most recent terminal iteration for
+    entry nodes that depend on the previous iteration); references to
+    nodes outside the loop use the latest terminal iteration.
     """
     from ...a2a import make_artifact_uri
 
     text: str = meta.get("input") or ""
     replacements: dict[str, str] = {}
     uris: list[str] = []
+    current_loop = job.sop_loop_name
+    current_iteration = job.sop_iteration
 
     for ph in _PLACEHOLDER_RE.findall(text):
         if ph in replacements:
             continue
         node_name, _, output_name = ph.partition(".")
+        candidates = [
+            up for up in upstreams
+            if _node_name_from(up) == node_name
+        ]
+        if not candidates:
+            raise LookupError(
+                f"upstream '{node_name}' produced no artifact named '{output_name}'"
+            )
+        chosen = _preferred_upstream(candidates, current_loop, current_iteration)
         matched: list[ArtifactModel] = []
-        for up in upstreams:
-            up_meta = json.loads(up.sop_node) if up.sop_node else {}
-            if up_meta.get("name") != node_name:
-                continue
+        for up in chosen:
             arts = await _artifacts_of(db, up.job_id)
             matched.extend(a for a in arts if a.name == output_name)
         if not matched:
@@ -359,6 +489,36 @@ async def _resolve_placeholders(
 
     resolved = _PLACEHOLDER_RE.sub(lambda m: replacements[m.group(1)], text)
     return resolved, uris
+
+
+def _node_name_from(job: JobModel) -> str | None:
+    meta = json.loads(job.sop_node) if job.sop_node else {}
+    return meta.get("name")
+
+
+def _preferred_upstream(
+    candidates: list[JobModel], current_loop: str | None, current_iteration: int
+) -> list[JobModel]:
+    """Pick the right iteration of an upstream node for placeholder resolution."""
+    if current_loop:
+        same_loop = [c for c in candidates if c.sop_loop_name == current_loop]
+        if same_loop:
+            same_iter = [c for c in same_loop if c.sop_iteration == current_iteration]
+            if same_iter:
+                return same_iter
+            terminal = [c for c in same_loop if c.status in _TERMINAL_STATUSES]
+            if terminal:
+                max_iter = max(c.sop_iteration for c in terminal)
+                return [c for c in terminal if c.sop_iteration == max_iter]
+            max_iter = max(c.sop_iteration for c in same_loop)
+            return [c for c in same_loop if c.sop_iteration == max_iter]
+
+    terminal = [c for c in candidates if c.status in _TERMINAL_STATUSES]
+    if terminal:
+        max_iter = max(c.sop_iteration for c in terminal)
+        return [c for c in terminal if c.sop_iteration == max_iter]
+    max_iter = max(c.sop_iteration for c in candidates)
+    return [c for c in candidates if c.sop_iteration == max_iter]
 
 
 async def _artifacts_of(db: AsyncSession, job_id: str) -> list[ArtifactModel]:

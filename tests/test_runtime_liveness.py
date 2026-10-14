@@ -411,11 +411,15 @@ def test_on_connect_hook_fires_after_link_ready() -> None:
             fired.append(link)
             link_at_fire.append(link)
 
-        ws_server = DaemonWsServer(port=port, secret=SECRET, on_connect=hook)
+        daemon_id = "d-hook"
+        ws_server = DaemonWsServer(
+            port=port, secret=SECRET, daemon_id=daemon_id,
+            url=f"ws://127.0.0.1:{port}", on_connect=hook,
+        )
         await ws_server.start()
         try:
             import websockets
-            token = TaskToken.create_server("server", SECRET)
+            token = TaskToken.create_server("server", SECRET, daemon_id=daemon_id)
             async with websockets.connect(
                 f"ws://127.0.0.1:{port}/daemon",
                 additional_headers={"X-Server-Token": token},
@@ -453,11 +457,15 @@ def test_on_connect_hook_exception_is_swallowed() -> None:
         async def hook(_link) -> None:
             raise RuntimeError("boom")
 
-        ws_server = DaemonWsServer(port=port, secret=SECRET, on_connect=hook)
+        daemon_id = "d-hook-boom"
+        ws_server = DaemonWsServer(
+            port=port, secret=SECRET, daemon_id=daemon_id,
+            url=f"ws://127.0.0.1:{port}", on_connect=hook,
+        )
         await ws_server.start()
         try:
             import websockets
-            token = TaskToken.create_server("server", SECRET)
+            token = TaskToken.create_server("server", SECRET, daemon_id=daemon_id)
             async with websockets.connect(
                 f"ws://127.0.0.1:{port}/daemon",
                 additional_headers={"X-Server-Token": token},
@@ -534,12 +542,16 @@ def test_on_connect_pushes_snapshot_over_reverse_dial() -> None:
                     "runtimes.register", {"runtimes": runtimes}, timeout_ms=5000,
                 )
 
-            ws_server = DaemonWsServer(port=port, secret=SECRET, on_connect=push)
+            daemon_id = "d-on-connect"
+            ws_server = DaemonWsServer(
+                port=port, secret=SECRET, daemon_id=daemon_id,
+                url=f"ws://127.0.0.1:{port}", on_connect=push,
+            )
             await ws_server.start()
 
             shutdown = asyncio.Event()
             link = DaemonLink(
-                daemon_id="d-on-connect", url=f"ws://127.0.0.1:{port}",
+                daemon_id=daemon_id, url=f"ws://127.0.0.1:{port}",
                 secret=SECRET, session_factory=factory,
             )
             link_task = asyncio.create_task(link.run(shutdown))

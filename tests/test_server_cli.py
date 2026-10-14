@@ -9,11 +9,22 @@ from __future__ import annotations
 
 import os
 import signal
+from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from click.testing import CliRunner
 
 from agt.cli.main import cli
+from agt.server.config import ServerConfig
+
+
+@pytest.fixture(autouse=True)
+def _server_secret_env(monkeypatch, request):
+    """Set AGT_SERVER_SECRET for every test except missing-secret cases."""
+    if "no_server_secret" not in request.keywords:
+        monkeypatch.setenv("AGT_SERVER_SECRET", "x" * 64)
 
 
 class _FakePopen:
@@ -78,7 +89,7 @@ class TestDetachedSpawn:
 
         with patch("subprocess.Popen", popen_cls), \
              patch("builtins.open", _open, create=True), \
-             patch("agt.server.main._read_pidfile", return_value=None):
+             patch("agt.server.pidfile._read_pidfile", return_value=None):
             result = _invoke(["start", *args])
         return result, _FakePopen.instances[-1], opened[-1] if opened else None
 
@@ -162,11 +173,11 @@ class TestDetachedSpawn:
 class TestStopIfRunning:
     def test_stops_existing_server(self, monkeypatch, tmp_path) -> None:
         from agt.cli import main as cli_mod
-        from agt.server import main as server_main
+        from agt.server import pidfile as server_pidfile
 
         pid_path = tmp_path / "server.pid"
         pid_path.write_text("424242\n")
-        monkeypatch.setattr(server_main, "_read_pidfile", lambda _p: 424242)
+        monkeypatch.setattr(server_pidfile, "_read_pidfile", lambda _p: 424242)
 
         captured: dict = {}
 
@@ -184,9 +195,9 @@ class TestStopIfRunning:
 
     def test_no_stop_when_not_running(self, monkeypatch) -> None:
         from agt.cli import main as cli_mod
-        from agt.server import main as server_main
+        from agt.server import pidfile as server_pidfile
 
-        monkeypatch.setattr(server_main, "_read_pidfile", lambda _p: None)
+        monkeypatch.setattr(server_pidfile, "_read_pidfile", lambda _p: None)
         captured: dict = {}
 
         def _fake_stop(pid, label, timeout=10.0):
@@ -205,10 +216,11 @@ class TestStopIfRunning:
         otherwise it fails to bind the port ("address already in use")."""
         from agt.cli import main as cli_mod
         from agt.server import main as server_main
+        from agt.server import pidfile as server_pidfile
 
         pid_path = tmp_path / "server.pid"
         pid_path.write_text("424242\n")
-        monkeypatch.setattr(server_main, "_read_pidfile", lambda _p: 424242)
+        monkeypatch.setattr(server_pidfile, "_read_pidfile", lambda _p: 424242)
         # Foreground delegates to cli_main; stub it so uvicorn doesn't run.
         monkeypatch.setattr(server_main, "cli_main", lambda _args: 0)
 
@@ -263,10 +275,10 @@ class TestStopStatus:
             captured["pid"] = pid
             captured["sig"] = sig
 
-        # server_stop does `from ..server.main import _signal_pid` inside the
-        # function, so patch the module attribute it reads from.
-        from agt.server import main as server_main
-        monkeypatch.setattr(server_main, "_signal_pid", _fake_signal)
+        # server_stop does `from ..server.pidfile import _signal_pid` inside
+        # the function, so patch the module attribute it reads from.
+        from agt.server import pidfile as server_pidfile
+        monkeypatch.setattr(server_pidfile, "_signal_pid", _fake_signal)
 
         result = _invoke(["stop", "--pid-file", str(pid_path)])
         assert result.exit_code == 0, result.output
@@ -278,3 +290,77 @@ class TestStopStatus:
         result = _invoke(["stop", "--pid-file", str(tmp_path / "no.pid")])
         assert result.exit_code == 0
         assert "No server running" in result.output
+
+
+# ── server init ────────────────────────────────────────────────────
+
+
+class TestServerInit:
+    def test_init_creates_secret_file(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path))
+        result = _invoke(["init"])
+        assert result.exit_code == 0, result.output
+        secret_path = tmp_path / ".agt" / "server.secret"
+        assert secret_path.exists()
+        secret = secret_path.read_text(encoding="utf-8").strip()
+        assert len(secret) == 64
+        int(secret, 16)  # valid hex
+        assert oct(secret_path.stat().st_mode)[-3:] == "600"
+        assert "Generated server secret" in result.output
+
+    def test_init_is_idempotent(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path))
+        secret_path = tmp_path / ".agt" / "server.secret"
+        secret_path.parent.mkdir(parents=True)
+        secret_path.write_text("a" * 64, encoding="utf-8")
+        result = _invoke(["init"])
+        assert result.exit_code == 0, result.output
+        assert secret_path.read_text(encoding="utf-8").strip() == "a" * 64
+        assert "already exists" in result.output
+
+    def test_init_force_regenerates(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path))
+        secret_path = tmp_path / ".agt" / "server.secret"
+        secret_path.parent.mkdir(parents=True)
+        secret_path.write_text("a" * 64, encoding="utf-8")
+        result = _invoke(["init", "--force"])
+        assert result.exit_code == 0, result.output
+        new_secret = secret_path.read_text(encoding="utf-8").strip()
+        assert new_secret != "a" * 64
+        assert len(new_secret) == 64
+
+
+# ── missing secret error handling ──────────────────────────────────
+
+
+class TestMissingSecret:
+    @pytest.mark.no_server_secret
+    def test_start_without_secret_shows_friendly_message(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("AGT_SERVER_SECRET", raising=False)
+        result = _invoke(["start"])
+        assert result.exit_code == 1, result.output
+        assert "agt server init" in result.output
+        assert "Traceback" not in result.output
+
+    def test_config_reads_secret_file(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("AGT_SERVER_SECRET", raising=False)
+        secret_path = tmp_path / ".agt" / "server.secret"
+        secret_path.parent.mkdir(parents=True)
+        secret_path.write_text("b" * 64, encoding="utf-8")
+        cfg = ServerConfig.from_env()
+        assert cfg.secret == "b" * 64
+
+    def test_env_var_takes_precedence_over_file(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("AGT_SERVER_SECRET", "c" * 64)
+        secret_path = tmp_path / ".agt" / "server.secret"
+        secret_path.parent.mkdir(parents=True)
+        secret_path.write_text("d" * 64, encoding="utf-8")
+        cfg = ServerConfig.from_env()
+        assert cfg.secret == "c" * 64

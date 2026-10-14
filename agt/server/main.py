@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import signal
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
@@ -13,7 +12,7 @@ from typing import AsyncIterator
 import uvicorn
 from fastapi import FastAPI
 
-from .config import DaemonTarget, ServerConfig
+from .config import DaemonTarget, ServerConfig, ServerConfigError
 from .daemon_link import DaemonLink
 from .database import bind_get_db, make_engine, make_session_factory, session_scope
 from .mcp_server import build_catalog_mcp, catalog_mcp_asgi
@@ -21,6 +20,13 @@ from .middleware.auth import bind_verify_task_token
 from .migrate_schema import ensure_schema, migrate_identities_and_sessions
 from .migrate_sessions import migrate_sessions_json
 from .models import Base
+from .pidfile import (
+    DEFAULT_PID_FILE,
+    PID_FILE,
+    _default_pid_file,
+    _read_pidfile,
+    _signal_pid,
+)
 from .routes.daemons import router as daemons_router
 from .routes.heartbeat import router as heartbeat_router
 from .routes.identities import router as identities_router
@@ -34,47 +40,6 @@ from .routes.tasks import router as tasks_router
 from .services.runtime_service import prune_stale_runtimes
 
 log = logging.getLogger(__name__)
-
-
-# Default pid file location. Computed lazily so ``HOME`` overrides
-# (set in tests / by users with non-default homes) take effect.
-DEFAULT_PID_FILE = Path.home() / ".agt" / "server.pid"
-# Kept as an alias for backward-compatible imports.
-PID_FILE = DEFAULT_PID_FILE
-
-
-def _default_pid_file() -> Path:
-    """Return the canonical pid file path, resolving ``HOME`` at call time."""
-    return Path.home() / ".agt" / "server.pid"
-
-
-def _read_pidfile(path: Path | None = None) -> int | None:
-    """Return the live pid stored in ``path``, or None if stale/missing.
-
-    If ``path`` is None, falls back to the canonical ``~/.agt/server.pid``,
-    computed lazily (respects runtime ``HOME``).
-    """
-    target = path if path is not None else _default_pid_file()
-    if not target.exists():
-        return None
-    try:
-        pid = int(target.read_text(encoding="utf-8").strip())
-    except (ValueError, OSError):
-        return None
-    # Probe liveness: kill(pid, 0) succeeds iff the process exists.
-    try:
-        os.kill(pid, 0)
-        return pid
-    except ProcessLookupError:
-        return None
-    except PermissionError:
-        # Different user owns the process; treat as running but don't signal.
-        return pid
-
-
-def _signal_pid(pid: int, sig: int = signal.SIGTERM) -> None:
-    """Send ``sig`` to ``pid``. Raises on ESRCH (process already gone)."""
-    os.kill(pid, sig)
 
 
 def create_app(config: ServerConfig | None = None) -> FastAPI:
@@ -226,8 +191,27 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     return app
 
 
+class _UnconfiguredApp:
+    """Placeholder ASGI app used when the server is imported without a secret.
+
+    This keeps ``uvicorn agt.server.main:app`` from crashing at import time;
+    instead it fails clearly when uvicorn actually tries to serve traffic.
+    """
+
+    def __init__(self, message: str) -> None:
+        self._message = message
+
+    async def __call__(self, scope, receive, send):
+        raise RuntimeError(self._message)
+
+
 # Module-level default app for `uvicorn agt.server.main:app`.
-app = create_app()
+# If no secret is configured, import succeeds but serving fails with a
+# clear message instead of a traceback at module load time.
+try:
+    app = create_app()
+except ServerConfigError as exc:
+    app = _UnconfiguredApp(str(exc))
 
 
 def main() -> int:

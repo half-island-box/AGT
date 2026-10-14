@@ -48,7 +48,9 @@ def bind_verify_task_token(app, secret: str) -> None:
         if not x_task_token:
             raise HTTPException(status_code=401, detail="token required")
         try:
-            claims = TaskToken.verify(x_task_token, secret)
+            claims = TaskToken.verify(
+                x_task_token, secret, issuer="agt-server"
+            )
         except PermissionError:
             raise HTTPException(status_code=401, detail="invalid token") from None
         if x_task_id and claims.get("task_id") != x_task_id:

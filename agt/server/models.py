@@ -96,6 +96,13 @@ class JobModel(Base):
     # blocked jobs have no Step/input_message until activation, yet the
     # activation runs in a later transaction. NULL on non-SOP jobs.
     sop_node: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Phase 5 loops: which declared loop this job belongs to, which
+    # iteration it represents (0 for non-loop jobs), and a duplicated JSON
+    # blob with loop-level config so the loop controller can recover state
+    # without a separate table.
+    sop_loop_name: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    sop_iteration: Mapped[int] = mapped_column(Integer, nullable=False, default=0, index=True)
+    sop_loop_meta: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Goal mode: root-Job metadata JSON — {"mode":"goal","budget":
     # {max_depth,max_descendants,max_batch},"template":…,"goal":…,
     # "goal_sha256":…}. Only goal roots write this; children, SOP nodes

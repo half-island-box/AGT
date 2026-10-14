@@ -784,9 +784,12 @@ async def run_background(config: DaemonConfig) -> None:
             except Exception as exc:
                 log.debug("on-connect runtimes.register failed: %s", exc)
 
+        daemon_url = config.daemon_url or f"ws://0.0.0.0:{config.ws_listen_port}"
         ws_server = DaemonWsServer(
             port=config.ws_listen_port,
             secret=config.server_secret,
+            daemon_id=config.daemon_id,
+            url=daemon_url,
             on_connect=_push_snapshot_on_connect,
         )
         await ws_server.start()

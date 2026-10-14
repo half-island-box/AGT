@@ -81,6 +81,9 @@ async def create_job(
     root_job_id: str | None = None,
     sop_node: str | None = None,
     goal_meta: str | None = None,
+    sop_loop_name: str | None = None,
+    sop_iteration: int = 0,
+    sop_loop_meta: str | None = None,
 ) -> JobModel:
     """Create a Job and (by default) its first pending Step.
 
@@ -128,6 +131,9 @@ async def create_job(
         agent_cwd=agent_cwd,
         sop_node=sop_node,
         goal_meta=goal_meta,
+        sop_loop_name=sop_loop_name,
+        sop_iteration=sop_iteration,
+        sop_loop_meta=sop_loop_meta,
         created_at=now,
         updated_at=now,
     )
@@ -312,6 +318,7 @@ def _next_status(current: str, event: str) -> str:
             "step_needs_input": "waiting_input",
             "step_failed": "failed",
             "step_spawned": "waiting_children",
+            "step_interrupted": "waiting_input",
             "cancel": "cancelled",
         },
         "waiting_input": {"input_received": "running", "cancel": "cancelled"},
@@ -368,6 +375,63 @@ async def cancel_job(db: AsyncSession, job_id: str) -> tuple[JobModel, list[tupl
     if job.parent_job_id is not None:
         await on_child_done(db, job.parent_job_id)
 
+    return job, notify_list
+
+
+async def stop_chat_job(
+    db: AsyncSession, job_id: str
+) -> tuple[JobModel, list[tuple[str, str]]]:
+    """Interrupt the current chat turn but keep the conversation resumable.
+
+    This is intentionally different from :func:`cancel_job`: cancellation is
+    terminal, while stop marks the interrupted Step terminal and moves the
+    Chat Job back to ``waiting_input`` so the user can ask a follow-up turn.
+
+    Only a simple Chat Job is supported. Jobs that have spawned children use
+    the terminal cancel path; allowing their subtree to continue while the
+    parent waits for input would make the result tree ambiguous.
+    """
+    job = await get_job(db, job_id)
+    if job is None:
+        raise ValueError({"type": "job_not_found", "message": job_id})
+    if job.job_type != "chat":
+        raise ValueError({
+            "type": "stop_not_supported",
+            "message": f"job {job_id} is not a chat job",
+        })
+    if job.status == "waiting_input":
+        return job, []
+    if job.status != "running":
+        raise ValueError({
+            "type": "stop_not_supported",
+            "message": f"job {job_id} is {job.status}, expected running",
+        })
+
+    descendants = await _descendant_closure(db, job_id)
+    if descendants:
+        raise ValueError({
+            "type": "stop_has_children",
+            "message": (
+                f"job {job_id} has spawned children; use cancel instead"
+            ),
+        })
+
+    notify_list: list[tuple[str, str]] = []
+    running_steps = [
+        step for step in job.steps if step.status == "running"
+    ]
+    if not running_steps:
+        raise ValueError({
+            "type": "no_running_step",
+            "message": f"job {job_id} has no running step to stop",
+        })
+    for step in running_steps:
+        step.status = "cancelled"
+        step.updated_at = _now()
+        if step.daemon_id:
+            notify_list.append((step.daemon_id, step.task_id))
+
+    await transition_job(db, job_id, "step_interrupted")
     return job, notify_list
 
 
@@ -665,7 +729,16 @@ async def try_wake_dependents(db: AsyncSession, terminal_job_id: str) -> list[st
     The activation itself may end in ``failed`` (missing upstream
     output); sop_service re-invokes this function there so failure
     propagates down the chain (review G1).
+
+    Phase 5 loops: a terminal loop job may also allow the next iteration
+    (or loop completion) to proceed.
     """
+    terminal_job = await db.get(JobModel, terminal_job_id)
+    if terminal_job is not None and terminal_job.sop_loop_name:
+        from .sop_loop_service import check_loop_advance
+
+        await check_loop_advance(db, terminal_job.root_job_id)
+
     dep_rows = (
         await db.execute(
             select(JobParentModel.job_id).where(

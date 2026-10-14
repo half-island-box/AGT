@@ -34,6 +34,8 @@ from agt.server.migrate_schema import ensure_schema
 from agt.server.models import Base, JobModel, SessionModel, TaskModel
 
 SECRET = "remote-history-test-secret"
+TEST_DAEMON_ID = "test-daemon"
+TEST_DAEMON_URL = "ws://test"
 
 
 def _now() -> str:
@@ -45,7 +47,9 @@ def _now() -> str:
 
 class TestDaemonSessionHistoryHandler:
     def test_returns_serialized_messages(self) -> None:
-        server = DaemonWsServer(port=0, secret="x")
+        server = DaemonWsServer(
+            port=0, secret="x", daemon_id=TEST_DAEMON_ID, url=TEST_DAEMON_URL
+        )
 
         def _fake_load(provider, session_id):
             assert provider == "claude"
@@ -68,7 +72,9 @@ class TestDaemonSessionHistoryHandler:
         ]
 
     def test_not_implemented_provider(self) -> None:
-        server = DaemonWsServer(port=0, secret="x")
+        server = DaemonWsServer(
+            port=0, secret="x", daemon_id=TEST_DAEMON_ID, url=TEST_DAEMON_URL
+        )
 
         def _fake_load(provider, session_id):
             raise NotImplementedError("no reader for cursor")
@@ -83,7 +89,9 @@ class TestDaemonSessionHistoryHandler:
         assert result["messages"] == []
 
     def test_missing_fields_rejected(self) -> None:
-        server = DaemonWsServer(port=0, secret="x")
+        server = DaemonWsServer(
+            port=0, secret="x", daemon_id=TEST_DAEMON_ID, url=TEST_DAEMON_URL
+        )
 
         async def _run() -> None:
             with pytest.raises(ValueError, match="validation_error"):

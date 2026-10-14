@@ -9,6 +9,32 @@ from pathlib import Path
 from ..ids import daemon_id_from_url
 
 
+class ServerConfigError(RuntimeError):
+    """Raised when the server configuration is incomplete or invalid."""
+
+
+def _default_secret_path() -> Path:
+    """Return the canonical server secret file path."""
+    return Path.home() / ".agt" / "server.secret"
+
+
+def _load_server_secret() -> str:
+    """Load the server secret: env var first, then ~/.agt/server.secret.
+
+    Returns the secret string if found, otherwise an empty string.
+    """
+    env_secret = os.environ.get("AGT_SERVER_SECRET", "").strip()
+    if env_secret:
+        return env_secret
+    path = _default_secret_path()
+    if path.exists():
+        try:
+            return path.read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
+    return ""
+
+
 @dataclass
 class DaemonTarget:
     """One configured remote daemon (reverse-dial target).
@@ -117,11 +143,12 @@ class ServerConfig:
 
     @classmethod
     def from_env(cls) -> "ServerConfig":
-        secret = os.environ.get("AGT_SERVER_SECRET", "")
+        secret = _load_server_secret()
         if not secret:
-            raise RuntimeError(
-                "AGT_SERVER_SECRET environment variable is required "
-                "(generate with: openssl rand -hex 32)"
+            raise ServerConfigError(
+                "AGT_SERVER_SECRET is not configured. "
+                "Run `agt server init` to generate one, or set the "
+                "AGT_SERVER_SECRET environment variable."
             )
         daemons_path = os.environ.get(
             "AGT_DAEMONS_FILE", str(Path.home() / ".agt" / "daemons")
@@ -142,4 +169,4 @@ class ServerConfig:
         )
 
 
-__all__ = ["ServerConfig", "DaemonTarget"]
+__all__ = ["ServerConfig", "DaemonTarget", "ServerConfigError"]

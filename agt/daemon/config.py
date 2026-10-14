@@ -157,8 +157,12 @@ class DaemonConfig:
     # URL when available); ``daemon_name`` is the human-readable label (from
     # ``~/.agt/daemons`` name, or the device name). name may change without
     # affecting id; changing the URL changes the id (address moved).
+    # ``daemon_url`` is the URL this daemon advertises for itself, taken from
+    # the matching entry in ``~/.agt/daemons`` (used in the daemon_token's
+    # ``url`` claim for auditability).
     daemon_id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
     daemon_name: str = field(default_factory=socket.gethostname)
+    daemon_url: str = ""
     device_name: str = field(default_factory=socket.gethostname)
     runtime_name: str = ""
 
@@ -227,6 +231,7 @@ class DaemonConfig:
             server_secret=os.environ.get("AGT_SERVER_SECRET", ""),
             daemon_id=daemon_id,
             daemon_name=daemon_name,
+            daemon_url=daemon_url or "",
             device_name=os.environ.get("AGT_DEVICE_NAME") or default.device_name,
             runtime_name=os.environ.get("AGT_RUNTIME_NAME", ""),
             max_concurrent_tasks=int(os.environ.get("AGT_MAX_CONCURRENT", str(default.max_concurrent_tasks))),

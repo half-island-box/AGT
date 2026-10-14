@@ -49,6 +49,8 @@ class SopNodeStatus(BaseModel):
     name: str
     job_id: str
     status: str
+    iteration: int = 0
+    loop_name: str | None = None
     depends_on: list[str] = []
     artifacts: list[str] = []
     artifact_details: list[SopArtifactSummary] = []
@@ -67,6 +69,7 @@ class SopNodeLogStep(BaseModel):
 
     task_id: str
     status: str
+    iteration: int = 0
     session_id: str | None = None
     exit_code: int | None = None
     stdout: str | None = None
@@ -207,10 +210,17 @@ async def sop_status(
         if job_id not in job_to_session:
             job_to_session[job_id] = session_id
 
+    def _job_display_name(j: JobModel) -> str:
+        meta = json.loads(j.sop_node) if j.sop_node else {}
+        name = meta.get("name", j.job_id)
+        if j.sop_iteration > 0:
+            return f"{name}#{j.sop_iteration}"
+        return name
+
     nodes: list[SopNodeStatus] = []
     for job in rows:
         meta = json.loads(job.sop_node) if job.sop_node else {}
-        dep_names = []
+        dep_names: list[str] = []
         for link in (
             await db.execute(
                 select(JobParentModel.parent_job_id).where(
@@ -220,7 +230,7 @@ async def sop_status(
         ).scalars().all():
             up = by_job_id.get(link)
             if up is not None and up.sop_node:
-                dep_names.append(json.loads(up.sop_node).get("name", link))
+                dep_names.append(_job_display_name(up))
         arts = (
             await db.execute(
                 select(ArtifactModel).where(ArtifactModel.job_id == job.job_id)
@@ -240,6 +250,8 @@ async def sop_status(
                 name=meta.get("name", job.job_id),
                 job_id=job.job_id,
                 status=job.status,
+                iteration=job.sop_iteration,
+                loop_name=job.sop_loop_name,
                 depends_on=dep_names,
                 artifacts=[make_artifact_uri(a.artifact_id) for a in arts],
                 artifact_details=[
@@ -269,9 +281,9 @@ async def sop_node_log(
     """Full execution log (stdout/stderr) for one SOP node, by name.
 
     Resolves the node name against each DAG node's ``sop_node.name``
-    (JSON column), then returns every Step under that Job in creation
-    order — not just the latest — so the whole execution history of the
-    node is observable. 404 when the node does not exist under this root.
+    (JSON column), then returns every Step under every matching Job (all
+    iterations for loop nodes) in creation order. 404 when the node does
+    not exist under this root.
     """
     rows = (
         await db.execute(
@@ -282,43 +294,50 @@ async def sop_node_log(
         )
     ).scalars().all()
 
-    job: JobModel | None = None
-    for candidate in rows:
-        meta = json.loads(candidate.sop_node) if candidate.sop_node else {}
-        if meta.get("name") == node_name:
-            job = candidate
-            break
-
-    if job is None:
+    jobs = [
+        candidate for candidate in rows
+        if json.loads(candidate.sop_node).get("name") == node_name
+        if candidate.sop_node
+    ]
+    if not jobs:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"node '{node_name}' not found under sop '{root_job_id}'",
         )
 
+    # Sort by iteration so loop nodes appear in iteration order.
+    jobs.sort(key=lambda j: j.sop_iteration)
+    primary = jobs[0]
+
+    job_ids = [j.job_id for j in jobs]
     steps = (
         await db.execute(
             select(TaskModel)
-            .where(TaskModel.job_id == job.job_id)
+            .where(TaskModel.job_id.in_(job_ids))
             .order_by(TaskModel.created_at)
         )
     ).scalars().all()
 
-    meta = json.loads(job.sop_node) if job.sop_node else {}
+    meta = json.loads(primary.sop_node) if primary.sop_node else {}
     provider = (
-        job.provider
+        primary.provider
         or meta.get("explicit_provider")
         or meta.get("provider_hint")
     )
 
+    # Map step -> iteration via its owning job.
+    job_to_iteration = {j.job_id: j.sop_iteration for j in jobs}
+
     return SopNodeLogResponse(
         node_name=node_name,
-        job_id=job.job_id,
-        status=job.status,
+        job_id=primary.job_id,
+        status=primary.status,
         provider=provider,
         steps=[
             SopNodeLogStep(
                 task_id=s.task_id,
                 status=s.status,
+                iteration=job_to_iteration.get(s.job_id, 0),
                 session_id=s.session_id,
                 exit_code=s.exit_code,
                 stdout=s.stdout,

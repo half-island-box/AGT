@@ -85,8 +85,7 @@ Session metadata lives in `<project>/.agt/sessions.json`. In Git repositories, a
 ## Server and daemon mode
 
 ```bash
-export AGT_SERVER_SECRET="$(openssl rand -hex 32)"
-
+agt server init          # one-time: generates ~/.agt/server.secret
 agt server start --detach
 agt daemon start --detach
 
@@ -97,15 +96,15 @@ agt daemon stop
 agt server stop
 ```
 
+`agt server init` persists `AGT_SERVER_SECRET` to `~/.agt/server.secret` with `0o600` permissions; `agt server start` auto-discovers it. If you prefer environment variables, set `AGT_SERVER_SECRET` manually and skip the init step.
+
 Default: server on `127.0.0.1:8420`, OpenAPI at [http://127.0.0.1:8420/docs](http://127.0.0.1:8420/docs).
 
 Remote daemons connect via HTTP or **reverse-dial WebSocket** (server dials out, NAT-friendly). See the [quick-start guide](<docs/guide%20docs/quick_start.md>).
 
 ## VS Code extension (early)
 
-The `vscode/` directory holds a TypeScript UI client for the server. Chat covers daemon/agent/identity selection with provider logos, daemon session history, live SSE output, multi-turn continuation and cancellation, in zh/en text; the **visual SOP editor** supports editable YAML DAGs and run monitoring; **Goal mode** submits open-ended goals, tracks the dynamically growing Job tree, answers `AGT-ASK` questions, cancels cascades, and exports a run as a SOP draft.
-
-In the daemon tree, double-click a daemon or provider to open the docked Chat page with that target preselected. Chat defaults its agent working directory to the active VS Code workspace folder, and its configuration/session sidebar can be collapsed, expanded, and dragged to a custom width.
+The `vscode/` directory holds a TypeScript UI client for the server. The current milestone includes server lifecycle, daemon tree, status bar, settings, and Chat mode. Chat supports daemon/agent/identity selection with provider logos, daemon session history, live SSE output, multi-turn continuation, cancellation, and zh/en static text; SOP and Goal modes are planned in later milestones.
 
 ```bash
 cd vscode
@@ -184,6 +183,7 @@ agt sop validate pipeline.yaml && agt sop run pipeline.yaml
 | `agt probe` | Discover installed agent CLIs. |
 | `agt run` | Run one prompt locally or through a daemon. |
 | `agt chat` | Start, list, or resume an interactive agent session. |
+| `agt session delete` | Permanently delete one or more server-recorded chat sessions. |
 | `agt sop` | Validate / submit / run / status / log static DAG pipelines. |
 | `agt goal` | Submit / run / status / log / input / cancel / artifacts / export goal-driven runs. |
 | `agt artifact` | List and download declared deliverables. |

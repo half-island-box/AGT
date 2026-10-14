@@ -33,6 +33,7 @@ import yaml
 log = logging.getLogger(__name__)
 
 SOP_MAX_NODES = 64
+SOP_MAX_ITERATIONS = 100
 
 _PLACEHOLDER_RE = re.compile(r"\$\{([^}]+)\}")
 
@@ -57,6 +58,21 @@ class SOPIdentity:
 
 
 @dataclass
+class SOPLoop:
+    """A declared cycle: a set of nodes that execute repeatedly.
+
+    ``entry`` names the node that starts each iteration. If omitted, the
+    first node in ``nodes`` is the entry. ``max_iterations`` caps the loop
+    to guard against runaway agent invocation budgets.
+    """
+
+    name: str
+    nodes: list[str]
+    max_iterations: int
+    entry: str | None = None
+
+
+@dataclass
 class SOPNode:
     name: str
     identity: str | None = None
@@ -66,6 +82,7 @@ class SOPNode:
     provider: str | None = None
     daemon: str | None = None
     dir: str | None = None
+    loop_name: str | None = None
 
     def placeholders(self) -> list[str]:
         return _PLACEHOLDER_RE.findall(self.input)
@@ -83,6 +100,7 @@ class SOPSpec:
     nodes: list[SOPNode]
     edges: list[SOPEdge]
     identities: dict[str, SOPIdentity]
+    loops: list[SOPLoop] = field(default_factory=list)
 
     def node(self, name: str) -> SOPNode:
         for n in self.nodes:
@@ -106,12 +124,14 @@ def parse_sop(raw: str | dict) -> SOPSpec:
 
     identities = _parse_identities(data.get("identities"))
     nodes = _parse_tasks(data.get("tasks"), identities)
+    loops = _parse_loops(data.get("loops"), nodes)
+    _apply_loop_names(nodes, loops)
     _validate_graph(nodes)
     edges = [
         SOPEdge(dependent=n.name, upstream=dep) for n in nodes for dep in n.depends_on
     ]
     _validate_placeholders(nodes)
-    return SOPSpec(name=name, nodes=nodes, edges=edges, identities=identities)
+    return SOPSpec(name=name, nodes=nodes, edges=edges, identities=identities, loops=loops)
 
 
 def _parse_identities(raw) -> dict[str, SOPIdentity]:
@@ -208,6 +228,81 @@ def _parse_tasks(raw, identities: dict[str, SOPIdentity]) -> list[SOPNode]:
     return nodes
 
 
+def _parse_loops(raw, nodes: list[SOPNode]) -> list[SOPLoop]:
+    """Parse the optional ``loops:`` top-level section."""
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise SOPError("'loops' must be a list")
+
+    by_name = {n.name: n for n in nodes}
+    loops: list[SOPLoop] = []
+    seen_nodes: set[str] = set()
+
+    for entry in raw:
+        if not isinstance(entry, dict):
+            raise SOPError("each loop must be a mapping")
+        name = entry.get("name")
+        if not isinstance(name, str) or not name:
+            raise SOPError("each loop requires a non-empty 'name'")
+
+        node_names = entry.get("nodes") or []
+        if not isinstance(node_names, list) or not all(
+            isinstance(n, str) for n in node_names
+        ):
+            raise SOPError(f"loop '{name}': 'nodes' must be a non-empty list of names")
+        if not node_names:
+            raise SOPError(f"loop '{name}': 'nodes' must be non-empty")
+        if len(node_names) != len(set(node_names)):
+            raise SOPError(f"loop '{name}': duplicate node in 'nodes'")
+
+        for n in node_names:
+            if n not in by_name:
+                raise SOPError(f"loop '{name}' references unknown task '{n}'")
+            if n in seen_nodes:
+                raise SOPError(f"task '{n}' belongs to more than one loop")
+            seen_nodes.add(n)
+
+        max_iter = entry.get("max_iterations")
+        if not isinstance(max_iter, int) or max_iter < 1:
+            raise SOPError(
+                f"loop '{name}': 'max_iterations' must be a positive integer"
+            )
+        if max_iter > SOP_MAX_ITERATIONS:
+            raise SOPError(
+                f"loop '{name}': max_iterations exceeds {SOP_MAX_ITERATIONS}"
+            )
+
+        entry_node = entry.get("entry")
+        if entry_node is not None:
+            if not isinstance(entry_node, str):
+                raise SOPError(f"loop '{name}': 'entry' must be a string")
+            if entry_node not in node_names:
+                raise SOPError(
+                    f"loop '{name}': entry '{entry_node}' is not in 'nodes'"
+                )
+
+        loops.append(
+            SOPLoop(
+                name=name,
+                nodes=list(node_names),
+                max_iterations=max_iter,
+                entry=entry_node or node_names[0],
+            )
+        )
+    return loops
+
+
+def _apply_loop_names(nodes: list[SOPNode], loops: list[SOPLoop]) -> None:
+    """Write each node's ``loop_name`` from the parsed loops."""
+    membership: dict[str, str] = {}
+    for loop in loops:
+        for n in loop.nodes:
+            membership[n] = loop.name
+    for node in nodes:
+        node.loop_name = membership.get(node.name)
+
+
 def _validate_graph(nodes: list[SOPNode]) -> None:
     by_name = {n.name: n for n in nodes}
     for n in nodes:
@@ -215,27 +310,46 @@ def _validate_graph(nodes: list[SOPNode]) -> None:
             if dep not in by_name:
                 raise SOPError(f"task '{n.name}' depends on unknown task '{dep}'")
 
-    # Cycle detection: Kahn's algorithm; orphans are a warning only.
-    indeg = {n.name: len(n.depends_on) for n in nodes}
-    ready = [n.name for n in nodes if indeg[n.name] == 0]
+    # Cycle detection: Kahn's algorithm on the graph AFTER removing edges
+    # that stay inside a single declared loop. Cycles within a loop are
+    # intentional; cycles outside any loop are still rejected.
+    def _same_loop(a: str, b: str) -> bool:
+        return by_name[a].loop_name is not None and by_name[a].loop_name == by_name[b].loop_name
+
+    effective_indeg: dict[str, int] = {}
     dependents: dict[str, list[str]] = {n.name: [] for n in nodes}
     for n in nodes:
+        indeg = 0
         for dep in n.depends_on:
-            dependents[dep].append(n.name)
+            if not _same_loop(n.name, dep):
+                indeg += 1
+                dependents[dep].append(n.name)
+        effective_indeg[n.name] = indeg
+
+    ready = [n.name for n in nodes if effective_indeg[n.name] == 0]
     visited = 0
     while ready:
         current = ready.pop()
         visited += 1
         for d in dependents[current]:
-            indeg[d] -= 1
-            if indeg[d] == 0:
+            effective_indeg[d] -= 1
+            if effective_indeg[d] == 0:
                 ready.append(d)
     if visited != len(nodes):
-        raise SOPError("SOP contains a dependency cycle")
+        raise SOPError("SOP contains a dependency cycle outside a declared loop")
 
     # Orphan warning: a node with no incoming AND no outgoing edges.
+    # Loop nodes always have intra-loop edges, so they are never orphans.
     for n in nodes:
-        if not n.depends_on and not dependents[n.name]:
+        if n.loop_name is not None:
+            continue
+        has_outgoing = any(
+            not _same_loop(n.name, d) for d in n.depends_on
+        )
+        has_incoming = any(
+            not _same_loop(d, n.name) for d in dependents[n.name]
+        )
+        if not has_incoming and not has_outgoing:
             log.warning("SOP node '%s' is an orphan (no deps, no dependents)", n.name)
 
 
@@ -266,8 +380,10 @@ def _validate_placeholders(nodes: list[SOPNode]) -> None:
 
 __all__ = [
     "SOP_MAX_NODES",
+    "SOP_MAX_ITERATIONS",
     "SOPError",
     "SOPIdentity",
+    "SOPLoop",
     "SOPNode",
     "SOPEdge",
     "SOPSpec",

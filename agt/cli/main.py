@@ -1423,12 +1423,153 @@ def _truncate(text: str, limit: int) -> str:
     return text[: limit - 1] + "…"
 
 
+# ── session management (server-side chat sessions) ────────────────
+
+
+@cli.group()
+def session() -> None:
+    """Manage chat sessions recorded by the Server."""
+
+
+@session.command("delete")
+@click.argument("session_ids", nargs=-1, required=True)
+@click.option(
+    "--daemon",
+    "daemon_id",
+    required=True,
+    help="Daemon that owns every session being deleted.",
+)
+@click.option(
+    "--provider",
+    required=True,
+    help="Provider that owns every session being deleted.",
+)
+@click.option(
+    "--yes",
+    "-y",
+    "assume_yes",
+    is_flag=True,
+    help="Skip the permanent-deletion confirmation prompt.",
+)
+@click.option(
+    "--finalize-active",
+    is_flag=True,
+    help="Cancel a waiting_input job before deleting its session.",
+)
+@click.option(
+    "--server-url",
+    default="http://127.0.0.1:8420",
+    show_default=True,
+    envvar="AGT_SERVER_URL",
+)
+def session_delete(
+    session_ids: tuple[str, ...],
+    daemon_id: str,
+    provider: str,
+    assume_yes: bool,
+    finalize_active: bool,
+    server_url: str,
+) -> None:
+    """Permanently delete one or more provider chat sessions.
+
+    Removes the AGT session pointers, the daemon-side cwd index entry, and
+    the provider transcript. SESSION_IDS must all belong to the same
+    DAEMON and PROVIDER.
+    """
+    # Preserve order while dropping duplicates from shell completion or
+    # repeated paste; deleting the same transcript twice is harmless but noisy.
+    unique_ids = list(dict.fromkeys(session_ids))
+    if not assume_yes:
+        sample = ", ".join(sid[:8] for sid in unique_ids[:3])
+        more = f" … (+{len(unique_ids) - 3})" if len(unique_ids) > 3 else ""
+        click.confirm(
+            f"Permanently delete {len(unique_ids)} {provider} session(s) "
+            f"on daemon '{daemon_id}' ({sample}{more})?",
+            abort=True,
+        )
+
+    async def _run() -> tuple[list[str], list[tuple[str, str]]]:
+        deleted: list[str] = []
+        failed: list[tuple[str, str]] = []
+        async with ServerClient(
+            base_url=server_url,
+            daemon_id="cli-direct",
+        ) as client:
+            for session_id in unique_ids:
+                try:
+                    await client.delete_session(
+                        session_id,
+                        provider=provider,
+                        daemon_id=daemon_id,
+                        finalize_active=finalize_active,
+                    )
+                    deleted.append(session_id)
+                except Exception as exc:
+                    failed.append((session_id, str(exc)))
+        return deleted, failed
+
+    try:
+        deleted, failed = asyncio.run(_run())
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    for session_id in deleted:
+        click.echo(f"🗑️  {session_id}: deleted")
+    for session_id, reason in failed:
+        click.echo(f"⚠️  {session_id}: {reason}", err=True)
+    click.echo(f"{len(deleted)} deleted, {len(failed)} failed.")
+    if failed:
+        sys.exit(1)
+
+
 # ── server (Phase 2) ──────────────────────────────────────────────
 
 
 @cli.group()
 def server() -> None:
     """Server-related subcommands."""
+
+
+@server.command("init")
+@click.option(
+    "--force",
+    "-f",
+    is_flag=True,
+    help="Regenerate the secret even if one already exists.",
+)
+def server_init(force: bool) -> None:
+    """Create the initial server secret in ~/.agt/server.secret.
+
+    This is the fastest way to get a local Server running: it generates a
+    secure random secret, persists it, and makes it auto-discoverable by
+    ``agt server start`` without exporting an environment variable every
+    time. Run it once per machine (or once per ``~/.agt`` directory).
+    """
+    import secrets
+
+    agt_dir = Path.home() / ".agt"
+    agt_dir.mkdir(parents=True, exist_ok=True)
+    secret_path = agt_dir / "server.secret"
+
+    if secret_path.exists() and not force:
+        click.echo(
+            f"Server secret already exists at {secret_path}; "
+            "use --force to regenerate."
+        )
+    else:
+        secret = secrets.token_hex(32)
+        secret_path.write_text(secret, encoding="utf-8")
+        secret_path.chmod(0o600)
+        click.echo(f"Generated server secret at {secret_path}")
+
+    click.echo(
+        "\nThe secret is now auto-loaded by `agt server start`. "
+        "If you prefer environment variables, run:"
+    )
+    click.echo(
+        f'    export AGT_SERVER_SECRET="$(cat {secret_path})"'
+    )
 
 
 def _stop_if_running(pid: int, label: str, timeout: float = 10.0) -> None:
@@ -1510,11 +1651,22 @@ def server_start(
     Foreground (default): parent blocks; Ctrl-C to stop.
     ``--detach``: fork a child running uvicorn; parent exits immediately.
     """
+    # Validate configuration before importing the server module or spawning
+    # a detached child. This produces a friendly CLI message instead of a
+    # raw traceback when AGT_SERVER_SECRET is missing.
+    from ..server.config import ServerConfig, ServerConfigError
+
+    try:
+        ServerConfig.from_env()
+    except ServerConfigError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
     # Replace any already-running server first (both modes). Foreground
     # would otherwise fail to bind the port ("address already in use");
     # detached would leave a stale process still serving older code.
     pid_path = Path(pid_file) if pid_file else Path.home() / ".agt" / "server.pid"
-    from ..server.main import _read_pidfile as _server_read_pidfile
+    from ..server.pidfile import _read_pidfile as _server_read_pidfile
     existing = _server_read_pidfile(pid_path)
     if existing is not None:
         _stop_if_running(existing, "server")
@@ -1578,7 +1730,7 @@ def server_start(
 )
 def server_stop(pid_file: str | None) -> None:
     """Signal the running server to terminate (SIGTERM)."""
-    from ..server.main import _signal_pid
+    from ..server.pidfile import _signal_pid
 
     path = _resolve_server_pid_file(pid_file)
     pid = _read_pidfile_live(path)
@@ -1621,8 +1773,8 @@ def _resolve_server_pid_file(explicit: str | None) -> Path:
 
 
 def _read_pidfile_live(path) -> int | None:
-    """Thin wrapper around ``server.main._read_pidfile`` for CLI callers."""
-    from ..server.main import _read_pidfile
+    """Thin wrapper around ``server.pidfile._read_pidfile`` for CLI callers."""
+    from ..server.pidfile import _read_pidfile
 
     return _read_pidfile(path)
 
@@ -2762,11 +2914,14 @@ def token_issue(
     Prints the token to stdout; the Server will accept it on requests that
     carry ``X-Task-Token: <token>`` and ``X-Task-Id: <task-id>``.
     """
-    secret = os.environ.get("AGT_SERVER_SECRET", "")
+    from ..server.config import _load_server_secret
+
+    secret = _load_server_secret()
     if not secret:
         click.echo(
-            "Error: AGT_SERVER_SECRET env var is required to issue tokens "
-            "(generate with: openssl rand -hex 32).",
+            "Error: AGT_SERVER_SECRET is not configured. "
+            "Run `agt server init` to generate one, or set the "
+            "AGT_SERVER_SECRET environment variable.",
             err=True,
         )
         sys.exit(1)

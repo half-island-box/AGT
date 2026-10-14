@@ -223,6 +223,26 @@ def ensure_schema(conn: Connection) -> None:
         )
         log.info("Migrated jobs table: added sop_node column")
 
+    # Phase 5 loops: loop membership, iteration counter, and duplicated
+    # loop-level metadata on each loop job.
+    if _table_exists(conn, "jobs") and "sop_loop_name" not in _column_names(conn, "jobs"):
+        conn.exec_driver_sql(
+            "ALTER TABLE jobs ADD COLUMN sop_loop_name VARCHAR(64)"
+        )
+        conn.exec_driver_sql(
+            "ALTER TABLE jobs ADD COLUMN sop_iteration INTEGER NOT NULL DEFAULT 0"
+        )
+        conn.exec_driver_sql(
+            "ALTER TABLE jobs ADD COLUMN sop_loop_meta TEXT"
+        )
+        conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_jobs_sop_loop_name ON jobs (sop_loop_name)"
+        )
+        conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_jobs_sop_iteration ON jobs (sop_iteration)"
+        )
+        log.info("Migrated jobs table: added sop loop columns")
+
     # Goal mode: root-Job metadata JSON (per-run spawn budget, template
     # fingerprint, raw goal text). NULL on non-goal jobs.
     if _table_exists(conn, "jobs") and "goal_meta" not in _column_names(conn, "jobs"):

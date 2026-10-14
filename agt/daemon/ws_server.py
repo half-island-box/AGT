@@ -6,14 +6,16 @@ the other way around. The daemon needs to:
 1. Bind a public WebSocket endpoint on ``0.0.0.0:<port>`` (default 8422).
 2. Authenticate the caller — anyone on the network could connect, and we
    only want to accept connections from a Server that holds the shared
-   HMAC secret.
-3. Send a ``heartbeat_ack{rpc_v1:true}`` frame as capability negotiation.
+   secret and targets this daemon's identity.
+3. Authenticate itself back to the Server with a ``daemon_token`` embedded
+   in the ``heartbeat_ack`` frame.
 4. Expose the resulting :class:`WsRpcLink` so the daemon's claim loop
    (``_claim_loop``) can issue ``tasks.claim`` over it.
 
 Authentication uses :class:`TaskToken.verify` on an ``X-Server-Token``
-header (signed with ``sub=server:<id>``). A failed token closes the
-connection with code 1008 before any frames are read.
+header. The token MUST carry an ``aud`` claim matching this daemon's
+``daemon_id`` and an ``iss`` claim of ``agt-server``. A failed token closes
+the connection with code 1008 before any frames are read.
 
 The daemon answers two inbound RPC requests: ``tasks.available`` (wakes the
 claim loop) and ``session.history`` (reads a session transcript from this
@@ -27,11 +29,17 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from websockets.asyncio.server import ServerConnection, serve
 
-from ..agent_history import load_history
+from ..agent_history import (
+    delete_provider_session,
+    find_provider_session_files,
+    load_history,
+)
+from ..task.session import CwdSessionStore
 from ..comm.errors import WSRPCUnavailable
 from ..comm.wsrpc_link import WsRpcLink
 from ..server.services.auth_service import TaskToken
@@ -53,11 +61,15 @@ class DaemonWsServer:
         self,
         port: int,
         secret: str,
+        daemon_id: str,
+        url: str,
         *,
         on_connect: OnConnectHook | None = None,
     ) -> None:
         self._port = port
         self._secret = secret
+        self._daemon_id = daemon_id
+        self._url = url
         self._server: serve | None = None
         self.current_link: WsRpcLink | None = None
         self._link_lock = asyncio.Lock()
@@ -104,16 +116,28 @@ class DaemonWsServer:
             await ws.close(code=1008, reason="token required")
             return
         try:
-            TaskToken.verify(token, self._secret)
+            TaskToken.verify(
+                token, self._secret, audience=self._daemon_id, issuer="agt-server"
+            )
         except PermissionError as exc:
             log.info("DaemonWsServer: invalid server token (%s); closing 1008", exc)
             await ws.close(code=1008, reason="invalid token")
             return
 
-        # 2. Handshake: capability negotiation. We don't gate the link on
-        #    this — daemon always supports rpc_v1 — but it gives the
-        #    caller a single round-trip ack.
-        await ws.send(json.dumps({"type": "heartbeat_ack", "rpc_v1": True}))
+        # 2. Handshake: capability negotiation + daemon identity proof.
+        #    The server must verify our daemon_token before accepting RPC.
+        daemon_token = TaskToken.create_daemon(
+            self._daemon_id, self._url, self._secret
+        )
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "heartbeat_ack",
+                    "rpc_v1": True,
+                    "daemon_token": daemon_token,
+                }
+            )
+        )
 
         # 3. Build the bidirectional link and start its read loop. The
         #    read loop runs until the socket drops; we then clear
@@ -170,6 +194,8 @@ class DaemonWsServer:
             return self._handle_tasks_cancel(body)
         if method == "session.history":
             return await self._handle_session_history(body)
+        if method == "session.delete":
+            return await self._handle_session_delete(body)
         if method == "artifacts.fetch":
             return await self._handle_artifacts_fetch(body)
         raise ValueError({"type": "unknown_method", "message": method})
@@ -262,6 +288,91 @@ class DaemonWsServer:
             ],
             "not_implemented": False,
         }
+
+    async def _handle_session_delete(self, body: dict) -> dict:
+        """Delete a provider transcript and daemon-side cwd session index."""
+        provider = body.get("provider")
+        session_id = body.get("session_id")
+        cwd = body.get("cwd")
+        if not isinstance(provider, str) or not isinstance(session_id, str):
+            raise ValueError({
+                "type": "validation_error",
+                "message": "session.delete requires provider + session_id",
+            })
+        dry_run = bool(body.get("dry_run", False))
+        if cwd is not None and not isinstance(cwd, str):
+            raise ValueError({
+                "type": "validation_error",
+                "message": "session.delete cwd must be a string",
+            })
+
+        if dry_run:
+            try:
+                found_paths = await asyncio.to_thread(
+                    find_provider_session_files, provider, session_id
+                )
+            except NotImplementedError as exc:
+                return {
+                    "ok": False,
+                    "not_implemented": True,
+                    "dry_run": True,
+                    "reason": str(exc),
+                    "found_paths": [],
+                    "cwd_index_found": False,
+                }
+            cwd_index_found = False
+            if cwd:
+                cwd_index_found = await asyncio.to_thread(
+                    self._cwd_session_index_exists, cwd, session_id
+                )
+            return {
+                "ok": True,
+                "supported": True,
+                "dry_run": True,
+                "found_paths": [str(path) for path in found_paths],
+                "cwd_index_found": cwd_index_found,
+                "missing": not found_paths,
+            }
+
+        result = await asyncio.to_thread(
+            delete_provider_session, provider, session_id
+        )
+        if not result.supported:
+            return {
+                "ok": False,
+                "not_implemented": True,
+                "reason": result.reason,
+                "deleted_paths": [],
+                "cwd_index_deleted": False,
+            }
+        if result.errors:
+            raise ValueError({
+                "type": "provider_delete_failed",
+                "message": "; ".join(result.errors),
+                "deleted_paths": [str(path) for path in result.deleted_paths],
+            })
+
+        cwd_index_deleted = False
+        if cwd:
+            cwd_index_deleted = await asyncio.to_thread(
+                self._delete_cwd_session_index, cwd, session_id, provider
+            )
+        return {
+            "ok": True,
+            "not_implemented": False,
+            "deleted_paths": [str(path) for path in result.deleted_paths],
+            "cwd_index_deleted": cwd_index_deleted,
+        }
+
+    @staticmethod
+    def _delete_cwd_session_index(cwd: str, session_id: str, provider: str) -> bool:
+        return CwdSessionStore.load_or_create(
+            Path(cwd), provider=provider
+        ).delete(session_id)
+
+    @staticmethod
+    def _cwd_session_index_exists(cwd: str, session_id: str) -> bool:
+        return CwdSessionStore.load_or_create(Path(cwd)).get(session_id) is not None
 
     def wake_claim_loop(self) -> None:
         """Wake the daemon's claim loop immediately.

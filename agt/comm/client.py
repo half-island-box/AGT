@@ -168,6 +168,26 @@ class ServerClient:
                 return None
             raise
 
+    async def delete_session(
+        self,
+        session_id: str,
+        *,
+        provider: str | None = None,
+        daemon_id: str | None = None,
+        finalize_active: bool = False,
+    ) -> dict:
+        """Delete AGT session pointers and the provider-local transcript."""
+        payload: dict[str, Any] = {"confirm": True}
+        if provider is not None:
+            payload["provider"] = provider
+        if daemon_id is not None:
+            payload["daemon_id"] = daemon_id
+        if finalize_active:
+            payload["finalize_active"] = True
+        return await self._post(
+            f"/api/sessions/{session_id}/delete", payload
+        )
+
     # ── Tasks ─────────────────────────────────────────────────────
 
     async def submit_task(

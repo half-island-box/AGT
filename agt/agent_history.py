@@ -31,6 +31,22 @@ class Message:
     timestamp: float | None = None
 
 
+@dataclass(frozen=True)
+class ProviderSessionDeleteResult:
+    """Result of deleting provider-local files for one conversation."""
+
+    supported: bool
+    deleted_paths: tuple[Path, ...] = ()
+    missing: bool = False
+    errors: tuple[str, ...] = ()
+    reason: str | None = None
+
+
+def _validate_session_id(session_id: str) -> None:
+    if not session_id or any(char in session_id for char in "/\\"):
+        raise ValueError("invalid provider session id")
+
+
 def load_claude_history(session_id: str) -> list[Message]:
     """Read Claude Code's transcript for ``session_id``.
 
@@ -265,9 +281,82 @@ def load_history(provider: str, session_id: str) -> list[Message]:
     )
 
 
+def find_claude_session_files(session_id: str) -> list[Path]:
+    """Locate Claude Code transcript files for an exact session id."""
+    _validate_session_id(session_id)
+    projects_root = Path.home() / ".claude" / "projects"
+    if not projects_root.is_dir():
+        return []
+    matches: list[Path] = []
+    for project_dir in projects_root.iterdir():
+        if not project_dir.is_dir():
+            continue
+        candidate = project_dir / f"{session_id}.jsonl"
+        if candidate.is_file():
+            matches.append(candidate)
+    return matches
+
+
+def find_codex_session_files(session_id: str) -> list[Path]:
+    """Locate Codex rollout files for an exact session uuid."""
+    _validate_session_id(session_id)
+    home = Path.home()
+    roots = (home / ".codex" / "sessions", home / ".codex" / "archived_sessions")
+    matches: list[Path] = []
+    suffix = f"-{session_id}"
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for path in root.rglob("*.jsonl"):
+            if path.stem == session_id or path.stem.endswith(suffix):
+                matches.append(path)
+    matches.sort(key=_mtime, reverse=True)
+    return matches
+
+
+def find_provider_session_files(provider: str, session_id: str) -> list[Path]:
+    """Locate provider-local transcript files for one session id."""
+    if provider == "claude":
+        return find_claude_session_files(session_id)
+    if provider == "codex":
+        return find_codex_session_files(session_id)
+    raise NotImplementedError(
+        f"history reader for provider '{provider}' is not yet implemented"
+    )
+
+
+def delete_provider_session(provider: str, session_id: str) -> ProviderSessionDeleteResult:
+    """Permanently delete provider-local transcript files for one session."""
+    try:
+        paths = find_provider_session_files(provider, session_id)
+    except NotImplementedError as exc:
+        return ProviderSessionDeleteResult(
+            supported=False,
+            reason=str(exc),
+        )
+
+    deleted: list[Path] = []
+    errors: list[str] = []
+    for path in paths:
+        try:
+            path.unlink()
+            deleted.append(path)
+        except OSError as exc:
+            errors.append(f"{path}: {exc}")
+    return ProviderSessionDeleteResult(
+        supported=True,
+        deleted_paths=tuple(deleted),
+        missing=not paths,
+        errors=tuple(errors),
+    )
+
+
 __all__ = [
     "Message",
     "load_history",
     "load_claude_history",
     "load_codex_history",
+    "ProviderSessionDeleteResult",
+    "find_provider_session_files",
+    "delete_provider_session",
 ]
