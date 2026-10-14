@@ -2858,6 +2858,213 @@ def daemon_bindings(daemon_id: str, server_url: str) -> None:
         )
 
 
+# ── daemon config (persistent execution settings) ────────────────────
+
+
+@daemon.group("config")
+def daemon_config() -> None:
+    """Manage persistent Daemon execution-resource configuration."""
+
+
+@daemon_config.command("show")
+def daemon_config_show() -> None:
+    """Show effective next-start Daemon configuration and its sources."""
+    from ..daemon.config import (
+        DaemonConfigError,
+        daemon_config_file_path,
+        resolve_daemon_settings,
+    )
+    from ..daemon.pidfile import read_daemon_pidfile
+
+    path = daemon_config_file_path()
+    click.echo(f"Configuration file: {path}")
+    if not path.exists():
+        click.echo("(file does not exist)\n")
+
+    try:
+        settings = resolve_daemon_settings()
+    except DaemonConfigError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(2)
+
+    defaults = {
+        "max_concurrent": "max concurrent tasks",
+        "agent_timeout": "agent timeout (seconds)",
+        "work_dir": "work directory",
+        "agent_cwd_allowlist": "agent cwd allowlist",
+    }
+
+    for key, label in defaults.items():
+        rs = settings[key]
+        value = rs.value
+        if isinstance(value, list):
+            display = ":".join(str(p) for p in value)
+        elif isinstance(value, Path):
+            display = str(value)
+        else:
+            display = str(value)
+
+        source = rs.source
+        if source == "env" and rs.env_name:
+            source = f"env {rs.env_name}"
+
+        parts = [f"{label}: {display}", f"source: {source}"]
+        if rs.file_value is not None and source != "file":
+            if isinstance(rs.file_value, list):
+                saved = ":".join(str(p) for p in rs.file_value)
+            elif isinstance(rs.file_value, Path):
+                saved = str(rs.file_value)
+            else:
+                saved = str(rs.file_value)
+            parts.append(f"saved: {saved}")
+        if rs.default_value is not None and source != "default":
+            if isinstance(rs.default_value, list):
+                default = ":".join(str(p) for p in rs.default_value)
+            elif isinstance(rs.default_value, Path):
+                default = str(rs.default_value)
+            else:
+                default = str(rs.default_value)
+            parts.append(f"default: {default}")
+        click.echo("  ".join(parts))
+
+    if read_daemon_pidfile() is not None:
+        click.echo(
+            "\nNote: a local Daemon is currently running; changes take effect after restart.",
+            err=True,
+        )
+
+
+@daemon_config.command("set")
+@click.option("--max-concurrent", type=int, default=None, help="Maximum concurrent agent tasks.")
+@click.option("--agent-timeout", type=int, default=None, help="Agent subprocess timeout in seconds.")
+@click.option("--work-dir", type=str, default=None, help="Absolute workspace root directory.")
+@click.option(
+    "--agent-cwd-allowlist",
+    type=str,
+    multiple=True,
+    default=None,
+    help="Absolute allowed agent-cwd root (repeatable).",
+)
+def daemon_config_set(
+    max_concurrent: int | None,
+    agent_timeout: int | None,
+    work_dir: str | None,
+    agent_cwd_allowlist: tuple[str, ...] | None,
+) -> None:
+    """Persist one or more Daemon execution-resource settings."""
+    from ..daemon.config import (
+        DaemonConfigError,
+        _MANAGED_KEYS,
+        daemon_config_file_path,
+        resolve_daemon_settings,
+        update_daemon_config_file,
+    )
+    from ..daemon.pidfile import read_daemon_pidfile
+
+    updates: dict[str, Any] = {}
+    if max_concurrent is not None:
+        updates["max_concurrent"] = max_concurrent
+    if agent_timeout is not None:
+        updates["agent_timeout"] = agent_timeout
+    if work_dir is not None:
+        updates["work_dir"] = work_dir
+    if agent_cwd_allowlist:
+        updates["agent_cwd_allowlist"] = list(agent_cwd_allowlist)
+
+    if not updates:
+        click.echo("Error: at least one setting is required.", err=True)
+        sys.exit(2)
+
+    try:
+        update_daemon_config_file(updates)
+    except DaemonConfigError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(2)
+
+    path = daemon_config_file_path()
+    click.echo(f"Saved configuration to {path}")
+
+    # Warn if any saved setting is currently overridden by an env var.
+    resolved = resolve_daemon_settings()
+    overridden: list[str] = []
+    for key in updates:
+        rs = resolved[key]
+        if rs.source == "env" and rs.env_name:
+            overridden.append(f"{key} (via {rs.env_name})")
+    if overridden:
+        click.echo(
+            "Warning: the following saved values are overridden by current environment variables "
+            "and will not take effect until those variables are unset:",
+            err=True,
+        )
+        for item in overridden:
+            click.echo(f"  - {item}", err=True)
+
+    # Warn if the local daemon is running.
+    if read_daemon_pidfile() is not None:
+        click.echo(
+            "Warning: the local Daemon is running; restart it for these changes to take effect.",
+            err=True,
+        )
+
+    # Warn if / is in the allowlist.
+    if "agent_cwd_allowlist" in updates:
+        allowlist = updates["agent_cwd_allowlist"]
+        if any(str(Path(p)) == "/" for p in allowlist):
+            click.echo(
+                "Warning: '/' in agent_cwd_allowlist allows the Daemon to run agents anywhere on "
+                "the filesystem. Only use this when you trust every submitter.",
+                err=True,
+            )
+
+
+@daemon_config.command("unset")
+@click.option("--max-concurrent", is_flag=True, help="Remove max_concurrent from the file.")
+@click.option("--agent-timeout", is_flag=True, help="Remove agent_timeout from the file.")
+@click.option("--work-dir", is_flag=True, help="Remove work_dir from the file.")
+@click.option(
+    "--agent-cwd-allowlist", is_flag=True, help="Remove agent_cwd_allowlist from the file."
+)
+def daemon_config_unset(
+    max_concurrent: bool,
+    agent_timeout: bool,
+    work_dir: bool,
+    agent_cwd_allowlist: bool,
+) -> None:
+    """Remove persisted Daemon execution-resource settings."""
+    from ..daemon.config import (
+        DaemonConfigError,
+        daemon_config_file_path,
+        remove_daemon_config_keys,
+    )
+
+    keys = [
+        key
+        for key, flag in {
+            "max_concurrent": max_concurrent,
+            "agent_timeout": agent_timeout,
+            "work_dir": work_dir,
+            "agent_cwd_allowlist": agent_cwd_allowlist,
+        }.items()
+        if flag
+    ]
+    if not keys:
+        click.echo("Error: at least one setting is required.", err=True)
+        sys.exit(2)
+
+    try:
+        remove_daemon_config_keys(keys)
+    except DaemonConfigError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(2)
+
+    path = daemon_config_file_path()
+    if path.exists():
+        click.echo(f"Removed settings from {path}: {', '.join(keys)}")
+    else:
+        click.echo(f"Removed settings; {path} was deleted because no managed values remain.")
+
+
 # ── token (Phase 3, dev/debug) ──────────────────────────────────────
 
 

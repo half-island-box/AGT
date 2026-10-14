@@ -100,6 +100,19 @@ agt server stop
 
 Default: server on `127.0.0.1:8420`, OpenAPI at [http://127.0.0.1:8420/docs](http://127.0.0.1:8420/docs).
 
+### Daemon persistent configuration
+
+Daemon execution settings can be persisted in `~/.agt/daemon.json` and managed with the CLI:
+
+```bash
+agt daemon config show
+agt daemon config set --max-concurrent 4 --agent-timeout 1800
+agt daemon config set --work-dir /home/user/agt-work
+agt daemon config unset --max-concurrent
+```
+
+Resolution order for each managed setting is environment variable > configuration file > built-in default. The file is written atomically with `0o600` permissions and validated at startup; a malformed file causes `agt daemon start` to exit with an actionable error. Changes take effect only after the daemon is restarted.
+
 Remote daemons connect via HTTP or **reverse-dial WebSocket** (server dials out, NAT-friendly). See the [quick-start guide](<docs/guide%20docs/quick_start.md>).
 
 ## VS Code extension (early)
@@ -122,20 +135,7 @@ Debug in VS Code: open `vscode/`, run `npm run watch`, press **F5** (Extension D
 
 Whenever the extension starts the server — on window startup or from the settings page — it also brings up the local daemon, so a fresh window is immediately usable without a separate `agt daemon start`. Both switches live in the settings page: `agt.autoStart` (start the server on window startup) and `agt.autoStartDaemon` (start the local daemon together with the server, default on). An already-running daemon is detected through `~/.agt/daemon.pid` and left untouched, the configured `serverUrl` is exported as `AGT_SERVER_URL` to the daemon process, and the commands themselves are configurable via `agt.daemonStartCommand` / `agt.daemonStopCommand` (also available as **AGT: Start Local Daemon** / **AGT: Stop Local Daemon**).
 
-### SOP editor (M3)
-
-Open **AGT: Open SOP Editor** (or the SOP tab in Chat) to edit a SOP as a DAG: templates are discovered from the workspace (`*.sop.yaml`, or any YAML with top-level `name` + `tasks`; `vscode/samples/` ships one for the dev host), nodes can be added/renamed/deleted, fields edited, and dependencies drawn port-to-port with live cycle blocking. **The YAML file stays the single source of truth**: the canvas parses it, applies edits back through a `WorkspaceEdit` (so dirty state and Ctrl+Z work like any editor), and `npm run check:sop` proves the produced YAML still passes `agt sop validate`.
-
-Round-trip fidelity comes from the `yaml` package's document AST (the extension's only runtime dependency), which keeps comments, key order and unknown keys for untouched parts; only `lineWidth` folding and flow-collection padding are normalized. Structural checks that the canvas needs (cycles, dangling references, duplicate outputs, `${node.output}` rules) run locally and mirror `agt/sop/dsl.py`; **server validation is the authority** and is served by `POST /api/sop/validate`, which takes the document as authored and always answers `200` with `ok`/`error`. Manual node positions are a view concern and live in workspace state, never in the template.
-
-**Run monitoring (M3)**: **Run** submits the document (`POST /api/sop/submit`, with `cwd` = workspace folder and `local_daemon_id` picked from `/api/daemons`) and then polls `GET /api/sop/{root}/status` every 1.5s until every node is terminal. While a run is in flight the canvas is read-only and each node carries its job status (queued/running/waiting/blocked/done/failed/cancelled) as outline colour; selecting a node loads `GET /api/sop/{root}/nodes/{name}/log` into the inspector, with stdout/stderr per step and clickable artifact names plus URIs. Inspect mode also lists recent runs for the template; selecting any run loads its node status and logs. **Cancel run** cancels every unfinished node job through `POST /api/jobs/{id}/cancel`; **Stop tracking** stops live monitoring without deleting history. Recent runs per file are kept in workspace state (up to 50), and editing the template afterwards flags each run as `template changed since submit` (fingerprint comparison) instead of silently pretending the canvas still matches the run.
-
-### Goal mode
-
-Open **AGT: Open Goal** (or the Goal tab in Chat/SOP) to submit an open-ended goal with an optional identity, provider, daemon, working directory, depth, and descendant budget. The left sidebar lists persisted runs from `GET /api/goal/runs`; selecting one loads `GET /api/jobs/{root}/tree` and polls it while the root remains non-terminal. Nodes show status, provider, daemon, duration, current Step, errors, and artifacts; selecting a node loads its Job log and polls the current Step so in-progress stdout appears alongside completed steps. If a node enters `waiting_input`, its structured `ask_question` is displayed with an answer box backed by `POST /api/jobs/{id}/input`. **Cancel run** cascades through the Job subtree, and **Export SOP draft** saves the backend-generated YAML and opens it in the SOP editor for review.
-
-Artifact buttons in SOP and Goal open the file directly when a local copy with the expected sha256 already exists in the selected node directory or workspace (including `.agt/outputs/` and a previously downloaded location). Otherwise the extension uses the same server artifact content path as `agt artifact get`, pulls the bytes into `<workspace>/<artifact-name>`, and opens the saved file.
-
+>>>>>>> Stashed changes
 ## SOP example
 
 ```yaml
@@ -188,7 +188,7 @@ agt sop validate pipeline.yaml && agt sop run pipeline.yaml
 | `agt goal` | Submit / run / status / log / input / cancel / artifacts / export goal-driven runs. |
 | `agt artifact` | List and download declared deliverables. |
 | `agt server` | Start, stop, or inspect the task server. |
-| `agt daemon` | Start, stop, inspect, list, or show daemons. |
+| `agt daemon` | Start, stop, inspect, list, show, or configure daemons. |
 | `agt task` | Submit tasks and inspect or clean task state. |
 | `agt runtime list` | List runtimes registered with the server. |
 | `agt identity` | Manage identities, identity files, and runtime bindings. |
@@ -263,8 +263,10 @@ The TypeScript client lives in `vscode/` with a strict layer split: `src/core` (
 | `AGT_SERVER_SECRET` | — | Shared HMAC secret (required by server). |
 | `AGT_SERVER_PORT` | `8420` | Server port. |
 | `AGT_DB_PATH` | `~/.agt/agt.db` | SQLite database location. |
-| `AGT_MAX_CONCURRENT` | `1` | Max concurrent agent tasks per daemon. |
-| `AGT_AGENT_TIMEOUT` | `600` | Agent subprocess timeout (seconds). |
+| `AGT_MAX_CONCURRENT` | `1` | Max concurrent agent tasks per daemon; overrides `~/.agt/daemon.json`. |
+| `AGT_AGENT_TIMEOUT` | `600` | Agent subprocess timeout (seconds); overrides `~/.agt/daemon.json`. |
+| `AGT_WORK_DIR` | `~/.agt/workspaces` | Task workspace root; overrides `~/.agt/daemon.json`. |
+| `AGT_AGENT_CWD_ALLOWLIST` | `~` (home directory) | Colon-separated allowed agent cwd roots; overrides `~/.agt/daemon.json`. |
 | `AGT_LISTEN_MODE` | `0` | Set `1` for reverse-dial (NAT) mode. |
 | `AGT_DAEMON_WS_PORT` | `8422` | Reverse-dial WS listen port. |
 | `AGT_DAEMON_MCP_PORT` | `8428` | Loopback MCP proxy port (remote daemons). |
@@ -279,6 +281,7 @@ The TypeScript client lives in `vscode/` with a strict layer split: `src/core` (
 | Identity files | `~/.agt/identities/<slug>/AGENTS.md` |
 | Server PID / log | `~/.agt/server.pid`, `~/.agt/server.log` |
 | Daemon PID / log | `~/.agt/daemon.pid`, `~/.agt/daemon.log` |
+| Daemon execution config | `~/.agt/daemon.json` (optional, `0o600`) |
 
 ## Documentation
 
