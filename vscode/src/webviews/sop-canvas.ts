@@ -8,10 +8,12 @@
  */
 
 import { NODE_H, NODE_W, layoutBounds, type SopPoint } from '../core/sop/layout';
+import { providerLogo } from '../core/icons';
 
 export interface CanvasNode {
   name: string;
-  subtitle: string;
+  /** Effective provider label; rendered as a brand icon on the canvas. */
+  provider: string;
   badge: string;
   selected: boolean;
   /** Drives the node outline color (info = neutral hint). */
@@ -156,7 +158,9 @@ export class SopCanvas {
               : ''
           }
           <div class="agd-sop-node-title">${escapeHtml(node.name)}</div>
-          <div class="agd-sop-node-sub">${escapeHtml(node.subtitle)}</div>
+          <div class="agd-sop-node-sub" title="${escapeAttr(node.provider)}">
+            ${node.provider ? providerLogo(node.provider) : '<span class="agd-sop-node-provider-none">—</span>'}
+          </div>
           ${node.badge ? `<div class="agd-sop-node-badge">${escapeHtml(node.badge)}</div>` : ''}
         </div>`;
       })

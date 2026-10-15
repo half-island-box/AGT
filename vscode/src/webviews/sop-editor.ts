@@ -135,6 +135,16 @@ function selectedNode(): SopNode | null {
   return model()?.nodes.find((node) => node.name === selected) ?? null;
 }
 
+/**
+ * The provider the canvas should brand: explicit task provider wins, then a
+ * static identity provider. DID-only identities resolve their provider from
+ * server bindings at submit time, so the canvas uses the alias fallback there.
+ */
+function canvasProvider(node: SopNode): string {
+  const identity = model()?.identities.find((item) => item.alias === node.identity);
+  return node.provider || identity?.provider || node.identity || '';
+}
+
 function nodeIssues(node: SopNode): SopIssue[] {
   return allIssues().filter((issue) => issue.node === node.name);
 }
@@ -1061,7 +1071,7 @@ function mountCanvas(): void {
       const problems = nodeIssues(node);
       return {
         name: node.name,
-        subtitle: node.identity || node.provider || '—',
+        provider: canvasProvider(node),
         badge: node.output ? `→ ${node.output}` : '',
         selected: node.name === selected,
         status: statusOf(node.name),

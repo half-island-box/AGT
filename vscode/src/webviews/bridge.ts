@@ -19,10 +19,14 @@ export interface BootInfo {
 
 declare function acquireVsCodeApi(): {
   postMessage(message: unknown): void;
+  getState<T = unknown>(): T | undefined;
+  setState<T>(state: T): void;
 };
 
 interface VsCodeStub {
   postMessage(message: unknown): void;
+  getState<T = unknown>(): T | undefined;
+  setState<T>(state: T): void;
 }
 
 type EventListener = (event: string, payload: unknown) => void;
@@ -33,6 +37,7 @@ const vscodeApi: VsCodeStub | undefined =
 let requestSeq = 0;
 const pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: unknown) => void }>();
 const eventListeners = new Set<EventListener>();
+let mockState: unknown = undefined;
 
 if (vscodeApi) {
   window.addEventListener('message', (e: MessageEvent) => {
@@ -82,5 +87,20 @@ export const bridge = {
   onEvent(listener: EventListener): () => void {
     eventListeners.add(listener);
     return () => eventListeners.delete(listener);
+  },
+
+  getState<T = unknown>(): T | undefined {
+    if (!vscodeApi) {
+      return mockState as T | undefined;
+    }
+    return vscodeApi.getState<T>();
+  },
+
+  setState<T>(state: T): void {
+    if (!vscodeApi) {
+      mockState = state;
+      return;
+    }
+    vscodeApi.setState(state);
   },
 };

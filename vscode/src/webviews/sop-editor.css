@@ -250,7 +250,27 @@ select.agd-input { height: 26px; }
 .agd-sop-run-item.is-active { border-color: var(--vscode-focusBorder, #3794ff); background: var(--vscode-list-activeSelectionBackground, #04395e); }
 .agd-sop-node.is-drop { border-color: var(--vscode-focusBorder, #3794ff); background: var(--vscode-list-hoverBackground, #2a2d2e); }
 .agd-sop-node-title { font-weight: 600; font-size: 12.5px; margin-bottom: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.agd-sop-node-sub { font-size: 10.5px; color: var(--vscode-descriptionForeground, #8b8b8b); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agd-sop-node-sub {
+  display: flex; align-items: center; min-height: 14px;
+  font-size: 10.5px; color: var(--vscode-descriptionForeground, #8b8b8b);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.agd-sop-node-sub .agd-provider-logo,
+.agd-sop-node-sub .agd-logo {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 14px; height: 14px; flex: none; vertical-align: middle;
+}
+.agd-sop-node-sub .agd-provider-logo {
+  color: var(--c, #6E7681);
+}
+.agd-sop-node-sub .agd-provider-logo svg {
+  width: 100%; height: 100%; fill: currentColor;
+}
+.agd-sop-node-sub .agd-logo {
+  border-radius: 4px; background: var(--c, #6E7681); color: #fff;
+  font-size: 8.5px; font-weight: 800; line-height: 1;
+}
+.agd-sop-node-provider-none { font-size: 10.5px; }
 .agd-sop-node-badge { margin-top: 4px; font-size: 10px; color: var(--vscode-descriptionForeground, #8b8b8b); font-family: var(--vscode-editor-font-family, monospace); }
 
 .agd-sop-port {
