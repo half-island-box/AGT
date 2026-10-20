@@ -76,7 +76,7 @@ agt chat --provider codex --daemon <daemon-id>
 
 # List / resume sessions
 agt chat --list
-agt chat --list --daemon <daemon-id>   # cross-directory remote sessions
+agt chat --list --daemon <daemon-id> --dir <daemon-cwd>  # remote sessions filtered by daemon-side cwd
 agt chat --resume <session-id> --daemon <daemon-id>
 ```
 
@@ -153,6 +153,7 @@ tasks:
 ```bash
 agt sop validate pipeline.yaml
 agt sop run pipeline.yaml
+agt sop runs                      # list SOP runs for the current cwd
 ```
 
 ## Goal example
@@ -164,6 +165,9 @@ agt goal run "Write deployment docs for this repo"
 # Inspect the grown Job tree / answer an agent question mid-run.
 agt goal status <root_job_id>
 agt goal input <job_id> "Use Chinese and split by module"
+
+# List goal runs for the current cwd.
+agt goal runs
 
 # Distill a successful run into a reusable SOP DAG.
 agt goal export <root_job_id> -o pipeline.yaml
@@ -178,8 +182,8 @@ agt sop validate pipeline.yaml && agt sop run pipeline.yaml
 | `agt run` | Run one prompt locally or through a daemon. |
 | `agt chat` | Start, list, or resume an interactive agent session. |
 | `agt session delete` | Permanently delete one or more server-recorded chat sessions. |
-| `agt sop` | Validate / submit / run / status / log static DAG pipelines. |
-| `agt goal` | Submit / run / status / log / input / cancel / artifacts / export goal-driven runs. |
+| `agt sop` | Validate / submit / run / runs / status / log static DAG pipelines. |
+| `agt goal` | Submit / run / runs / status / log / input / cancel / artifacts / export goal-driven runs. |
 | `agt artifact` | List and download declared deliverables. |
 | `agt server` | Start, stop, or inspect the task server. |
 | `agt daemon` | Start, stop, inspect, list, show, or configure daemons. |

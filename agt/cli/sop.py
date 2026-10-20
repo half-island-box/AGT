@@ -15,6 +15,12 @@ from ..sop.dsl import SOPError, parse_sop
 _TERMINAL = {"done", "failed", "cancelled"}
 
 
+def _truncate(text: str, width: int) -> str:
+    if len(text) <= width:
+        return text
+    return text[: width - 1] + "…"
+
+
 @click.group()
 def sop() -> None:
     """SOP static-DAG pipelines (validate / submit / run / status)."""
@@ -85,6 +91,63 @@ def sop_run(file: Path, server_url: str, interval: float) -> None:
                 await asyncio.sleep(interval)
 
     sys.exit(asyncio.run(_run_or_die(_run())))
+
+
+@sop.command("runs")
+@click.option("--daemon", "daemon_id", default=None, help="Filter to one daemon.")
+@click.option("--server-url", default="http://127.0.0.1:8420", show_default=True)
+@click.option("--limit", default=50, show_default=True, help="Max runs to show.")
+@click.option("--offset", default=0, show_default=True, help="Pagination offset.")
+def sop_runs(
+    daemon_id: str | None,
+    server_url: str,
+    limit: int,
+    offset: int,
+) -> None:
+    """List SOP runs for the current cwd."""
+    cwd = str(Path.cwd())
+
+    async def _run() -> dict:
+        async with ServerClient(base_url=server_url, daemon_id="cli-sop") as client:
+            return await client.list_runs(
+                mode="sop",
+                cwd=cwd,
+                daemon_id=daemon_id,
+                limit=limit,
+                offset=offset,
+            )
+
+    result = asyncio.run(_run_or_die(_run()))
+    runs = result.get("runs", [])
+    total = result.get("total", 0)
+    if not runs:
+        label = f"on daemon '{daemon_id}'" if daemon_id else "in current cwd"
+        click.echo(f"No SOP runs {label}.")
+        return
+    click.echo(f"🧩 {len(runs)}/{total} SOP run(s) for {cwd}\n")
+    rows = [
+        (
+            r.get("root_job_id", ""),
+            r.get("status", ""),
+            r.get("provider", ""),
+            r.get("daemon_id") or "—",
+            _truncate(r.get("title") or "", 40),
+            r.get("updated_at", ""),
+        )
+        for r in runs
+    ]
+    widths = [max(len(r[i]) for r in rows) for i in range(6)]
+    header = (
+        f"  {'ROOT':<{widths[0]}}  {'STATUS':<{widths[1]}}  {'PROVIDER':<{widths[2]}}  "
+        f"{'DAEMON':<{widths[3]}}  {'NAME':<{widths[4]}}  UPDATED"
+    )
+    click.echo(header)
+    click.echo("  " + "─" * (sum(widths) + 14))
+    for r in rows:
+        click.echo(
+            f"  {r[0]:<{widths[0]}}  {r[1]:<{widths[1]}}  {r[2]:<{widths[2]}}  "
+            f"{r[3]:<{widths[3]}}  {r[4]:<{widths[4]}}  {r[5]}"
+        )
 
 
 @sop.command("status")

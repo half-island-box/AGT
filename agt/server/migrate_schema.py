@@ -251,6 +251,65 @@ def ensure_schema(conn: Connection) -> None:
         )
         log.info("Migrated jobs table: added goal_meta column")
 
+    # Phase 6: unify run history by cwd and first-class job_type.
+    if _table_exists(conn, "jobs") and "cwd" not in _column_names(conn, "jobs"):
+        conn.exec_driver_sql(
+            "ALTER TABLE jobs ADD COLUMN cwd VARCHAR(1024)"
+        )
+        log.info("Migrated jobs table: added cwd column")
+
+    if _table_exists(conn, "sessions") and "cwd" not in _column_names(conn, "sessions"):
+        conn.exec_driver_sql(
+            "ALTER TABLE sessions ADD COLUMN cwd VARCHAR(1024)"
+        )
+        log.info("Migrated sessions table: added cwd column")
+
+    # Backfill cwd from the best available directory column.
+    if (
+        _table_exists(conn, "jobs")
+        and "cwd" in _column_names(conn, "jobs")
+        and "work_dir" in _column_names(conn, "jobs")
+    ):
+        conn.exec_driver_sql(
+            "UPDATE jobs SET cwd = COALESCE(work_dir, agent_cwd) WHERE cwd IS NULL"
+        )
+    if (
+        _table_exists(conn, "jobs")
+        and "job_id" in _column_names(conn, "sessions")
+        and "cwd" in _column_names(conn, "sessions")
+    ):
+        conn.exec_driver_sql("""
+            UPDATE sessions
+            SET cwd = (SELECT j.cwd FROM jobs j WHERE j.job_id = sessions.job_id)
+            WHERE cwd IS NULL
+        """)
+
+    # job_type widened to {"chat","sop","goal","task"}. SQLite stores it
+    # as a plain string, so we only need to backfill legacy SOP/Goal rows.
+    if _table_exists(conn, "jobs") and "job_type" in _column_names(conn, "jobs"):
+        conn.exec_driver_sql(
+            "UPDATE jobs SET job_type = 'goal' WHERE goal_meta IS NOT NULL AND job_type != 'goal'"
+        )
+        conn.exec_driver_sql(
+            "UPDATE jobs SET job_type = 'sop' WHERE sop_node IS NOT NULL AND goal_meta IS NULL AND job_type != 'sop'"
+        )
+
+    # Phase 6 indexes for the unified /api/runs queries.
+    if _table_exists(conn, "jobs"):
+        conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_jobs_cwd ON jobs (cwd)"
+        )
+        conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_jobs_cwd_job_type_updated_at ON jobs (cwd, job_type, updated_at)"
+        )
+        conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_jobs_cwd_root_job_id_updated_at ON jobs (cwd, root_job_id, updated_at)"
+        )
+    if _table_exists(conn, "sessions"):
+        conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_sessions_cwd ON sessions (cwd)"
+        )
+
 
 def migrate_identities_and_sessions(conn: Connection, root_dir: Path | None = None) -> None:
     """Apply Phase 4 identity + Job/Step + session schema migrations. Idempotent.

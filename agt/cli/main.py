@@ -812,7 +812,8 @@ def chat(
     cwd = Path(os.getcwd())
 
     if list_mode:
-        _print_chat_session_list(cwd, provider, target_daemon_id, server_url)
+        list_dir = _chat_list_dir(cwd, target_daemon_id, agent_cwd_override)
+        _print_chat_session_list(cwd, provider, target_daemon_id, server_url, list_dir=list_dir)
         return
 
     if resume_session_id is not None and not no_history:
@@ -1153,23 +1154,52 @@ def _run_chat_turn(
     return current_job_id
 
 
+def _chat_list_dir(
+    cwd: Path,
+    target_daemon_id: str | None,
+    agent_cwd_override: Path | None,
+) -> str | None:
+    """Return the daemon-side directory used to filter remote chat lists.
+
+    Local chat lists are already scoped to ``cwd`` by the store, so this
+    returns ``None``. For a remote daemon we need the directory on the
+    daemon machine: an explicit ``--dir`` wins, otherwise the local daemon
+    defaults to the client's cwd. A non-local remote daemon without ``--dir``
+    cannot be cwd-filtered, so we error out.
+    """
+    if target_daemon_id is None:
+        return None
+    if agent_cwd_override is not None:
+        return str(agent_cwd_override)
+    pid = _local_daemon_alive()
+    local_id = _local_daemon_id() if pid is not None else None
+    if local_id == target_daemon_id:
+        return str(cwd)
+    click.echo(
+        "Error: remote chat --list requires --dir <daemon-side cwd> "
+        "when --daemon is not this machine's local daemon.",
+        err=True,
+    )
+    sys.exit(2)
+
+
 def _print_chat_session_list(
     cwd: Path,
     provider: str | None = None,
     target_daemon_id: str | None = None,
     server_url: str = "http://127.0.0.1:8420",
+    list_dir: str | None = None,
 ) -> None:
     """Print a table of chat sessions.
 
     Local (``target_daemon_id`` None): sessions stored in
-    ``<cwd>/.agt/sessions.json``. Remote (``target_daemon_id`` set): every
-    session that daemon has executed, read from the Server — a global,
-    cross-directory view with a ``DIR`` column.
+    ``<cwd>/.agt/sessions.json``. Remote (``target_daemon_id`` set): sessions
+    for the daemon-side directory ``list_dir`` via ``/api/runs?mode=chat``.
 
     ``provider`` filters to one agent's sessions; ``None`` lists all.
     """
     if target_daemon_id is not None:
-        _print_remote_session_list(target_daemon_id, provider, server_url)
+        _print_remote_session_list(target_daemon_id, provider, server_url, list_dir=list_dir)
         return
 
     store = CwdSessionStore.load_or_create(cwd)
@@ -1219,35 +1249,42 @@ def _print_remote_session_list(
     daemon_id: str,
     provider: str | None,
     server_url: str,
+    list_dir: str | None = None,
 ) -> None:
-    """Print a daemon's sessions (cross-directory) fetched from the Server."""
+    """Print chat sessions for a daemon, filtered by daemon-side cwd."""
 
-    async def _run() -> list[dict]:
+    async def _run() -> dict:
         async with ServerClient(base_url=server_url, daemon_id="cli-direct") as client:
-            return await client.list_daemon_sessions(daemon_id)
+            return await client.list_runs(
+                mode="chat",
+                cwd=list_dir,
+                daemon_id=daemon_id,
+                provider=provider,
+                limit=200,
+            )
 
     try:
-        sessions = asyncio.run(_run())
+        result = asyncio.run(_run())
     except Exception as exc:
         click.echo(
             f"Error listing sessions for daemon '{daemon_id}': {exc}", err=True,
         )
         return
 
-    if provider is not None:
-        sessions = [s for s in sessions if s.get("provider") == provider]
+    sessions = result.get("runs", [])
     if not sessions:
         label = f"{provider} " if provider else ""
-        click.echo(f"No {label}chat sessions on daemon '{daemon_id}' yet.")
+        dir_label = f" in {list_dir}" if list_dir else ""
+        click.echo(f"No {label}chat sessions{dir_label} on daemon '{daemon_id}' yet.")
         return
-    click.echo(f"{len(sessions)} session(s) on daemon '{daemon_id}'\n")
+    click.echo(f"{len(sessions)} session(s) on daemon '{daemon_id}'{f' in {list_dir}' if list_dir else ''}\n")
     rows = [
         (
             s.get("session_id", ""),
             s.get("provider", ""),
-            s.get("dir") or "—",
-            s.get("last_seen_at", ""),
-            _truncate(s.get("first_prompt", ""), 60),
+            s.get("cwd") or s.get("dir") or "—",
+            s.get("updated_at", ""),
+            _truncate(s.get("title") or s.get("first_prompt", ""), 60),
         )
         for s in sessions
     ]
@@ -1261,7 +1298,7 @@ def _print_remote_session_list(
     widths[4] = max(len(r[4]) for r in rows)
     header = (
         f"  {'SESSION':<{widths[0]}}  {'PROVIDER':<{widths[1]}}  "
-        f"{'DIR':<{widths[2]}}  {'LAST USED':<{widths[3]}}  FIRST PROMPT"
+        f"{'DIR':<{widths[2]}}  {'UPDATED':<{widths[3]}}  FIRST PROMPT"
     )
     click.echo(header)
     click.echo("  " + "─" * (sum(widths) + 10))

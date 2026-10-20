@@ -112,7 +112,7 @@ async def submit_goal(
         target_daemon_id=effective_target,
         agent_cwd=dir,
         identity_did=identity_did,
-        job_type="task",
+        job_type="goal",
         goal_meta=json.dumps(meta, ensure_ascii=False),
     )
 

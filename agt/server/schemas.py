@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, model_serializer
 
 from ..a2a import Message
@@ -561,6 +563,7 @@ class GoalRunSummary(BaseModel):
     provider: str
     identity_did: str | None = None
     daemon_id: str | None = None
+    cwd: str | None = None
     created_at: str
     updated_at: str
     total_nodes: int
@@ -570,6 +573,67 @@ class GoalRunSummary(BaseModel):
 
 class GoalRunListResponse(BaseModel):
     runs: list[GoalRunSummary]
+    total: int
+
+
+class SopRunSummary(BaseModel):
+    """One row in the sop-run history list."""
+
+    root_job_id: str
+    name: str
+    status: str
+    provider: str
+    identity_did: str | None = None
+    daemon_id: str | None = None
+    cwd: str | None = None
+    created_at: str
+    updated_at: str
+    total_nodes: int
+    status_counts: dict[str, int]
+
+
+class SopRunListResponse(BaseModel):
+    runs: list[SopRunSummary]
+    total: int
+
+
+class ChatRunSummary(BaseModel):
+    """One row in the chat-run history list."""
+
+    root_job_id: str
+    session_id: str
+    provider: str
+    identity_did: str | None = None
+    daemon_id: str | None = None
+    cwd: str | None = None
+    title: str | None = None
+    status: str
+    created_at: str
+    updated_at: str
+
+
+class ChatRunListResponse(BaseModel):
+    runs: list[ChatRunSummary]
+    total: int
+
+
+class RunSummary(BaseModel):
+    """Unified run row returned by /api/runs."""
+
+    root_job_id: str
+    mode: Literal["chat", "sop", "goal"]
+    status: str
+    provider: str
+    identity_did: str | None = None
+    daemon_id: str | None = None
+    cwd: str | None = None
+    title: str | None = None
+    created_at: str
+    updated_at: str
+
+
+class RunListResponse(BaseModel):
+    runs: list[RunSummary]
     total: int
 
 
@@ -618,4 +682,10 @@ __all__ = [
     "GoalMetaSummary",
     "GoalRunSummary",
     "GoalRunListResponse",
+    "SopRunSummary",
+    "SopRunListResponse",
+    "ChatRunSummary",
+    "ChatRunListResponse",
+    "RunSummary",
+    "RunListResponse",
 ]

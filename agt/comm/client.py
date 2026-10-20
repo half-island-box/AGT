@@ -107,6 +107,28 @@ class ServerClient:
         resp = await self._get("/api/runtimes")
         return resp.get("runtimes", [])
 
+    async def list_runs(
+        self,
+        *,
+        cwd: str | None = None,
+        mode: str | None = None,
+        daemon_id: str | None = None,
+        provider: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """List unified run history across chat/sop/goal modes."""
+        params: dict[str, Any] = {"limit": limit, "offset": offset}
+        if cwd is not None:
+            params["cwd"] = cwd
+        if mode is not None:
+            params["mode"] = mode
+        if daemon_id is not None:
+            params["daemon_id"] = daemon_id
+        if provider is not None:
+            params["provider"] = provider
+        return await self._get("/api/runs", params=params)
+
     async def deregister_runtimes(self) -> int:
         """Remove all runtime registrations for this daemon (called on shutdown)."""
         resp = await self._do_delete(f"/api/runtimes/unregister/{self._daemon_id}")

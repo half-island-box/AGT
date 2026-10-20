@@ -32,6 +32,12 @@ _SYMBOLS = {
 }
 
 
+def _truncate(text: str, width: int) -> str:
+    if len(text) <= width:
+        return text
+    return text[: width - 1] + "…"
+
+
 @click.group()
 def goal() -> None:
     """Dynamic orchestration: one goal, one root agent, recursive spawn."""
@@ -56,10 +62,19 @@ def _submit_kwargs(kwargs: dict) -> dict:
         "identity_did": kwargs.get("identity"),
         "provider": kwargs.get("provider"),
         "daemon_id": kwargs.get("daemon"),
-        "dir": kwargs.get("dir"),
+        "dir": kwargs.get("dir") or str(Path.cwd()),
         "max_depth": kwargs.get("max_depth"),
         "max_descendants": kwargs.get("max_descendants"),
     }
+
+
+def _runs_options(f):
+    for args, kwargs in (
+        (("--daemon", "daemon_id"), {"default": None, "help": "Filter to one daemon."}),
+        (("--server-url",), {"default": "http://127.0.0.1:8420", "show_default": True}),
+    ):
+        f = click.option(*args, **kwargs)(f)
+    return f
 
 
 @goal.command("submit")
@@ -117,6 +132,62 @@ def goal_run(goal_text: str, interval: float, timeout: float | None, **kwargs) -
                 await asyncio.sleep(interval)
 
     sys.exit(asyncio.run(_run_or_die(_run())))
+
+
+@goal.command("runs")
+@click.option("--limit", default=50, show_default=True, help="Max runs to show.")
+@click.option("--offset", default=0, show_default=True, help="Pagination offset.")
+@_runs_options
+def goal_runs(
+    daemon_id: str | None,
+    server_url: str,
+    limit: int,
+    offset: int,
+) -> None:
+    """List goal runs for the current cwd."""
+    cwd = str(Path.cwd())
+
+    async def _run() -> dict:
+        async with ServerClient(base_url=server_url, daemon_id="cli-goal") as client:
+            return await client.list_runs(
+                mode="goal",
+                cwd=cwd,
+                daemon_id=daemon_id,
+                limit=limit,
+                offset=offset,
+            )
+
+    result = asyncio.run(_run_or_die(_run()))
+    runs = result.get("runs", [])
+    total = result.get("total", 0)
+    if not runs:
+        label = f"on daemon '{daemon_id}'" if daemon_id else "in current cwd"
+        click.echo(f"No goal runs {label}.")
+        return
+    click.echo(f"🎯 {len(runs)}/{total} goal run(s) for {cwd}\n")
+    rows = [
+        (
+            r.get("root_job_id", ""),
+            r.get("status", ""),
+            r.get("provider", ""),
+            r.get("daemon_id") or "—",
+            _truncate(r.get("title") or "", 50),
+            r.get("updated_at", ""),
+        )
+        for r in runs
+    ]
+    widths = [max(len(r[i]) for r in rows) for i in range(6)]
+    header = (
+        f"  {'ROOT':<{widths[0]}}  {'STATUS':<{widths[1]}}  {'PROVIDER':<{widths[2]}}  "
+        f"{'DAEMON':<{widths[3]}}  {'GOAL':<{widths[4]}}  UPDATED"
+    )
+    click.echo(header)
+    click.echo("  " + "─" * (sum(widths) + 14))
+    for r in rows:
+        click.echo(
+            f"  {r[0]:<{widths[0]}}  {r[1]:<{widths[1]}}  {r[2]:<{widths[2]}}  "
+            f"{r[3]:<{widths[3]}}  {r[4]:<{widths[4]}}  {r[5]}"
+        )
 
 
 async def _print_final(client: ServerClient, root: str, node: dict) -> None:

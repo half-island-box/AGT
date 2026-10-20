@@ -1,6 +1,8 @@
 """Alembic migration environment — wired to our SQLAlchemy models."""
 
+import os
 from logging.config import fileConfig
+from pathlib import Path
 
 from sqlalchemy import engine_from_config, pool
 
@@ -17,8 +19,24 @@ if config.config_file_name is not None:
 target_metadata = Base.metadata
 
 
+def _db_url() -> str:
+    """Resolve the database URL for migrations.
+
+    Order of precedence:
+    1. ``AGT_DB_PATH`` environment variable (absolute filesystem path).
+    2. ``sqlalchemy.url`` from ``migrations.ini``.
+
+    This lets the same ``migrations.ini`` work across machines whose home
+    directory differs, without editing the checked-in file.
+    """
+    env_path = os.environ.get("AGT_DB_PATH")
+    if env_path:
+        return f"sqlite:///{Path(env_path).resolve()}"
+    return config.get_main_option("sqlalchemy.url")
+
+
 def run_migrations_offline() -> None:
-    url = config.get_main_option("sqlalchemy.url")
+    url = _db_url()
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -31,8 +49,10 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
+    section = config.get_section(config.config_ini_section, {})
+    section["sqlalchemy.url"] = _db_url()
     connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
+        section,
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )

@@ -36,6 +36,7 @@ from .routes.artifacts import router as artifacts_router
 from .routes.sop import router as sop_router
 from .routes.goal import router as goal_router
 from .routes.runtimes import router as runtimes_router
+from .routes.runs import router as runs_router
 from .routes.sessions import router as sessions_router
 from .routes.tasks import router as tasks_router
 from .services.runtime_service import prune_stale_runtimes
@@ -186,6 +187,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     app.include_router(artifacts_router)
     app.include_router(sop_router)
     app.include_router(goal_router)
+    app.include_router(runs_router)
     app.include_router(sessions_router)
     app.include_router(heartbeat_router)
     app.include_router(identities_router)

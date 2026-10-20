@@ -220,7 +220,7 @@ class TestResolveSessionRoute:
 # ── CLI: _resolve_remote_session ───────────────────────────────────
 
 
-def _stub_client(*, resolve=None, list_sessions=None) -> type:
+def _stub_client(*, resolve=None, list_sessions=None, list_runs=None) -> type:
     """An async ServerClient stub patching over ``agt.cli.main.ServerClient``."""
 
     class _Stub:
@@ -242,6 +242,15 @@ def _stub_client(*, resolve=None, list_sessions=None) -> type:
             if callable(list_sessions):
                 return list_sessions(daemon_id)
             return list_sessions
+
+        async def list_runs(self, **kwargs):
+            runs = list_runs if list_runs is not None else []
+            if callable(runs):
+                runs = runs(**kwargs)
+            provider = kwargs.get("provider")
+            if provider is not None:
+                runs = [r for r in runs if r.get("provider") == provider]
+            return {"runs": runs, "total": len(runs)}
 
     return _Stub
 
@@ -290,12 +299,12 @@ class TestPrintRemoteSessionList:
     def test_renders_dir_column(self, capsys) -> None:
         from agt.cli import main as cli_mod
         sessions = [
-            {"session_id": "s1", "provider": "claude", "dir": "/proj/a",
-             "last_seen_at": "now", "first_prompt": "hello"},
+            {"session_id": "s1", "provider": "claude", "cwd": "/proj/a",
+             "updated_at": "now", "title": "hello"},
         ]
         with patch("agt.cli.main.ServerClient",
-                   _stub_client(list_sessions=sessions)):
-            cli_mod._print_remote_session_list("d1", None, "http://x")
+                   _stub_client(list_runs=sessions)):
+            cli_mod._print_remote_session_list("d1", None, "http://x", list_dir="/proj/a")
         out = capsys.readouterr().out
         assert "DIR" in out
         assert "/proj/a" in out
@@ -304,14 +313,14 @@ class TestPrintRemoteSessionList:
     def test_filters_by_provider(self, capsys) -> None:
         from agt.cli import main as cli_mod
         sessions = [
-            {"session_id": "s1", "provider": "claude", "dir": "/a",
-             "last_seen_at": "now", "first_prompt": "hi"},
-            {"session_id": "s2", "provider": "codex", "dir": "/b",
-             "last_seen_at": "now", "first_prompt": "hi"},
+            {"session_id": "s1", "provider": "claude", "cwd": "/a",
+             "updated_at": "now", "title": "hi"},
+            {"session_id": "s2", "provider": "codex", "cwd": "/b",
+             "updated_at": "now", "title": "hi"},
         ]
         with patch("agt.cli.main.ServerClient",
-                   _stub_client(list_sessions=sessions)):
-            cli_mod._print_remote_session_list("d1", "codex", "http://x")
+                   _stub_client(list_runs=sessions)):
+            cli_mod._print_remote_session_list("d1", "codex", "http://x", list_dir="/")
         out = capsys.readouterr().out
         assert "s2" in out
         assert "s1" not in out

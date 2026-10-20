@@ -41,6 +41,7 @@ class GoalSubmitResponse(BaseModel):
 @router.get("/runs", response_model=GoalRunListResponse)
 async def goal_runs(
     db: AsyncSession = Depends(get_db),
+    cwd: str | None = Query(None, description="Project directory to filter by"),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> GoalRunListResponse:
@@ -50,7 +51,7 @@ async def goal_runs(
     controls page size; ``total`` is the number of all goal roots, so the
     client can paginate without fetching every tree.
     """
-    runs, total = await list_goal_runs(db, limit=limit, offset=offset)
+    runs, total = await list_goal_runs(db, cwd=cwd, limit=limit, offset=offset)
     return GoalRunListResponse(runs=runs, total=total)
 
 

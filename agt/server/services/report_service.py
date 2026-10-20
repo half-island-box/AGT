@@ -161,6 +161,7 @@ async def record_task_result_for_daemon(
             # that weren't backfilled by writing no session pointer.
             task.session_id = session_id
         else:
+            job = await db.get(JobModel, job_id)
             existing = (
                 await db.execute(
                     select(SessionModel).where(
@@ -177,6 +178,7 @@ async def record_task_result_for_daemon(
                         identity_did=ctx,
                         provider=task.provider,
                         session_id=session_id,
+                        cwd=job.cwd if job is not None else None,
                         created_at=now,
                         updated_at=now,
                     )
@@ -184,6 +186,8 @@ async def record_task_result_for_daemon(
             else:
                 existing.session_id = session_id
                 existing.updated_at = now
+                if job is not None:
+                    existing.cwd = job.cwd
             task.session_id = session_id
 
     await db.flush()
