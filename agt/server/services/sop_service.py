@@ -31,7 +31,7 @@ from ..models import (
     IdentityModel,
     JobModel,
     RuntimeModel,
-    TaskModel,
+    StepModel,
 )
 from .job_service import (
     _TERMINAL_STATUSES,

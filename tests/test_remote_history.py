@@ -31,7 +31,7 @@ from agt.server.config import DaemonTarget
 from agt.server.database import make_engine, make_session_factory
 from agt.server.main import create_app
 from agt.server.migrate_schema import ensure_schema
-from agt.server.models import Base, JobModel, SessionModel, TaskModel
+from agt.server.models import Base, JobModel, SessionModel, StepModel
 
 SECRET = "remote-history-test-secret"
 TEST_DAEMON_ID = "test-daemon"
@@ -184,8 +184,8 @@ async def _seed_task(
             job_id=task_id, identity_did="", provider=provider,
             session_id=session_id, created_at=now, updated_at=now,
         ))
-        session.add(TaskModel(
-            task_id=task_id, job_id=task_id, provider=provider, prompt="hi",
+        session.add(StepModel(
+            step_id=task_id, job_id=task_id, provider=provider, prompt="hi",
             status="completed", daemon_id=daemon_id,
             created_at=now, updated_at=now,
         ))

@@ -3,7 +3,7 @@
 The sessions table PK becomes ``(task_id, identity_did, provider)`` so the
 same ``task_id`` under different identities (or no identity at all) holds
 independent session pointers. These tests cover the write path
-(``record_task_result_for_daemon``) and the read path (``GET /api/sessions``):
+(``record_step_result_for_daemon``) and the read path (``GET /api/sessions``):
 
 - reporting stamps the task's ``identity_did`` into the session row
   (``""`` for identity-less tasks);
@@ -23,8 +23,8 @@ from agt.server.config import ServerConfig
 from agt.server.database import make_engine, make_session_factory, session_scope
 from agt.server.main import create_app
 from agt.server.migrate_schema import ensure_schema
-from agt.server.models import Base, JobModel, SessionModel, TaskModel
-from agt.server.services.report_service import record_task_result_for_daemon
+from agt.server.models import Base, JobModel, SessionModel, StepModel
+from agt.server.services.report_service import record_step_result_for_daemon
 
 
 SECRET = "session-identity-test-secret"
@@ -61,8 +61,8 @@ async def _seed_task(
             provider="claude", identity_did=identity_did,
             created_at=now, updated_at=now,
         ))
-        db.add(TaskModel(
-            task_id=task_id, job_id=task_id, provider="claude", prompt="hi",
+        db.add(StepModel(
+            step_id=task_id, job_id=task_id, provider="claude", prompt="hi",
             status="running", daemon_id=daemon_id,
             identity_did=identity_did,
             created_at=now, updated_at=now,
@@ -79,8 +79,8 @@ async def _session_rows(factory, task_id: str) -> list[SessionModel]:
 
 async def _report(factory, task_id: str, daemon_id: str, *, session_id, resume_rejected=False) -> None:
     async with session_scope(factory) as db:
-        await record_task_result_for_daemon(
-            db, daemon_id=daemon_id, task_id=task_id,
+        await record_step_result_for_daemon(
+            db, daemon_id=daemon_id, step_id=task_id,
             exit_code=0, stdout="", stderr="", duration=0.1,
             status="completed", session_id=session_id,
             resume_rejected=resume_rejected,

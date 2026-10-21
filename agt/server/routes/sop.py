@@ -12,8 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ...a2a import make_artifact_uri
 from ...sop.dsl import SOPError, parse_sop
 from ..database import get_db
-from ..models import ArtifactModel, JobModel, JobParentModel, TaskModel
-from ..services.claim_service import notify_task_available
+from ..models import ArtifactModel, JobModel, JobParentModel, StepModel
+from ..services.claim_service import notify_steps_available
 from ..services.sop_service import expand_sop
 
 router = APIRouter(prefix="/api/sop", tags=["sop"])
@@ -99,7 +99,7 @@ async def submit_sop(
         ) from None
     await db.commit()
     # Wake claim loops: entry nodes are immediately runnable.
-    notify_task_available()
+    notify_steps_available()
     return SopSubmitResponse(
         root_job_id=expansion.root_job_id, nodes=expansion.node_jobs
     )
@@ -133,10 +133,10 @@ async def sop_status(
     job_ids = [j.job_id for j in rows]
     step_rows = (
         await db.execute(
-            select(TaskModel.job_id, TaskModel.session_id)
-            .where(TaskModel.job_id.in_(job_ids))
-            .where(TaskModel.session_id.is_not(None))
-            .order_by(TaskModel.created_at.desc())
+            select(StepModel.job_id, StepModel.session_id)
+            .where(StepModel.job_id.in_(job_ids))
+            .where(StepModel.session_id.is_not(None))
+            .order_by(StepModel.created_at.desc())
         )
     ).all()
     job_to_session: dict[str, str] = {}
@@ -239,9 +239,9 @@ async def sop_node_log(
     job_ids = [j.job_id for j in jobs]
     steps = (
         await db.execute(
-            select(TaskModel)
-            .where(TaskModel.job_id.in_(job_ids))
-            .order_by(TaskModel.created_at)
+            select(StepModel)
+            .where(StepModel.job_id.in_(job_ids))
+            .order_by(StepModel.created_at)
         )
     ).scalars().all()
 
@@ -262,7 +262,7 @@ async def sop_node_log(
         provider=provider,
         steps=[
             SopNodeLogStep(
-                task_id=s.task_id,
+                task_id=s.step_id,
                 status=s.status,
                 iteration=job_to_iteration.get(s.job_id, 0),
                 session_id=s.session_id,

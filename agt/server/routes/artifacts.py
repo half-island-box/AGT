@@ -11,7 +11,7 @@ from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db
-from ..models import ArtifactModel, TaskModel
+from ..models import ArtifactModel, StepModel
 from ..schemas import ArtifactOut, ArtifactUploadRequest
 from ..services.artifact_service import (
     ArtifactFetchError,
@@ -134,17 +134,17 @@ async def upload_artifact(
     (inline <4KB / server disk) — the artifact lands ``ready`` in one
     step, so the subsequent report can reference it metadata-only.
     """
-    task = await db.get(TaskModel, payload.task_id)
-    if task is None:
+    step = await db.get(StepModel, payload.task_id)
+    if step is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="task not found"
         )
-    if task.daemon_id != payload.daemon_id:
+    if step.daemon_id != payload.daemon_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="task not owned by this daemon",
         )
-    if task.job_id is None:
+    if step.job_id is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="task has no job; cannot register artifacts",
@@ -168,7 +168,7 @@ async def upload_artifact(
     prior = (
         await db.execute(
             select(ArtifactModel).where(
-                ArtifactModel.step_id == task.task_id,
+                ArtifactModel.step_id == step.step_id,
                 ArtifactModel.name == item.name,
                 ArtifactModel.sha256 == item.sha256,
             )
@@ -180,9 +180,9 @@ async def upload_artifact(
 
     artifact = ArtifactModel(
         artifact_id=str(uuid4()),
-        job_id=task.job_id,
-        step_id=task.task_id,
-        producer_identity_id=task.identity_did,
+        job_id=step.job_id,
+        step_id=step.step_id,
+        producer_identity_id=step.identity_did,
         name=item.name,
         mime_type=item.mime_type or "",
         summary=item.summary,

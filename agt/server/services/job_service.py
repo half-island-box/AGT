@@ -1,7 +1,7 @@
 """Job lifecycle service.
 
 A Job is the long-running owner of a multi-step task. Each Step is an
-immutable ``TaskModel`` row. The Job state machine is the single entry
+immutable ``StepModel`` row. The Job state machine is the single entry
 point for status transitions so the rest of the codebase can't leave a
 Job in an inconsistent state.
 """
@@ -34,7 +34,7 @@ from ..models import (
     JobModel,
     JobParentModel,
     SessionModel,
-    TaskModel,
+    StepModel,
 )
 
 log = logging.getLogger(__name__)
@@ -166,8 +166,8 @@ async def create_job(
         )
 
     if with_step:
-        step = TaskModel(
-            task_id=s_id,
+        step = StepModel(
+            step_id=s_id,
             job_id=j_id,
             provider=provider,
             prompt=prompt,
@@ -196,7 +196,7 @@ async def append_step(
     resume_session_id: str | None = None,
     message: Message | None = None,
     target_daemon_id: str | None = None,
-) -> TaskModel:
+) -> StepModel:
     """Append a new pending Step to a Job.
 
     The Job MUST be in a state that accepts new Steps (queued, running, or
@@ -217,8 +217,8 @@ async def append_step(
         })
 
     now = _now()
-    step = TaskModel(
-        task_id=_new_id(),
+    step = StepModel(
+        step_id=_new_id(),
         job_id=job_id,
         provider=job.provider,
         prompt=prompt,
@@ -249,17 +249,17 @@ async def append_step(
     return step
 
 
-async def claim_step(db: AsyncSession, task_id: str) -> JobModel:
+async def claim_step(db: AsyncSession, step_id: str) -> JobModel:
     """Mark a Step running and move the Job from queued -> running if needed."""
-    step = await db.get(TaskModel, task_id)
+    step = await db.get(StepModel, step_id)
     if step is None or step.job_id is None:
-        raise ValueError({"type": "step_not_found", "message": task_id})
+        raise ValueError({"type": "step_not_found", "message": step_id})
     return await transition_job(db, step.job_id, "step_claimed")
 
 
 async def report_step(
     db: AsyncSession,
-    task_id: str,
+    step_id: str,
     outcome: str | None,
 ) -> JobModel:
     """Process a terminal Step report and drive the Job state machine.
@@ -267,9 +267,9 @@ async def report_step(
     ``outcome`` is one of: done, needs_input, error, spawn_subjob. When None,
     the caller is responsible for deriving it before calling this function.
     """
-    step = await db.get(TaskModel, task_id)
+    step = await db.get(StepModel, step_id)
     if step is None or step.job_id is None:
-        raise ValueError({"type": "step_not_found", "message": task_id})
+        raise ValueError({"type": "step_not_found", "message": step_id})
 
     event = _outcome_to_event(outcome)
     return await transition_job(db, step.job_id, event)
@@ -379,7 +379,7 @@ async def cancel_job(db: AsyncSession, job_id: str) -> tuple[JobModel, list[tupl
         for step in target.steps:
             if step.status in ("running", "pending"):
                 if step.status == "running" and step.daemon_id:
-                    notify_list.append((step.daemon_id, step.task_id))
+                    notify_list.append((step.daemon_id, step.step_id))
                 step.status = "cancelled"
                 step.updated_at = _now()
         await transition_job(db, jid, "cancel")
@@ -443,7 +443,7 @@ async def stop_chat_job(
         step.status = "cancelled"
         step.updated_at = _now()
         if step.daemon_id:
-            notify_list.append((step.daemon_id, step.task_id))
+            notify_list.append((step.daemon_id, step.step_id))
 
     await transition_job(db, job_id, "step_interrupted")
     return job, notify_list

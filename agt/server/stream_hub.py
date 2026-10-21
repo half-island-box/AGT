@@ -1,8 +1,8 @@
 """StreamHub — in-process pub/sub bridge between task writes and SSE streams.
 
 Phase 5 (remote streaming): the server pushes task progress to CLI
-subscribers over SSE. The producer side (``record_task_progress_for_daemon``
-and ``record_task_result_for_daemon``) publishes events after committing to
+subscribers over SSE. The producer side (``record_step_progress_for_daemon``
+and ``record_step_result_for_daemon``) publishes events after committing to
 the DB; the consumer side (``GET /api/tasks/{id}/stream``) subscribes and
 drains a bounded per-subscriber queue.
 
@@ -14,7 +14,7 @@ Why a hub instead of the SSE endpoint polling the DB:
 Correctness note (see design decision 5): correctness never depends on
 this hub. ``snapshot`` and ``done`` are read from the DB, so even if a
 delta is dropped here (slow consumer, process restart, multi-worker), the
-client still converges to the exact ``TaskModel.stdout``. The hub only
+client still converges to the exact ``StepModel.stdout``. The hub only
 buys *liveness* — the per-tick deltas that make it feel streaming.
 
 The hub is process-local and therefore requires a **single-worker** server

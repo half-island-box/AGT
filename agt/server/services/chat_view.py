@@ -5,7 +5,7 @@ from __future__ import annotations
 from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models import JobModel, SessionModel, TaskModel
+from ..models import JobModel, SessionModel, StepModel
 from ..schemas import ChatRunListResponse, ChatRunSummary
 
 
@@ -37,9 +37,9 @@ async def list_chat_runs(
         stmt = stmt.where(
             (JobModel.target_daemon_id == daemon_id)
             | exists(
-                select(TaskModel.task_id).where(
-                    TaskModel.job_id == SessionModel.job_id,
-                    TaskModel.daemon_id == daemon_id,
+                select(StepModel.step_id).where(
+                    StepModel.job_id == SessionModel.job_id,
+                    StepModel.daemon_id == daemon_id,
                 )
             )
         )
@@ -62,7 +62,7 @@ async def list_chat_runs(
                 identity_did=session.identity_did or job.identity_did,
                 daemon_id=job.target_daemon_id,
                 cwd=session.cwd or job.cwd,
-                title=None,  # TODO: derive from first TaskModel.prompt if desired
+                title=None,  # TODO: derive from first StepModel.prompt if desired
                 status=job.status,
                 created_at=session.created_at,
                 updated_at=session.updated_at,

@@ -1,4 +1,4 @@
-"""Service + handler tests for ``record_task_progress_for_daemon``.
+"""Service + handler tests for ``record_step_progress_for_daemon``.
 
 Phase 5 remote streaming: daemons report cumulative stdout prefixes while
 a task runs. These tests verify the ownership rules, the "progress writes
@@ -20,8 +20,8 @@ from agt.server.config import ServerConfig
 from agt.server.database import make_engine, make_session_factory, session_scope
 from agt.server.main import create_app
 from agt.server.migrate_schema import ensure_schema
-from agt.server.models import Base, TaskModel
-from agt.server.services.report_service import record_task_progress_for_daemon
+from agt.server.models import Base, StepModel
+from agt.server.services.report_service import record_step_progress_for_daemon
 from agt.server.stream_hub import default_hub
 
 SECRET = "progress-test-secret"
@@ -47,7 +47,7 @@ def _fresh_db():
             await conn.run_sync(ensure_schema)
         factory = make_session_factory(engine)
         async with session_scope(factory) as db:
-            await db.execute(delete(TaskModel))
+            await db.execute(delete(StepModel))
             await db.commit()
 
     asyncio.run(_setup())
@@ -69,8 +69,8 @@ async def _seed_task(
     now = _utcnow()
     async with session_scope(factory) as db:
         db.add(
-            TaskModel(
-                task_id=task_id,
+            StepModel(
+                step_id=task_id,
                 provider="claude",
                 prompt="hi",
                 status=status,
@@ -87,9 +87,9 @@ async def _seed_task(
         await db.commit()
 
 
-async def _row(factory, task_id: str) -> TaskModel | None:
+async def _row(factory, task_id: str) -> StepModel | None:
     async with session_scope(factory) as db:
-        return await db.get(TaskModel, task_id)
+        return await db.get(StepModel, task_id)
 
 
 def test_service_writes_only_stdout_and_updated_at() -> None:
@@ -105,10 +105,10 @@ def test_service_writes_only_stdout_and_updated_at() -> None:
             stdout="he",
         )
         async with session_scope(factory) as db:
-            result = await record_task_progress_for_daemon(
+            result = await record_step_progress_for_daemon(
                 db,
                 daemon_id="d1",
-                task_id="t1",
+                step_id="t1",
                 stdout_prefix="hello",
             )
             assert result == {"recorded": True}
@@ -135,10 +135,10 @@ def test_service_rejects_shorter_prefix() -> None:
     async def _run() -> None:
         await _seed_task(factory, "t1", "d1", stdout="hello world")
         async with session_scope(factory) as db:
-            result = await record_task_progress_for_daemon(
+            result = await record_step_progress_for_daemon(
                 db,
                 daemon_id="d1",
-                task_id="t1",
+                step_id="t1",
                 stdout_prefix="hello",
             )
             assert result == {"recorded": False}
@@ -147,10 +147,10 @@ def test_service_rejects_shorter_prefix() -> None:
 
         # Equal length is also rejected.
         async with session_scope(factory) as db:
-            result = await record_task_progress_for_daemon(
+            result = await record_step_progress_for_daemon(
                 db,
                 daemon_id="d1",
-                task_id="t1",
+                step_id="t1",
                 stdout_prefix="hello world",
             )
             assert result == {"recorded": False}
@@ -166,10 +166,10 @@ def test_service_task_not_found_raises_value_error() -> None:
     async def _run() -> None:
         async with session_scope(factory) as db:
             try:
-                await record_task_progress_for_daemon(
+                await record_step_progress_for_daemon(
                     db,
                     daemon_id="d1",
-                    task_id="missing",
+                    step_id="missing",
                     stdout_prefix="x",
                 )
                 assert False, "should have raised"
@@ -188,10 +188,10 @@ def test_service_task_not_owned_raises_value_error() -> None:
         await _seed_task(factory, "t1", "d-real")
         async with session_scope(factory) as db:
             try:
-                await record_task_progress_for_daemon(
+                await record_step_progress_for_daemon(
                     db,
                     daemon_id="d-imposter",
-                    task_id="t1",
+                    step_id="t1",
                     stdout_prefix="x",
                 )
                 assert False, "should have raised"
@@ -202,10 +202,10 @@ def test_service_task_not_owned_raises_value_error() -> None:
         await _seed_task(factory, "t2", None)
         async with session_scope(factory) as db:
             try:
-                await record_task_progress_for_daemon(
+                await record_step_progress_for_daemon(
                     db,
                     daemon_id="d1",
-                    task_id="t2",
+                    step_id="t2",
                     stdout_prefix="x",
                 )
                 assert False, "should have raised for unclaimed task"
@@ -229,10 +229,10 @@ def test_service_publishes_delta_to_hub() -> None:
         await _seed_task(factory, "t-hub", "d-hub", stdout="he")
         sub = default_hub.subscribe("t-hub", cursor=len("he"))
         async with session_scope(factory) as db:
-            await record_task_progress_for_daemon(
+            await record_step_progress_for_daemon(
                 db,
                 daemon_id="d-hub",
-                task_id="t-hub",
+                step_id="t-hub",
                 stdout_prefix="hello",
             )
         event = await asyncio.wait_for(sub.queue.get(), timeout=1)
@@ -261,7 +261,7 @@ def test_http_progress_route_still_works() -> None:
             await conn.run_sync(ensure_schema)
         factory = make_session_factory(engine)
         async with session_scope(factory) as db:
-            await db.execute(delete(TaskModel))
+            await db.execute(delete(StepModel))
             await db.commit()
         await _seed_task(factory, "t-http", "d-http", stdout="")
         cfg._engine_ref = engine  # type: ignore[attr-defined]

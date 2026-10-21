@@ -2,7 +2,7 @@
 
 Covers:
 
-1. ``claim_service.notify_task_available`` wakes HTTP-long-polling claim
+1. ``claim_service.notify_steps_available`` wakes HTTP-long-polling claim
    requests immediately.
 2. ``DaemonWsServer._handle_inbound_request("tasks.available")`` wakes the
    daemon's claim loop.
@@ -28,12 +28,12 @@ from agt.daemon.ws_server import DaemonWsServer
 from agt.server.config import ServerConfig
 from agt.server.daemon_link import DaemonLink
 from agt.server.database import make_engine, make_session_factory
-from agt.server.models import Base, JobModel, RuntimeModel, TaskModel
+from agt.server.models import Base, JobModel, RuntimeModel, StepModel
 from agt.server.routes.tasks import _notify_daemons
 from agt.server.services.claim_service import (
-    claim_tasks_for_daemon,
-    get_task_available_event,
-    notify_task_available,
+    claim_steps_for_daemon,
+    get_step_available_event,
+    notify_steps_available,
 )
 
 
@@ -85,8 +85,8 @@ async def _submit_task(factory, *, task_id: str = "t1", provider: str = "claude"
             )
         )
         session.add(
-            TaskModel(
-                task_id=task_id,
+            StepModel(
+                step_id=task_id,
                 job_id=task_id,
                 provider=provider,
                 prompt="hi",
@@ -103,7 +103,7 @@ async def _submit_task(factory, *, task_id: str = "t1", provider: str = "claude"
 # ── claim_service event wake-up ──────────────────────────────────────
 
 
-def test_notify_task_available_wakes_long_poll(tmp_path: Path) -> None:
+def test_notify_steps_available_wakes_long_poll(tmp_path: Path) -> None:
     """A late task submission wakes a claim request before its timeout."""
     engine, factory, _cfg = _build_engine_and_factory(tmp_path)
     try:
@@ -113,11 +113,11 @@ def test_notify_task_available_wakes_long_poll(tmp_path: Path) -> None:
             # Submit 100ms after the claimer starts polling.
             await asyncio.sleep(0.1)
             await _submit_task(factory)
-            notify_task_available()
+            notify_steps_available()
 
         async def _claim() -> list:
             async with factory() as session:
-                return await claim_tasks_for_daemon(
+                return await claim_steps_for_daemon(
                     session,
                     daemon_id="d1",
                     max_tasks=1,
@@ -140,9 +140,9 @@ def test_notify_task_available_wakes_long_poll(tmp_path: Path) -> None:
 
 def test_claim_service_event_clears_after_wake() -> None:
     """After a wake, the event is cleared so future claimers block again."""
-    event = get_task_available_event()
+    event = get_step_available_event()
     event.set()
-    notify_task_available()  # idempotent on already-set event
+    notify_steps_available()  # idempotent on already-set event
     assert event.is_set()
 
     # A fresh waiter that is woken should find the event cleared by the
@@ -297,7 +297,7 @@ def test_notify_daemons_free_task_broadcasts() -> None:
 
 def test_notify_daemons_sets_claim_event() -> None:
     """``_notify_daemons`` always sets the module-level claim event."""
-    event = get_task_available_event()
+    event = get_step_available_event()
     event.clear()
     request = _FakeRequest({})
 

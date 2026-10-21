@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db
-from ..models import TaskModel
+from ..models import StepModel
 from ..schemas import (
     DaemonOut,
     DaemonSessionOut,
@@ -114,12 +114,12 @@ async def list_daemon_sessions_route(
     """
     rows = (
         await db.execute(
-            select(TaskModel)
+            select(StepModel)
             .where(
-                TaskModel.daemon_id == daemon_id,
-                TaskModel.session_id.isnot(None),
+                StepModel.daemon_id == daemon_id,
+                StepModel.session_id.isnot(None),
             )
-            .order_by(TaskModel.updated_at.desc())
+            .order_by(StepModel.updated_at.desc())
             .limit(limit)
         )
     ).scalars().all()
@@ -134,7 +134,7 @@ async def list_daemon_sessions_route(
         sessions.append(
             DaemonSessionOut(
                 session_id=sid,
-                task_id=t.task_id,
+                task_id=t.step_id,
                 provider=t.provider,
                 identity_did=t.identity_did,
                 dir=t.agent_cwd or t.work_dir,

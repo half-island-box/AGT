@@ -26,7 +26,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agt.server.models import IdentityBindingModel, IdentityModel, RuntimeModel
-from agt.server.models import TaskModel
+from agt.server.models import StepModel
 
 from .runtime_service import is_stale
 
@@ -309,9 +309,9 @@ async def route_runtime(
     if identity_did:
         recent = (
             await db.execute(
-                select(TaskModel.daemon_id)
-                .where(TaskModel.identity_did == identity_did)
-                .order_by(TaskModel.updated_at.desc())
+                select(StepModel.daemon_id)
+                .where(StepModel.identity_did == identity_did)
+                .order_by(StepModel.updated_at.desc())
                 .limit(AFFINITY_WINDOW)
             )
         ).scalars().all()
@@ -324,9 +324,9 @@ async def route_runtime(
     load: dict[str, int] = {}
     running_rows = (
         await db.execute(
-            select(TaskModel.daemon_id)
-            .where(TaskModel.status == "running")
-            .where(TaskModel.daemon_id.in_(daemon_ids))
+            select(StepModel.daemon_id)
+            .where(StepModel.status == "running")
+            .where(StepModel.daemon_id.in_(daemon_ids))
         )
     ).scalars().all()
     for did in running_rows:

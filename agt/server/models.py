@@ -12,7 +12,13 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.orm import (
+    DeclarativeBase,
+    Mapped,
+    mapped_column,
+    relationship,
+    synonym,
+)
 
 
 class Base(DeclarativeBase):
@@ -48,7 +54,7 @@ class JobModel(Base):
     """A complete job/event tracked by the server.
 
     A Job is the lifecycle owner for a multi-step task. Each Job contains
-    one or more Step rows (``TaskModel``), each Step representing a single
+    one or more Step rows (``StepModel``), each Step representing a single
     immutable subprocess execution.
     """
 
@@ -118,11 +124,11 @@ class JobModel(Base):
     created_at: Mapped[str] = mapped_column(String(32), nullable=False)
     updated_at: Mapped[str] = mapped_column(String(32), nullable=False)
 
-    steps: Mapped[list["TaskModel"]] = relationship(
-        "TaskModel",
+    steps: Mapped[list["StepModel"]] = relationship(
+        "StepModel",
         back_populates="job",
         cascade="all, delete-orphan",
-        order_by="TaskModel.created_at",
+        order_by="StepModel.created_at",
         # Async sessions can't lazily load a relationship (MissingGreenlet),
         # so load Steps eagerly whenever a Job is fetched. ``create_job``
         # also wires the first Step into this collection in-memory.
@@ -153,12 +159,16 @@ class JobModel(Base):
     )
 
 
-class TaskModel(Base):
+class StepModel(Base):
     """A single Step (immutable subprocess execution) tracked by the server."""
 
     __tablename__ = "tasks"
 
-    task_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # Logical name is ``step_id``; the physical column remains ``task_id``
+    # for database/API compatibility. ``task_id`` is a mapped synonym for
+    # legacy callers and daemon-facing wire contracts.
+    step_id: Mapped[str] = mapped_column("task_id", String(64), primary_key=True)
+    task_id = synonym("step_id")
     job_id: Mapped[str | None] = mapped_column(
         String(64),
         ForeignKey("jobs.job_id", ondelete="CASCADE"),
@@ -222,15 +232,15 @@ class TaskModel(Base):
     updated_at: Mapped[str] = mapped_column(String(32), nullable=False)
 
     job: Mapped[JobModel | None] = relationship("JobModel", back_populates="steps")
-    children: Mapped[list[TaskModel]] = relationship(
-        "TaskModel",
+    children: Mapped[list[StepModel]] = relationship(
+        "StepModel",
         back_populates="parent",
-        remote_side="TaskModel.parent_task_id",
+        remote_side="StepModel.parent_task_id",
     )
-    parent: Mapped[TaskModel | None] = relationship(
-        "TaskModel",
+    parent: Mapped[StepModel | None] = relationship(
+        "StepModel",
         back_populates="children",
-        remote_side="TaskModel.task_id",
+        remote_side="StepModel.step_id",
     )
 
 
@@ -303,7 +313,7 @@ class ArtifactModel(Base):
     mime_type: Mapped[str] = mapped_column(String(128), nullable=False, default="")
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Declared pass/fail flag from the agent's manifest ("pass"/"fail"/...).
-    # Carries no Job/Step semantics — step success is TaskModel.status.
+    # Carries no Job/Step semantics — step success is StepModel.status.
     status_flag: Mapped[str | None] = mapped_column(String(32), nullable=True)
     size: Mapped[int] = mapped_column(Integer, nullable=False)
     sha256: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -386,10 +396,16 @@ class JobParentModel(Base):
     created_at: Mapped[str] = mapped_column(String(32), nullable=False)
 
 
+# Compatibility alias: the ORM was originally exposed as ``TaskModel`` before
+# the Job/Step split made its actual Step semantics explicit.
+TaskModel = StepModel
+
+
 __all__ = [
     "Base",
     "RuntimeModel",
     "JobModel",
+    "StepModel",
     "TaskModel",
     "SessionModel",
     "IdentityModel",
