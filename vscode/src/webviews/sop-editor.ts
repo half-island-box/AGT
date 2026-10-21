@@ -50,6 +50,11 @@ interface SopBoot {
 
 interface SopRunSummary {
   rootJobId: string;
+  name?: string;
+  status?: string;
+  provider?: string;
+  daemonId?: string | null;
+  updatedAt?: string;
   startedAt: number;
   stale: boolean;
 }
@@ -113,6 +118,12 @@ function selectedStatusOf(name: string): string {
 
 function formatRunTime(startedAt: number): string {
   return new Date(startedAt).toLocaleString();
+}
+
+function formatRunDate(updatedAt: string | undefined, startedAt: number): string {
+  if (!updatedAt) return formatRunTime(startedAt);
+  const ms = Date.parse(updatedAt);
+  return Number.isNaN(ms) ? formatRunTime(startedAt) : formatRunTime(ms);
 }
 
 function tr(key: MessageKey, vars?: Record<string, string | number>): string {
@@ -629,8 +640,15 @@ function renderRunHistory(): string {
       .map(
         (run) => `
         <button type="button" class="agd-sop-run-item ${run.rootJobId === boot?.run?.rootJobId ? 'is-active' : ''}" data-run="${esc(run.rootJobId)}" title="${esc(run.rootJobId)}">
-          <span class="agd-mono">${esc(run.rootJobId.slice(0, 8))}</span>
-          <small>${esc(formatRunTime(run.startedAt))}</small>
+          <span class="agd-sop-run-title">
+            <span class="agd-mono">${esc(run.rootJobId.slice(0, 8))}</span>
+            <strong>${esc(run.name ?? run.rootJobId)}</strong>
+          </span>
+          <span class="agd-sop-run-meta">
+            ${run.status ? `<small class="agd-sop-run-status is-${esc(run.status)}">${esc(run.status)}</small>` : ''}
+            ${run.provider ? `<small>${esc(run.provider)}</small>` : ''}
+            <small>${esc(formatRunDate(run.updatedAt, run.startedAt))}</small>
+          </span>
           ${run.stale ? `<em>${tr('sop.runStale')}</em>` : ''}
         </button>`,
       )

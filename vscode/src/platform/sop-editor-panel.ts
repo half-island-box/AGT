@@ -15,7 +15,7 @@ import {
   serializeSop,
   type ParsedSop,
 } from '../core/sop/yaml-doc';
-import type { UiLanguage } from '../core/types';
+import type { RunInfo, UiLanguage } from '../core/types';
 
 export interface SopBridgeContext {
   extensionUri: vscode.Uri;
@@ -55,6 +55,11 @@ interface RunState {
 
 interface RunSummary {
   rootJobId: string;
+  name: string;
+  status: string;
+  provider: string;
+  daemonId: string | null;
+  updatedAt: string;
   startedAt: number;
   stale: boolean;
 }
@@ -271,9 +276,31 @@ export class SopEditorPanel {
     );
   }
 
+  private workspaceFolder(): string | null {
+    return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null;
+  }
+
+  private async serverSopRuns(): Promise<RunInfo[]> {
+    const cwd = this.workspaceFolder();
+    if (!cwd) return [];
+    try {
+      const list = await this.ctx.lifecycle.api.listRuns({ mode: 'sop', cwd });
+      return list.runs;
+    } catch {
+      return [];
+    }
+  }
+
   private async bootPayload(): Promise<Record<string, unknown>> {
     await this.discoverTemplates();
     const text = this.document?.getText() ?? '';
+    const serverRuns = await this.serverSopRuns();
+    const localRunIds = new Set(this.runs.map((entry) => entry.rootJobId));
+    const serverOnly = serverRuns.filter((run) => !localRunIds.has(run.root_job_id));
+    const runs: RunSummary[] = [
+      ...this.runs.map((entry) => this.runSummary(entry, text, serverRuns)).filter((r): r is RunSummary => r !== null),
+      ...serverOnly.map((run) => this.runSummaryFromServer(run, text)),
+    ];
     return {
       language: this.ctx.language(),
       state: this.ctx.lifecycle.state,
@@ -285,17 +312,18 @@ export class SopEditorPanel {
       dirty: this.document?.isDirty ?? false,
       positions: this.positions(),
       parseError: this.parsed?.parseError ?? null,
-      workspaceFolder: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null,
+      workspaceFolder: this.workspaceFolder(),
       localDaemonId: this.localDaemon(),
       inspectorWidth:
         this.inspectorWidth ??
         this.ctx.context.workspaceState.get<number>(INSPECTOR_WIDTH_KEY) ??
         null,
-      trackedRun: this.runSummary(this.trackedRun(), text),
-      runs: this.runs.map((entry) => this.runSummary(entry, text)),
+      trackedRun: this.runSummary(this.trackedRun(), text, serverRuns),
+      runs,
       run: this.runSummary(
         this.selectedRun() ?? this.trackedRun(),
         text,
+        serverRuns,
       ),
     };
   }
@@ -308,14 +336,48 @@ export class SopEditorPanel {
     return this.runs.find((entry) => entry.rootJobId === this.selectedRunId) ?? null;
   }
 
-  private runSummary(entry: RunState | null, text: string): RunSummary | null {
-    return entry
-      ? {
-            rootJobId: entry.rootJobId,
-            startedAt: entry.startedAt,
-            stale: entry.specHash !== fingerprint(text),
-          }
-      : null;
+  private runSummary(
+    entry: RunState | null,
+    text: string,
+    serverRuns: RunInfo[],
+  ): RunSummary | null {
+    if (!entry) return null;
+    const server = serverRuns.find((run) => run.root_job_id === entry.rootJobId);
+    return this.runSummaryFromServer(
+      server ?? {
+        root_job_id: entry.rootJobId,
+        mode: 'sop',
+        status: 'unknown',
+        provider: '',
+        identity_did: null,
+        daemon_id: null,
+        cwd: this.workspaceFolder(),
+        title: entry.rootJobId,
+        created_at: '',
+        updated_at: '',
+      },
+      text,
+      entry.startedAt,
+      entry.specHash,
+    );
+  }
+
+  private runSummaryFromServer(
+    run: RunInfo,
+    text: string,
+    startedAt?: number,
+    specHash?: string,
+  ): RunSummary {
+    return {
+      rootJobId: run.root_job_id,
+      name: run.title ?? run.root_job_id,
+      status: run.status,
+      provider: run.provider,
+      daemonId: run.daemon_id,
+      updatedAt: run.updated_at,
+      startedAt: (startedAt ?? Date.parse(run.created_at)) || Date.now(),
+      stale: specHash !== undefined && specHash !== fingerprint(text),
+    };
   }
 
   private upsertRun(entry: RunState): void {

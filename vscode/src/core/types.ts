@@ -85,6 +85,27 @@ export interface ChatSessionInfo {
   dir: string | null;
   first_prompt: string;
   last_seen_at: string;
+  /** Job root id used to resume/delete a chat run via the unified runs API. */
+  job_id: string;
+}
+
+/** Unified run row returned by ``GET /api/runs``. */
+export interface RunInfo {
+  root_job_id: string;
+  mode: 'chat' | 'sop' | 'goal';
+  status: string;
+  provider: string;
+  identity_did: string | null;
+  daemon_id: string | null;
+  cwd: string | null;
+  title: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RunListInfo {
+  runs: RunInfo[];
+  total: number;
 }
 
 export interface SessionResolveInfo {

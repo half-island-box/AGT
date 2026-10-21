@@ -455,7 +455,7 @@ function renderSidebar(): void {
   if (!sidebar) return;
   const sessionItems = sessions
     .map((session) => `
-      <div class="agd-session ${session.session_id === activeSessionId ? 'is-selected' : ''}" data-session-id="${esc(session.session_id)}">
+      <div class="agd-session ${session.job_id === activeSessionId ? 'is-selected' : ''}" data-job-id="${esc(session.job_id)}" data-session-id="${esc(session.session_id)}" data-dir="${esc(session.dir ?? '')}">
         <button type="button" class="agd-session-main">
           <span class="agd-session-line">
             ${providerLogo(session.provider)}
@@ -466,7 +466,7 @@ function renderSidebar(): void {
         <button
           type="button"
           class="agd-session-delete"
-          data-delete-session-id="${esc(session.session_id)}"
+          data-delete-job-id="${esc(session.job_id)}"
           title="${tr('chat.deleteSession')}"
           aria-label="${tr('chat.deleteSession')}: ${esc(firstLine(session.first_prompt) || session.session_id)}"
         >${trashIcon()}</button>
@@ -702,11 +702,11 @@ function wireSidebar(): void {
       return;
     }
     const deleteButton = (event.target as HTMLElement | null)?.closest<HTMLElement>(
-      '[data-delete-session-id]',
+      '[data-delete-job-id]',
     );
     if (deleteButton) {
-      const sessionId = deleteButton.dataset.deleteSessionId ?? '';
-      const session = sessions.find((item) => item.session_id === sessionId);
+      const jobId = deleteButton.dataset.deleteJobId ?? '';
+      const session = sessions.find((item) => item.job_id === jobId);
       if (session) openDeleteSessionDialog(session);
       return;
     }
@@ -715,7 +715,7 @@ function wireSidebar(): void {
     );
     if (sessionMain) {
       const session = sessionMain.closest<HTMLElement>('.agd-session');
-      if (session?.dataset.sessionId) void selectSession(session.dataset.sessionId);
+      if (session?.dataset.jobId) void selectSession(session.dataset.jobId, session.dataset.dir);
     }
   });
   document.getElementById('agd-chat-new')?.addEventListener('click', () => {
@@ -866,13 +866,13 @@ async function confirmDeleteSession(): Promise<void> {
   renderDeleteModal();
   try {
     const result = await bridge.call<DeleteSessionResult>('deleteSession', {
-      sessionId: target.session_id,
+      jobId: target.job_id,
       provider: target.provider,
       daemonId,
       finalizeActive: true,
     });
     sessions = result.sessions;
-    if (activeSessionId === target.session_id) clearConversation();
+    if (activeSessionId === target.job_id) clearConversation();
     pendingDeleteSession = null;
     pendingDeleteDaemonId = null;
     notice = tr('chat.deleteSessionDone');
@@ -891,16 +891,16 @@ async function confirmDeleteSession(): Promise<void> {
   }
 }
 
-async function selectSession(sessionId: string): Promise<void> {
+async function selectSession(jobId: string, dir?: string): Promise<void> {
   if (!selectedDaemonId || busy !== 'idle') return;
-  activeSessionId = sessionId;
+  activeSessionId = jobId;
   sessionsLoading = true;
   renderSidebar();
   try {
-    const res = await bridge.call<SelectSessionResult>('selectSession', { sessionId });
+    const res = await bridge.call<SelectSessionResult>('selectSession', { jobId, dir: dir || null });
     const status = res.jobStatus.status;
     clearConversation();
-    activeSessionId = sessionId;
+    activeSessionId = jobId;
     selectedDaemonId = res.resolved.daemon_id ?? selectedDaemonId;
     selectedProvider = res.resolved.provider;
     selectedIdentityDid = res.resolved.identity_did ?? '';
@@ -918,7 +918,7 @@ async function selectSession(sessionId: string): Promise<void> {
         provider: message.role === 'assistant' ? res.resolved.provider : undefined,
       }));
     } else {
-      const existing = sessions.find((session) => session.session_id === sessionId);
+      const existing = sessions.find((session) => session.job_id === jobId);
       if (existing) {
         messages = [{ id: ++messageSeq, role: 'user', content: existing.first_prompt }];
       }
@@ -1040,9 +1040,11 @@ function applyChatEvent(payload: ChatEvent): void {
       assistant.content = String(payload.stdout ?? '');
       assistant.streaming = false;
     }
-    if (currentJob && payload.session_id) {
-      currentJob.sessionId = String(payload.session_id);
-      activeSessionId = currentJob.sessionId;
+    if (currentJob) {
+      if (payload.session_id) {
+        currentJob.sessionId = String(payload.session_id);
+      }
+      activeSessionId = currentJob.jobId;
     }
     busy = 'settling';
     renderMessages();

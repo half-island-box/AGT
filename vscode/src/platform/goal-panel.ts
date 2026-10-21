@@ -6,6 +6,7 @@ import type { ServerLifecycle } from '../core/lifecycle';
 import type {
   GoalRunInfo,
   GoalTreeInfo,
+  RunInfo,
   UiLanguage,
 } from '../core/types';
 
@@ -30,6 +31,49 @@ interface BridgeRequest {
 
 const SELECTED_RUN_KEY = 'agt.goal.selectedRun';
 const INSPECTOR_WIDTH_KEY = 'agt.goal.inspectorWidth';
+
+function toGoalRunInfo(run: RunInfo): GoalRunInfo {
+  return {
+    root_job_id: run.root_job_id,
+    goal: run.title ?? run.root_job_id,
+    status: run.status,
+    provider: run.provider,
+    identity_did: run.identity_did,
+    daemon_id: run.daemon_id,
+    created_at: run.created_at,
+    updated_at: run.updated_at,
+    total_nodes: 0,
+    status_counts: {},
+    meta: {
+      goal: run.title ?? '',
+      template: null,
+      budget: null,
+      goal_sha256: null,
+    },
+  };
+}
+
+function runInfoFromTree(tree: GoalTreeInfo): GoalRunInfo {
+  const root = tree.node;
+  return {
+    root_job_id: tree.root_job_id,
+    goal: tree.goal?.goal ?? root.label ?? tree.root_job_id,
+    status: root.status,
+    provider: root.provider,
+    identity_did: root.identity_did,
+    daemon_id: root.daemon_id,
+    created_at: '',
+    updated_at: '',
+    total_nodes: 0,
+    status_counts: {},
+    meta: tree.goal ?? {
+      goal: root.label ?? '',
+      template: null,
+      budget: null,
+      goal_sha256: null,
+    },
+  };
+}
 
 export class GoalPanel {
   private view: vscode.WebviewView | undefined;
@@ -113,22 +157,22 @@ export class GoalPanel {
 </html>`;
   }
 
-  private async bootPayload(): Promise<Record<string, unknown>> {
+  private async bootPayload(pendingRun?: GoalRunInfo): Promise<Record<string, unknown>> {
     const online = await this.ctx.lifecycle.probe();
     let runs: GoalRunInfo[] = [];
     if (online) {
       try {
-        runs = (await this.ctx.lifecycle.api.goalRuns()).runs;
+        const list = await this.ctx.lifecycle.api.listRuns({
+          mode: 'goal',
+          cwd: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null,
+        });
+        runs = list.runs.map(toGoalRunInfo);
       } catch {
         runs = [];
       }
     }
-    if (this.selectedRunId && !runs.some((run) => run.root_job_id === this.selectedRunId)) {
-      // The tree can still exist briefly after a list page misses it, but an
-      // empty server means there is nothing meaningful to restore.
-      if (!online) {
-        this.selectedRunId = null;
-      }
+    if (pendingRun && !runs.some((run) => run.root_job_id === pendingRun.root_job_id)) {
+      runs = [pendingRun, ...runs];
     }
     let tree: GoalTreeInfo | null = null;
     if (online && this.selectedRunId) {
@@ -141,6 +185,18 @@ export class GoalPanel {
     if (tree) {
       this.selectedRunId = tree.root_job_id;
       await this.ctx.context.workspaceState.update(SELECTED_RUN_KEY, tree.root_job_id);
+      if (!runs.some((run) => run.root_job_id === tree.root_job_id)) {
+        runs = [runInfoFromTree(tree), ...runs];
+      }
+    } else if (
+      this.selectedRunId &&
+      !runs.some((run) => run.root_job_id === this.selectedRunId)
+    ) {
+      // The list is the authority for what can be selected; if the persisted
+      // run is gone and the tree cannot be loaded, clear the selection.
+      this.selectedRunId = null;
+      this.selectedNodeId = null;
+      await this.ctx.context.workspaceState.update(SELECTED_RUN_KEY, null);
     }
     let identities: Awaited<ReturnType<typeof this.ctx.lifecycle.api.identities>> = [];
     let daemons: Awaited<ReturnType<typeof this.ctx.lifecycle.api.daemons>> = [];
@@ -185,19 +241,45 @@ export class GoalPanel {
         case 'goal.submit': {
           const online = await this.ctx.lifecycle.ensureStarted();
           if (!online) throw new Error('server-offline');
+          const goal = String(msg.params?.goal ?? '').trim();
+          const provider = String(msg.params?.provider ?? '');
+          const daemonId = String(msg.params?.daemonId ?? '');
+          const identityDid = msg.params?.identityDid ? String(msg.params.identityDid) : null;
+          const dir = msg.params?.dir ? String(msg.params.dir) : null;
+          const maxDepth = Number(msg.params?.maxDepth ?? 5);
+          const maxDescendants = Number(msg.params?.maxDescendants ?? 64);
           const submitted = await this.ctx.lifecycle.api.submitGoal({
-            goal: String(msg.params?.goal ?? '').trim(),
-            identityDid: msg.params?.identityDid ? String(msg.params.identityDid) : null,
-            provider: msg.params?.provider ? String(msg.params.provider) : null,
-            daemonId: msg.params?.daemonId ? String(msg.params.daemonId) : null,
-            dir: msg.params?.dir ? String(msg.params.dir) : null,
-            maxDepth: Number(msg.params?.maxDepth ?? 5),
-            maxDescendants: Number(msg.params?.maxDescendants ?? 64),
+            goal,
+            identityDid,
+            provider,
+            daemonId,
+            dir,
+            maxDepth,
+            maxDescendants,
           });
           this.selectedRunId = submitted.root_job_id;
           this.selectedNodeId = submitted.root_job_id;
           await this.ctx.context.workspaceState.update(SELECTED_RUN_KEY, submitted.root_job_id);
-          result = { ...submitted, ...(await this.bootPayload()) };
+          const now = new Date().toISOString();
+          const pendingRun: GoalRunInfo = {
+            root_job_id: submitted.root_job_id,
+            goal,
+            status: submitted.status,
+            provider,
+            identity_did: identityDid,
+            daemon_id: daemonId || null,
+            created_at: now,
+            updated_at: now,
+            total_nodes: 0,
+            status_counts: {},
+            meta: {
+              goal,
+              template: null,
+              budget: { max_depth: maxDepth, max_descendants: maxDescendants, max_batch: 8 },
+              goal_sha256: null,
+            },
+          };
+          result = { ...submitted, ...(await this.bootPayload(pendingRun)) };
           break;
         }
 

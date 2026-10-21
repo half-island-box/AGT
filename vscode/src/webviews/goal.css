@@ -97,11 +97,15 @@ body {
 /* Three-pane shell. */
 .agd-goal-body {
   display: grid;
+  grid-template-columns: 302px minmax(320px, 1fr);
+  min-height: 0;
+}
+
+.agd-goal-body.has-inspector {
   grid-template-columns: 302px minmax(320px, 1fr) 6px minmax(
     300px,
     var(--agd-goal-inspector-width, 360px)
   );
-  min-height: 0;
 }
 .agd-goal-body.is-resizing {
   cursor: col-resize;
@@ -640,9 +644,49 @@ body {
   color: var(--vscode-descriptionForeground, #8b8b8b);
 }
 
+/* Node details modal (used when the viewport is too narrow for the inspector). */
+.agd-goal-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.45);
+}
+.agd-goal-modal {
+  width: min(720px, 100%);
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+  border-radius: 12px;
+  background: var(--vscode-editor-background, #1f1f1f);
+  border: 1px solid var(--vscode-panel-border, #2e2e2e);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+}
+.agd-goal-modal-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--vscode-panel-border, #2e2e2e);
+}
+.agd-goal-modal-head span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 700;
+}
+.agd-goal-modal-body {
+  padding: 14px;
+  overflow: auto;
+}
+
 @media (max-width: 1080px) {
-  .agd-goal-body {
-    grid-template-columns: 270px minmax(280px, 1fr) 310px;
+  .agd-goal-body.has-inspector {
+    grid-template-columns: 270px minmax(280px, 1fr) 6px 310px;
   }
   .agd-goal-hero { flex-direction: column; align-items: stretch; }
   .agd-goal-hero-actions { justify-content: flex-end; }

@@ -53,6 +53,12 @@ let draft = {
   maxDescendants: 64,
 };
 
+const INSPECTOR_THRESHOLD = 1080;
+let viewportWidth = window.innerWidth;
+let showInspector = viewportWidth >= INSPECTOR_THRESHOLD;
+let modalNodeId: string | null = null;
+let viewportListenerWired = false;
+
 function tr(key: MessageKey, vars?: Record<string, string | number>): string {
   return t(lang, key, vars);
 }
@@ -118,6 +124,35 @@ function statusText(status: string): string {
   const key = `sop.status.${status}` as MessageKey;
   const translated = t(lang, key);
   return translated === key ? status : translated;
+}
+
+function updateViewport(): void {
+  const width = window.innerWidth;
+  if (width === viewportWidth) return;
+  viewportWidth = width;
+  const next = width >= INSPECTOR_THRESHOLD;
+  if (next !== showInspector) {
+    showInspector = next;
+    modalNodeId = null;
+    render();
+  }
+}
+
+async function openNodeModal(jobId: string): Promise<void> {
+  if (!boot?.tree) return;
+  modalNodeId = jobId;
+  if (selectedNodeId !== jobId) {
+    selectedNodeId = jobId;
+    nodeLog = null;
+    nodeLogJobId = null;
+  }
+  await loadNodeLog(jobId, true);
+  render();
+}
+
+function closeNodeModal(): void {
+  modalNodeId = null;
+  render();
 }
 
 function formatDate(value: string | null | undefined): string {
@@ -391,7 +426,7 @@ function renderRuns(): string {
         <button type="button" class="agd-goal-run ${run.root_job_id === boot?.selectedRunId ? 'is-active' : ''}" data-run="${esc(run.root_job_id)}">
           <span class="agd-goal-run-line">
             ${providerLogo(run.provider)}
-            <strong>${esc(run.meta.goal)}</strong>
+            <strong>${esc(run.goal)}</strong>
           </span>
           <span class="agd-goal-run-line">
             ${statusPill(run.status)}
@@ -478,7 +513,14 @@ function renderLog(node: GoalJobTreeNode): string {
         stderr: liveTask.stderr,
       }]
     : [];
-  const steps = [...live, ...(nodeLog?.steps ?? [])];
+  // The Job log already contains the current Step. Filter it out when the
+  // live status preview is present, otherwise the same task renders twice.
+  const steps = [
+    ...live,
+    ...(nodeLog?.steps ?? []).filter(
+      (step) => !live.some((item) => item.task_id === step.task_id),
+    ),
+  ];
   if (steps.length === 0) return `<p class="agd-sop-empty agd-dim">${tr('sop.nodeLogEmpty')}</p>`;
   return steps.map((step) => `
     <div class="agd-sop-step">
@@ -492,12 +534,7 @@ function renderLog(node: GoalJobTreeNode): string {
   `).join('');
 }
 
-function renderDetails(): string {
-  const node = selectedNode();
-  if (!boot?.tree) return `<aside class="agd-sop-inspector"></aside>`;
-  if (!node) {
-    return `<aside class="agd-sop-inspector"><div class="agd-sop-card"><p class="agd-sop-empty">${tr('goal.noNode')}</p></div></aside>`;
-  }
+function renderNodeInspector(node: GoalJobTreeNode): string {
   const artifacts = node.artifacts.length === 0
     ? `<p class="agd-sop-empty agd-dim">${tr('goal.noArtifacts')}</p>`
     : node.artifacts.map((artifact) => `
@@ -514,7 +551,6 @@ function renderDetails(): string {
       <button type="button" class="agd-btn agd-btn-primary" id="agd-goal-answer-send" ${busy ? 'disabled' : ''}>${busy === 'answer' ? tr('goal.answering') : tr('goal.answer')}</button>
     </div>` : '';
   return `
-  <aside class="agd-sop-inspector">
     <div class="agd-sop-card">
       <div class="agd-sop-card-head"><span>${tr('goal.details')}</span><em class="agd-sop-run-status is-${esc(node.status)}">${esc(statusText(node.status))}</em></div>
       <dl class="agd-goal-meta">
@@ -534,8 +570,34 @@ function renderDetails(): string {
     <div class="agd-sop-card">
       <div class="agd-sop-card-head"><span>${tr('goal.artifacts')}</span></div>
       <div class="agd-sop-artifacts">${artifacts}</div>
+    </div>`;
+}
+
+function renderDetails(): string {
+  const node = selectedNode();
+  if (!boot?.tree) return `<aside class="agd-sop-inspector"></aside>`;
+  if (!node) {
+    return `<aside class="agd-sop-inspector"><div class="agd-sop-card"><p class="agd-sop-empty">${tr('goal.noNode')}</p></div></aside>`;
+  }
+  return `<aside class="agd-sop-inspector">${renderNodeInspector(node)}</aside>`;
+}
+
+function renderNodeModal(): string {
+  if (!modalNodeId || !boot?.tree) return '';
+  const node = flatten(boot.tree.node).find((n) => n.job_id === modalNodeId) ?? null;
+  if (!node) return '';
+  return `
+  <div class="agd-goal-modal-backdrop" id="agd-goal-modal-backdrop" role="presentation">
+    <div class="agd-goal-modal" role="dialog" aria-modal="true" aria-labelledby="agd-goal-modal-title">
+      <div class="agd-goal-modal-head">
+        <span id="agd-goal-modal-title">${esc(node.label || node.job_id)}</span>
+        <button type="button" class="agd-mini-btn" id="agd-goal-modal-close" title="${tr('chat.cancelDelete')}">✕</button>
+      </div>
+      <div class="agd-goal-modal-body">
+        ${renderNodeInspector(node)}
+      </div>
     </div>
-  </aside>`;
+  </div>`;
 }
 
 function render(): void {
@@ -545,33 +607,55 @@ function render(): void {
     root.innerHTML = `<div class="agd-sop-loading">…</div>`;
     return;
   }
+  const inspectorPart = showInspector
+    ? `<div class="agd-sop-splitter" id="agd-goal-inspector-resizer" role="separator" aria-orientation="vertical" title="${tr('sop.resizeInspector')}"></div>${renderDetails()}`
+    : '';
   root.innerHTML = `
-  <div class="agd-sop is-goal" style="--agd-goal-inspector-width:${boot.inspectorWidth ? `${Math.round(boot.inspectorWidth)}px` : '360px'}">
+  <div class="agd-sop is-goal ${showInspector ? 'has-inspector' : ''}" style="--agd-goal-inspector-width:${boot.inspectorWidth ? `${Math.round(boot.inspectorWidth)}px` : '360px'}">
     ${renderHeader()}
     ${notice ? `<div class="agd-goal-error">${esc(notice)}</div>` : ''}
-    <div class="agd-goal-body">
+    <div class="agd-goal-body ${showInspector ? 'has-inspector' : ''}">
       ${renderSidebar()}
       ${renderTree()}
-      <div class="agd-sop-splitter" id="agd-goal-inspector-resizer" role="separator" aria-orientation="vertical" title="${tr('sop.resizeInspector')}"></div>
-      ${renderDetails()}
+      ${inspectorPart}
     </div>
+    ${renderNodeModal()}
   </div>`;
   wireEvents();
-  wireInspectorResizer();
+  if (showInspector) {
+    wireInspectorResizer();
+  }
 }
 
 function renderMainOnly(): void {
+  if (modalNodeId) {
+    // When the details modal is open, a partial update would leave it stale.
+    render();
+    return;
+  }
   const main = document.querySelector('.agd-sop-main');
-  const inspector = document.querySelector('.agd-sop-inspector');
-  if (!main || !inspector || !boot) return;
+  if (!main || !boot) return;
   main.outerHTML = renderTree();
-  const nextInspector = document.querySelector('.agd-sop-inspector');
-  if (nextInspector) nextInspector.outerHTML = renderDetails();
+  if (showInspector) {
+    const nextInspector = document.querySelector('.agd-sop-inspector');
+    if (nextInspector) nextInspector.outerHTML = renderDetails();
+  }
   wireEvents();
-  wireInspectorResizer();
+  if (showInspector) {
+    wireInspectorResizer();
+  }
 }
 
 function wireEvents(): void {
+  if (!viewportListenerWired) {
+    viewportListenerWired = true;
+    window.addEventListener('resize', () => updateViewport());
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && modalNodeId) {
+        closeNodeModal();
+      }
+    });
+  }
   document.querySelector('[data-mode="chat"]')?.addEventListener('click', () => void bridge.call('openChat'));
   document.querySelector('[data-mode="sop"]')?.addEventListener('click', () => void bridge.call('openSop'));
   document.getElementById('agd-goal-lang')?.addEventListener('click', async () => {
@@ -615,10 +699,20 @@ function wireEvents(): void {
       nodeLogJobId = null;
       if (selectedNodeId) void loadNodeLog(selectedNodeId);
     });
+    element.addEventListener('dblclick', () => {
+      if (!showInspector) {
+        const jobId = element.dataset.node ?? '';
+        if (jobId) void openNodeModal(jobId);
+      }
+    });
   });
   document.getElementById('agd-goal-log-refresh')?.addEventListener('click', () => {
     if (selectedNodeId) void loadNodeLog(selectedNodeId);
   });
+  document.getElementById('agd-goal-modal-backdrop')?.addEventListener('click', (event) => {
+    if (event.target === event.currentTarget) closeNodeModal();
+  });
+  document.getElementById('agd-goal-modal-close')?.addEventListener('click', () => closeNodeModal());
   document.getElementById('agd-goal-answer-send')?.addEventListener('click', () => {
     if (selectedNodeId) void answerQuestion(selectedNodeId);
   });

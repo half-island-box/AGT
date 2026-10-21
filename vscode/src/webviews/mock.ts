@@ -2,7 +2,9 @@ import type {
   ChatSessionInfo,
   DaemonConfigInfo,
   DaemonInfo,
+  GoalRunInfo,
   IdentityWithBindings,
+  RunInfo,
   RuntimeInfo,
   ServerState,
   UiLanguage,
@@ -129,15 +131,57 @@ const identities: IdentityWithBindings[] = [
   },
 ];
 
-const sessionsByDaemon: Record<string, ChatSessionInfo[]> = {
-  'dev-box-1': [
-    { session_id: '11111111-1111-4111-8111-111111111111', task_id: 'mock001', provider: 'claude', identity_did: 'did:agt:code-reviewer', dir: '/home/you/project', first_prompt: 'Review the current diff', last_seen_at: '2026-09-15 10:00:00' },
-    { session_id: '22222222-2222-4222-8222-222222222222', task_id: 'mock002', provider: 'codex', identity_did: null, dir: '/home/you/project', first_prompt: 'Summarize this repository', last_seen_at: '2026-09-14 18:20:00' },
-  ],
-  'dev-box-2': [
-    { session_id: '33333333-3333-4333-8333-333333333333', task_id: 'mock003', provider: 'kimi', identity_did: null, dir: '/remote/project', first_prompt: 'Check Rust build', last_seen_at: '2026-09-15 09:20:00' },
-  ],
-};
+const chatRuns: RunInfo[] = [
+  {
+    root_job_id: 'job-chat-001',
+    mode: 'chat',
+    status: 'waiting_input',
+    provider: 'claude',
+    identity_did: 'did:agt:code-reviewer',
+    daemon_id: 'dev-box-1',
+    cwd: '/home/you/project',
+    title: 'Review the current diff',
+    created_at: '2026-09-15 09:55:00',
+    updated_at: '2026-09-15 10:00:00',
+  },
+  {
+    root_job_id: 'job-chat-002',
+    mode: 'chat',
+    status: 'waiting_input',
+    provider: 'codex',
+    identity_did: null,
+    daemon_id: 'dev-box-1',
+    cwd: '/home/you/project',
+    title: 'Summarize this repository',
+    created_at: '2026-09-14 18:15:00',
+    updated_at: '2026-09-14 18:20:00',
+  },
+  {
+    root_job_id: 'job-chat-003',
+    mode: 'chat',
+    status: 'waiting_input',
+    provider: 'kimi',
+    identity_did: null,
+    daemon_id: 'dev-box-2',
+    cwd: '/remote/project',
+    title: 'Check Rust build',
+    created_at: '2026-09-15 09:15:00',
+    updated_at: '2026-09-15 09:20:00',
+  },
+];
+
+function toChatSessionInfo(run: RunInfo): ChatSessionInfo {
+  return {
+    session_id: `sess-${run.root_job_id}`,
+    task_id: `task-${run.root_job_id}`,
+    job_id: run.root_job_id,
+    provider: run.provider,
+    identity_did: run.identity_did,
+    dir: run.cwd,
+    first_prompt: run.title ?? run.root_job_id,
+    last_seen_at: run.updated_at,
+  };
+}
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -256,8 +300,42 @@ function renderSopYaml(doc: SopDoc): string {
   return `${lines.join('\n')}\n`;
 }
 
+function toSopRunSummary(
+  run: typeof sopRun,
+  overrides?: Partial<Record<string, unknown>>,
+): Record<string, unknown> | null {
+  if (!run) return null;
+  return {
+    rootJobId: run.rootJobId,
+    name: run.rootJobId,
+    status: 'running',
+    provider: 'claude',
+    daemonId: 'dev-box-1',
+    updatedAt: new Date(run.startedAt).toISOString(),
+    startedAt: run.startedAt,
+    stale: run.stale,
+    ...overrides,
+  };
+}
+
 function sopBoot(): Record<string, unknown> {
   const doc = sopPath ? sopDocs[sopPath] : null;
+  const currentRun = toSopRunSummary(sopRun);
+  const serverRuns: Record<string, unknown>[] = [
+    {
+      rootJobId: 'job-sop-001',
+      name: 'review-fix',
+      status: 'done',
+      provider: 'claude',
+      daemonId: 'dev-box-1',
+      updatedAt: '2026-09-15T10:00:00.000Z',
+      startedAt: Date.parse('2026-09-15T09:55:00.000Z'),
+      stale: false,
+    },
+  ];
+  const runs: Record<string, unknown>[] = currentRun
+    ? [currentRun, ...serverRuns]
+    : serverRuns;
   return {
     language,
     state,
@@ -276,7 +354,9 @@ function sopBoot(): Record<string, unknown> {
     parseError: null,
     workspaceFolder: '/home/you/project',
     localDaemonId: 'dev-box-1',
-    run: sopRun,
+    trackedRun: currentRun,
+    runs,
+    run: currentRun,
   };
 }
 
@@ -371,7 +451,7 @@ const goalNode = {
   ],
 };
 
-const goalRun = {
+const goalRun: GoalRunInfo = {
   root_job_id: 'goal-root',
   goal: 'Write a deployment guide for the current repository',
   status: 'waiting_children',
@@ -694,32 +774,32 @@ export async function mockCall<T>(_method: string, params?: Record<string, unkno
     }
     case 'sessions': {
       const daemonId = String(params?.daemonId ?? '');
-      return { sessions: sessionsByDaemon[daemonId] ?? [] } as T;
+      const sessions = chatRuns
+        .filter((run) => run.daemon_id === daemonId)
+        .map(toChatSessionInfo);
+      return { sessions } as T;
     }
     case 'selectSession': {
-      const sessionId = String(params?.sessionId ?? '');
-      const found = Object.values(sessionsByDaemon)
-        .flat()
-        .find((session) => session.session_id === sessionId);
+      const jobId = String(params?.jobId ?? '');
+      const found = chatRuns.find((run) => run.root_job_id === jobId);
       if (!found) throw new Error('mock: session not found');
+      const sessionId = `sess-${found.root_job_id}`;
       return {
         resolved: {
-          job_id: `job-${found.task_id}`,
-          task_id: found.task_id,
-          session_id: found.session_id,
+          job_id: found.root_job_id,
+          task_id: `task-${found.root_job_id}`,
+          session_id: sessionId,
           provider: found.provider,
           identity_did: found.identity_did,
-          daemon_id: Object.entries(sessionsByDaemon).find(([, list]) =>
-            list.some((session) => session.session_id === sessionId),
-          )?.[0] ?? 'dev-box-1',
-          dir: found.dir,
+          daemon_id: found.daemon_id ?? 'dev-box-1',
+          dir: found.cwd,
         },
         jobStatus: { status: 'waiting_input' },
         history: {
-          session_id: found.session_id,
+          session_id: sessionId,
           not_implemented: false,
           messages: [
-            { role: 'user', content: found.first_prompt },
+            { role: 'user', content: found.title ?? found.root_job_id },
             { role: 'assistant', content: 'This is a mocked historical response.' },
           ],
         },
@@ -735,24 +815,33 @@ export async function mockCall<T>(_method: string, params?: Record<string, unkno
       } as T;
     }
     case 'deleteSession': {
-      const sessionId = String(params?.sessionId ?? '');
+      const jobId = String(params?.jobId ?? '');
       const daemonId = String(params?.daemonId ?? '');
-      const list = sessionsByDaemon[daemonId] ?? [];
-      const index = list.findIndex((session) => session.session_id === sessionId);
+      const index = chatRuns.findIndex(
+        (run) => run.root_job_id === jobId && run.daemon_id === daemonId,
+      );
       if (index < 0) throw new Error('mock: session not found');
-      list.splice(index, 1);
+      chatRuns.splice(index, 1);
+      const sessions = chatRuns
+        .filter((run) => run.daemon_id === daemonId)
+        .map(toChatSessionInfo);
       return {
         deleted: {
           ok: true,
-          session_id: sessionId,
+          session_id: `sess-${jobId}`,
           session_rows_deleted: 1,
           task_pointers_cleared: 1,
         },
-        sessions: list,
+        sessions,
       } as T;
     }
     case 'send': {
-      const p = (params ?? {}) as { prompt?: string; currentJobId?: string | null };
+      const p = (params ?? {}) as {
+        prompt?: string;
+        currentJobId?: string | null;
+        daemonId?: string;
+      };
+      const daemonId = p.daemonId ?? 'dev-box-1';
       const jobId = p.currentJobId ?? `job-${Math.random().toString(16).slice(2, 8)}`;
       const taskId = `task-${Math.random().toString(16).slice(2, 8)}`;
       const answer = `Mock response\n\nYou said: ${p.prompt ?? ''}`;
@@ -775,7 +864,9 @@ export async function mockCall<T>(_method: string, params?: Record<string, unkno
           {
             kind: 'settled',
             jobStatus: { job_id: jobId, status: 'waiting_input', current_step_id: taskId },
-            sessions: sessionsByDaemon['dev-box-1'] ?? [],
+            sessions: chatRuns
+              .filter((run) => run.daemon_id === daemonId)
+              .map(toChatSessionInfo),
           },
         ],
       } as T;

@@ -14,6 +14,7 @@ import type {
   JobInfo,
   JobStatusInfo,
   RuntimeInfo,
+  RunListInfo,
   SessionHistoryInfo,
   SessionResolveInfo,
   SopNodeLog,
@@ -295,6 +296,31 @@ export class AgtApi {
     return this.request<GoalRunListInfo>(
       `/api/goal/runs?limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset)}`,
     );
+  }
+
+  /**
+   * Unified run history across chat, sop, and goal modes.
+   *
+   * ``cwd`` should be the project directory used to isolate runs. The server
+   * returns one flat ``RunInfo`` per run regardless of mode.
+   */
+  async listRuns(input: {
+    mode?: 'chat' | 'sop' | 'goal';
+    cwd?: string | null;
+    daemonId?: string | null;
+    provider?: string | null;
+    limit?: number;
+    offset?: number;
+  }): Promise<RunListInfo> {
+    const params = new URLSearchParams({
+      limit: String(input.limit ?? 50),
+      offset: String(input.offset ?? 0),
+    });
+    if (input.mode) params.set('mode', input.mode);
+    if (input.cwd) params.set('cwd', input.cwd);
+    if (input.daemonId) params.set('daemon_id', input.daemonId);
+    if (input.provider) params.set('provider', input.provider);
+    return this.request<RunListInfo>(`/api/runs?${params}`);
   }
 
   async jobTree(jobId: string): Promise<{ root_job_id: string; goal: GoalRunInfo['meta'] | null; node: GoalJobTreeNode }> {

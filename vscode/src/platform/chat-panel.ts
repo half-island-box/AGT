@@ -2,9 +2,12 @@ import * as vscode from 'vscode';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ServerLifecycle } from '../core/lifecycle';
+import type { AgtApi } from '../core/api';
 import type {
   ChatSessionInfo,
+  RunInfo,
   SessionHistoryInfo,
+  SessionResolveInfo,
   TaskStatusInfo,
   TaskStreamEvent,
   UiLanguage,
@@ -43,6 +46,52 @@ function activeWorkspaceRoot(): string {
   return (
     activeFolder?.uri.fsPath ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? ''
   );
+}
+
+function toChatSessionInfo(run: RunInfo): ChatSessionInfo {
+  return {
+    session_id: run.root_job_id,
+    task_id: run.root_job_id,
+    job_id: run.root_job_id,
+    provider: run.provider,
+    identity_did: run.identity_did,
+    dir: run.cwd,
+    first_prompt: run.title ?? run.root_job_id,
+    last_seen_at: run.updated_at,
+  };
+}
+
+async function chatSessions(
+  api: AgtApi,
+  daemonId: string,
+): Promise<ChatSessionInfo[]> {
+  const list = await api.listRuns({
+    mode: 'chat',
+    cwd: activeWorkspaceRoot(),
+    daemonId,
+  });
+  return list.runs.map(toChatSessionInfo);
+}
+
+async function resolveChatRun(
+  api: AgtApi,
+  jobId: string,
+  dirHint: string | null,
+): Promise<SessionResolveInfo> {
+  const tree = await api.jobTree(jobId);
+  const node = tree.node;
+  if (!node.session_id) {
+    throw new Error('chat run has no resumed session yet');
+  }
+  return {
+    job_id: jobId,
+    task_id: node.current_task_id ?? jobId,
+    session_id: node.session_id,
+    provider: node.provider,
+    identity_did: node.identity_did ?? null,
+    daemon_id: node.daemon_id ?? null,
+    dir: dirHint,
+  };
 }
 
 export class ChatPanel {
@@ -243,15 +292,21 @@ export class ChatPanel {
 
         case 'sessions': {
           const daemonId = String(msg.params?.daemonId ?? '');
-          result = { sessions: await this.ctx.lifecycle.api.daemonSessions(daemonId) };
+          result = { sessions: await chatSessions(this.ctx.lifecycle.api, daemonId) };
           break;
         }
         case 'selectSession': {
+          const jobId = msg.params?.jobId ? String(msg.params.jobId) : null;
           const sessionId = String(msg.params?.sessionId ?? '');
-          const resolved = await this.ctx.lifecycle.api.resolveSession(sessionId);
+          const dirHint = msg.params?.dir ? String(msg.params.dir) : null;
+          const resolved = jobId
+            ? await resolveChatRun(this.ctx.lifecycle.api, jobId, dirHint)
+            : await this.ctx.lifecycle.api.resolveSession(sessionId);
           const [job, history] = await Promise.all([
             this.ctx.lifecycle.api.jobStatus(resolved.job_id),
-            this.ctx.lifecycle.api.sessionHistory(sessionId).catch((err: unknown) => err),
+            this.ctx.lifecycle.api
+              .sessionHistory(resolved.session_id)
+              .catch((err: unknown) => err),
           ]);
           result = {
             resolved,
@@ -287,18 +342,25 @@ export class ChatPanel {
           break;
         }
         case 'deleteSession': {
+          const jobId = msg.params?.jobId ? String(msg.params.jobId) : null;
           const sessionId = String(msg.params?.sessionId ?? '');
-          const provider = String(msg.params?.provider ?? '');
+          let provider = String(msg.params?.provider ?? '');
           const daemonId = String(msg.params?.daemonId ?? '');
-          if (!sessionId || !provider || !daemonId) {
+          let actualSessionId = sessionId;
+          if (jobId) {
+            const resolved = await resolveChatRun(this.ctx.lifecycle.api, jobId, null);
+            actualSessionId = resolved.session_id;
+            provider = resolved.provider;
+          }
+          if (!actualSessionId || !provider || !daemonId) {
             throw new Error('session id, provider, and daemon id are required');
           }
-          const deleted = await this.ctx.lifecycle.api.deleteSession(sessionId, {
+          const deleted = await this.ctx.lifecycle.api.deleteSession(actualSessionId, {
             provider,
             daemonId,
             finalizeActive: true,
           });
-          const sessions = await this.ctx.lifecycle.api.daemonSessions(daemonId);
+          const sessions = await chatSessions(this.ctx.lifecycle.api, daemonId);
           result = { deleted, sessions };
           break;
         }
@@ -371,7 +433,7 @@ export class ChatPanel {
 
       const [jobStatus, sessions] = await Promise.all([
         api.jobStatus(job.job_id).catch((err: unknown) => err),
-        api.daemonSessions(input.daemonId).catch((err: unknown) => err),
+        chatSessions(api, input.daemonId).catch((err: unknown) => err),
       ]);
       await this.emitChat({
         kind: 'settled',
