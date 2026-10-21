@@ -76,6 +76,7 @@ def build_goal_run_summary(
         provider=root.provider,
         identity_did=root.identity_did,
         daemon_id=root.target_daemon_id,
+        cwd=root.cwd,
         created_at=root.created_at,
         updated_at=root.updated_at,
         total_nodes=len(nodes),
@@ -87,16 +88,25 @@ def build_goal_run_summary(
 async def list_goal_runs(
     db: AsyncSession,
     *,
+    cwd: str | None = None,
+    daemon_id: str | None = None,
     limit: int,
     offset: int,
 ) -> tuple[list[GoalRunSummary], int]:
     """List persisted goal roots, newest update first, with tree summaries."""
-    root_filter = JobModel.root_job_id == JobModel.job_id
+    filters = [
+        JobModel.root_job_id == JobModel.job_id,
+        JobModel.job_type == "goal",
+    ]
+    if cwd is not None:
+        filters.append(JobModel.cwd == cwd)
+    if daemon_id is not None:
+        filters.append(JobModel.target_daemon_id == daemon_id)
     roots = (
         (
             await db.execute(
                 select(JobModel)
-                .where(root_filter, JobModel.goal_meta.is_not(None))
+                .where(*filters)
                 .order_by(JobModel.updated_at.desc(), JobModel.job_id.desc())
             )
         )

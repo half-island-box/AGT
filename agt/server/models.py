@@ -79,8 +79,9 @@ class JobModel(Base):
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, default="queued", index=True
     )
-    # "chat" or "task". Chat jobs derive needs_input from a clean exit so
-    # the conversation can continue via /input; task jobs derive done.
+    # Mode discriminator: "chat", "sop", "goal", or plain "task".
+    # Previously only "chat" / "task"; Phase 6 unifies the three first-class
+    # modes so runs can be filtered by (cwd, job_type).
     job_type: Mapped[str] = mapped_column(
         String(16), nullable=False, default="task", index=True
     )
@@ -110,6 +111,10 @@ class JobModel(Base):
     goal_meta: Mapped[str | None] = mapped_column(Text, nullable=True)
     work_dir: Mapped[str | None] = mapped_column(String(512), nullable=True)
     agent_cwd: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    # Phase 6: the user's project directory used to isolate run records.
+    # For local runs this is the client cwd; for remote daemon runs it is
+    # the daemon-side execution directory (agent_cwd / --dir).
+    cwd: Mapped[str | None] = mapped_column(String(1024), nullable=True, index=True)
     created_at: Mapped[str] = mapped_column(String(32), nullable=False)
     updated_at: Mapped[str] = mapped_column(String(32), nullable=False)
 
@@ -252,6 +257,8 @@ class SessionModel(Base):
     )
     provider: Mapped[str] = mapped_column(String(32), primary_key=True)
     session_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    # Phase 6: mirror of JobModel.cwd for filtering sessions by project dir.
+    cwd: Mapped[str | None] = mapped_column(String(1024), nullable=True, index=True)
     created_at: Mapped[str] = mapped_column(String(32), nullable=False)
     updated_at: Mapped[str] = mapped_column(String(32), nullable=False)
 

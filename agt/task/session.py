@@ -69,6 +69,10 @@ class SessionEntry:
     # subsequent updates preserve the original (a session's identity must
     # not silently change across resumes).
     identity_did: str | None = None
+    # Phase 6: project directory for this session. For local sessions this
+    # is the store's cwd; for records synced from a remote daemon it is the
+    # daemon-side execution directory.
+    cwd: str = ""
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -149,6 +153,7 @@ class CwdSessionStore:
                     first_prompt=first_prompt,
                     provider=self.provider,
                     identity_did=identity_did,
+                    cwd=str(self.cwd),
                 )
             )
         self._sort_in_place()
@@ -279,6 +284,7 @@ class CwdSessionStore:
                     task_id=str(task_id),
                     turn_count=0,  # we didn't track turns
                     first_prompt="",
+                    cwd=str(self.cwd),
                 )
             )
         # Write a .bak snapshot of the legacy file before we overwrite
@@ -334,6 +340,7 @@ def _entry_from_dict(d: dict, *, default_provider: str = "claude") -> SessionEnt
         turn_count=int(d.get("turn_count", 0) or 0),
         first_prompt=str(d.get("first_prompt", "") or ""),
         identity_did=d.get("identity_did"),
+        cwd=str(d.get("cwd") or ""),
     )
 
 

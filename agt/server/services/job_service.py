@@ -12,6 +12,7 @@ import uuid
 import json
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -107,6 +108,15 @@ async def create_job(
     j_id = job_id or _new_id()
     s_id = task_id or _new_id()
 
+    # Phase 6: normalize the project directory used for run isolation.
+    # Prefer work_dir (local client cwd); fall back to agent_cwd (daemon-side
+    # execution directory). Resolve to an absolute path without trailing slash.
+    raw_cwd = work_dir or agent_cwd
+    try:
+        cwd = str(Path(raw_cwd).resolve()) if raw_cwd else None
+    except (OSError, ValueError):
+        cwd = raw_cwd
+
     # Phase 3: lineage — children inherit the parent's root; roots carry
     # their own id (denormalized for subtree/budget queries). Phase 5:
     # an explicit override wins (SOP nodes share a root with no lineage).
@@ -116,6 +126,9 @@ async def create_job(
         if parent is None:
             raise ValueError({"type": "parent_job_not_found", "message": parent_job_id})
         effective_root = root_job_id or parent.root_job_id
+        # Children run in the same project context as their parent by default.
+        if cwd is None:
+            cwd = parent.cwd
 
     blocked = not with_step
     job = JobModel(
@@ -129,6 +142,7 @@ async def create_job(
         target_daemon_id=target_daemon_id,
         work_dir=work_dir,
         agent_cwd=agent_cwd,
+        cwd=cwd,
         sop_node=sop_node,
         goal_meta=goal_meta,
         sop_loop_name=sop_loop_name,
@@ -665,7 +679,7 @@ async def spawn_children(
                 work_dir=child_work_dir,
                 agent_cwd=child_agent_cwd,
                 identity_did=identity,
-                job_type="task",
+                job_type=parent_job.job_type,
                 message=message,
                 parent_job_id=parent_job.job_id,
             )

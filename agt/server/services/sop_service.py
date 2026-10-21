@@ -87,7 +87,7 @@ def _loop_meta_json(loop) -> str:
 
 
 async def _create_loop_sentinel(
-    db: AsyncSession, loop, root_job_id: str
+    db: AsyncSession, loop, root_job_id: str, cwd: str | None = None
 ) -> str:
     """Create a blocked sentinel job that represents loop completion.
 
@@ -101,6 +101,8 @@ async def _create_loop_sentinel(
         prompt="",
         with_step=False,
         root_job_id=root_job_id,
+        work_dir=cwd,
+        job_type="sop",
         sop_loop_name=loop.name,
         sop_iteration=0,
         sop_loop_meta=_loop_meta_json(loop),
@@ -314,6 +316,8 @@ async def expand_sop(
                       if root_node.identity and spec.identities.get(root_node.identity)
                       else None),
         with_step=False,
+        work_dir=cwd,
+        job_type="sop",
         sop_node=json.dumps(
             _node_meta(root_node, spec.identities, cwd, local_daemon_id),
             ensure_ascii=False,
@@ -337,7 +341,7 @@ async def expand_sop(
 
     # Create loop sentinel jobs first — non-loop nodes may depend on them.
     for loop in spec.loops:
-        sentinel = await _create_loop_sentinel(db, loop, root.job_id)
+        sentinel = await _create_loop_sentinel(db, loop, root.job_id, cwd=cwd)
         expansion.sentinel_jobs[loop.name] = sentinel
 
     # Create non-loop DAG jobs.
@@ -358,6 +362,8 @@ async def expand_sop(
             prompt="",
             identity_did=meta["identity_did"],
             with_step=False,
+            work_dir=cwd,
+            job_type="sop",
             parents=parents,
             root_job_id=root.job_id,
             sop_node=json.dumps(meta, ensure_ascii=False),
@@ -387,6 +393,8 @@ async def expand_sop(
             prompt="",
             identity_did=meta["identity_did"],
             with_step=False,
+            work_dir=cwd,
+            job_type="sop",
             parents=parents,
             root_job_id=root.job_id,
             sop_node=json.dumps(meta, ensure_ascii=False),
@@ -588,9 +596,11 @@ async def activate_job(db: AsyncSession, job: JobModel) -> JobModel:
     explicit_dir = meta.get("dir")
     if explicit_dir:
         job.agent_cwd = explicit_dir
+        job.cwd = explicit_dir
     elif meta.get("local_daemon_id") is not None:
         if target and target == meta.get("local_daemon_id"):
             job.agent_cwd = meta.get("cwd")
+            job.cwd = meta.get("cwd")
         else:
             return await _fail_at_activation(
                 db, job, provider, target,
