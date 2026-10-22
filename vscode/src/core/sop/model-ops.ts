@@ -9,7 +9,7 @@
  *   equality is what keeps the mock from drifting away from the editor.
  */
 
-import { uniqueNodeName, rewritePlaceholders } from './graph';
+import { inferLoops, uniqueNodeName, rewritePlaceholders } from './graph';
 import type { EditIntent, SopDoc, SopNode } from './model';
 
 function withNode(
@@ -57,7 +57,15 @@ export function applyIntentToModel(doc: SopDoc, intent: EditIntent): SopDoc {
           ...node,
           dependsOn: node.dependsOn.filter((dep) => dep !== intent.name),
         }));
-      return reindex({ ...doc, nodes });
+      const loops = doc.loops.map((loop) => {
+        const nodes = loop.nodes.filter((node) => node !== intent.name);
+        return {
+          ...loop,
+          nodes,
+          entry: nodes.includes(loop.entry) ? loop.entry : nodes[0] ?? '',
+        };
+      });
+      return withInferredLoops(reindex({ ...doc, nodes, loops }));
     }
 
     case 'renameNode': {
@@ -75,7 +83,15 @@ export function applyIntentToModel(doc: SopDoc, intent: EditIntent): SopDoc {
           input: rewritePlaceholders(renamed.input, intent.from, intent.to),
         };
       });
-      return { ...doc, nodes };
+      return {
+        ...doc,
+        nodes,
+        loops: doc.loops.map((loop) => ({
+          ...loop,
+          nodes: loop.nodes.map((name) => (name === intent.from ? intent.to : name)),
+          entry: loop.entry === intent.from ? intent.to : loop.entry,
+        })),
+      };
     }
 
     case 'setNodeField':
@@ -85,17 +101,21 @@ export function applyIntentToModel(doc: SopDoc, intent: EditIntent): SopDoc {
       }));
 
     case 'addDependency':
-      return withNode(doc, intent.node, (node) =>
-        node.dependsOn.includes(intent.dependsOn)
-          ? node
-          : { ...node, dependsOn: [...node.dependsOn, intent.dependsOn] },
+      return withInferredLoops(
+        withNode(doc, intent.node, (node) =>
+          node.dependsOn.includes(intent.dependsOn)
+            ? node
+            : { ...node, dependsOn: [...node.dependsOn, intent.dependsOn] },
+        ),
       );
 
     case 'removeDependency':
-      return withNode(doc, intent.node, (node) => ({
-        ...node,
-        dependsOn: node.dependsOn.filter((dep) => dep !== intent.dependsOn),
-      }));
+      return withInferredLoops(
+        withNode(doc, intent.node, (node) => ({
+          ...node,
+          dependsOn: node.dependsOn.filter((dep) => dep !== intent.dependsOn),
+        })),
+      );
 
     case 'addIdentity': {
       if (doc.identities.some((i) => i.alias === intent.alias)) {
@@ -131,7 +151,71 @@ export function applyIntentToModel(doc: SopDoc, intent: EditIntent): SopDoc {
         ),
       };
 
+    case 'addLoop': {
+      const name = intent.name?.trim() || uniqueLoopName(doc);
+      const nodes =
+        intent.nodes?.filter((node) => doc.nodes.some((item) => item.name === node)) ??
+        (doc.nodes.length > 0 ? [doc.nodes[0].name] : []);
+      return {
+        ...doc,
+        loops: [
+          ...doc.loops,
+          {
+            name,
+            nodes,
+            maxIterations: 2,
+            entry: nodes[0] ?? '',
+          },
+        ],
+      };
+    }
+
+    case 'removeLoop':
+      return { ...doc, loops: doc.loops.filter((loop) => loop.name !== intent.name) };
+
+    case 'setLoopField':
+      return {
+        ...doc,
+        loops: doc.loops.map((loop) =>
+          loop.name === intent.name
+            ? { ...loop, [intent.field]: intent.value }
+            : loop,
+        ),
+      };
+
+    case 'setLoopNodes': {
+      return {
+        ...doc,
+        loops: doc.loops.map((loop) => {
+          if (loop.name !== intent.name) {
+            return loop;
+          }
+          const nodes = intent.nodes.filter((name, index) =>
+            intent.nodes.indexOf(name) === index,
+          );
+          return {
+            ...loop,
+            nodes,
+            entry: nodes.includes(loop.entry) ? loop.entry : nodes[0] ?? '',
+          };
+        }),
+      };
+    }
+
     default:
       return doc;
   }
+}
+
+function uniqueLoopName(doc: SopDoc): string {
+  const existing = new Set(doc.loops.map((loop) => loop.name));
+  let index = doc.loops.length + 1;
+  while (existing.has(`loop-${index}`)) {
+    index += 1;
+  }
+  return `loop-${index}`;
+}
+
+function withInferredLoops(doc: SopDoc): SopDoc {
+  return { ...doc, loops: inferLoops(doc) };
 }

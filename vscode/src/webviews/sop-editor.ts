@@ -3,13 +3,14 @@ import './markdown.css';
 import './sop-editor.css';
 import { renderMarkdown } from './markdown';
 import { t, type MessageKey } from '../core/i18n';
-import { issues as localIssues, wouldCycle } from '../core/sop/graph';
+import { issues as localIssues, loopMembership, wouldCycle } from '../core/sop/graph';
 import { computeLayout, type SopPoint } from '../core/sop/layout';
 import { buildOptions, renderOptions } from '../core/sop/options';
 import type { EditIntent, SopDoc, SopIssue, SopNode } from '../core/sop/model';
 import type {
   ServerState,
   SopNodeLog,
+  SopNodeStatus,
   SopStatus,
   UiLanguage,
 } from '../core/types';
@@ -74,6 +75,8 @@ type NodeField = 'name' | 'identity' | 'input' | 'output' | 'provider' | 'daemon
 let boot: SopBoot | null = null;
 let lang: UiLanguage = 'zh';
 let selected: string | null = null;
+let selectedInstanceId: string | null = null;
+let loopSettingsName: string | null = null;
 let positions: Record<string, SopPoint> = {};
 let validation: ServerValidation | null = null;
 let busy: 'save' | 'validate' | null = null;
@@ -108,12 +111,48 @@ function runRunning(): boolean {
   return runActive() && !(runStatus?.all_terminal ?? false);
 }
 
+function statusInstanceId(node: SopNodeStatus): string {
+  return node.loop_name && node.iteration > 0
+    ? `${node.name}#${node.iteration}`
+    : node.name;
+}
+
+function baseNodeName(instanceId: string): string {
+  const hash = instanceId.lastIndexOf('#');
+  return hash < 0 ? instanceId : instanceId.slice(0, hash);
+}
+
+function statusNodes(): SopNodeStatus[] {
+  return runStatus?.nodes ?? [];
+}
+
+function selectedStatusNodes(): SopNodeStatus[] {
+  return selectedRunStatus?.nodes ?? [];
+}
+
+function statusById(nodes: SopNodeStatus[], id: string): SopNodeStatus | undefined {
+  return nodes.find((node) => statusInstanceId(node) === id);
+}
+
+function latestStatusOf(name: string, nodes: SopNodeStatus[]): SopNodeStatus | undefined {
+  const matches = nodes.filter((node) => node.name === name);
+  return matches.length > 0 ? matches[matches.length - 1] : undefined;
+}
+
 function statusOf(name: string): string {
-  return runStatus?.nodes.find((node) => node.name === name)?.status ?? '';
+  const nodes = statusNodes();
+  if (selectedInstanceId) {
+    return statusById(nodes, selectedInstanceId)?.status ?? '';
+  }
+  return latestStatusOf(name, nodes)?.status ?? '';
 }
 
 function selectedStatusOf(name: string): string {
-  return selectedRunStatus?.nodes.find((node) => node.name === name)?.status ?? '';
+  const nodes = selectedStatusNodes();
+  if (selectedInstanceId) {
+    return statusById(nodes, selectedInstanceId)?.status ?? '';
+  }
+  return latestStatusOf(name, nodes)?.status ?? '';
 }
 
 function formatRunTime(startedAt: number): string {
@@ -160,6 +199,33 @@ function nodeIssues(node: SopNode): SopIssue[] {
   return allIssues().filter((issue) => issue.node === node.name);
 }
 
+function nodeProblems(node: SopNode): 'error' | 'warning' | 'info' | null {
+  const problems = nodeIssues(node);
+  if (problems.some((issue) => issue.level === 'error')) {
+    return 'error';
+  }
+  if (problems.some((issue) => issue.level === 'warning')) {
+    return 'warning';
+  }
+  return problems.length > 0 ? 'info' : null;
+}
+
+function templateByName(doc: SopDoc | null, name: string): SopNode {
+  return (
+    doc?.nodes.find((node) => node.name === name) ?? {
+      name,
+      identity: '',
+      dependsOn: [],
+      input: '',
+      output: '',
+      provider: '',
+      daemon: '',
+      dir: '',
+      index: 0,
+    }
+  );
+}
+
 function allIssues(): SopIssue[] {
   const doc = model();
   if (!doc) {
@@ -195,6 +261,13 @@ function applyBoot(next: SopBoot): void {
   positions = merged;
   if (selected && !next.model?.nodes.some((node) => node.name === selected)) {
     selected = null;
+    selectedInstanceId = null;
+  }
+  if (
+    loopSettingsName &&
+    !next.model?.loops.some((loop) => loop.name === loopSettingsName)
+  ) {
+    loopSettingsName = null;
   }
   if (runActive()) {
     startPolling();
@@ -302,9 +375,21 @@ function wireInspectorResizer(): void {
  * a full re-render would tear down the canvas on every poll.
  */
 function refreshRunUI(): void {
+  const statuses = statusNodes();
+  const renderedIds = [...document.querySelectorAll<HTMLElement>('.agd-sop-node')].map(
+    (element) => element.dataset.node ?? '',
+  );
+  const expectedIds = statuses.map((node) => statusInstanceId(node));
+  const sameGraph =
+    renderedIds.length === expectedIds.length &&
+    renderedIds.every((id) => expectedIds.includes(id));
+  if (!sameGraph) {
+    render();
+    return;
+  }
   for (const element of document.querySelectorAll<HTMLElement>('.agd-sop-node')) {
     const name = element.dataset.node ?? '';
-    const status = statusOf(name);
+    const status = statusById(statuses, name)?.status ?? '';
     for (const cls of [...element.classList]) {
       if (cls.startsWith('is-') && !['is-selected', 'is-readonly', 'is-drop'].includes(cls)) {
         element.classList.remove(cls);
@@ -349,6 +434,21 @@ async function loadNodeLog(name: string): Promise<void> {
   refreshSelectionUI();
 }
 
+async function ensureSelectedRunStatus(): Promise<void> {
+  const rootJobId = inspectRunRoot();
+  if (!rootJobId || selectedRunStatusRoot === rootJobId) {
+    return;
+  }
+  try {
+    selectedRunStatus = await bridge.call<SopStatus>('sop.status', { rootJobId });
+    selectedRunStatusRoot = rootJobId;
+  } catch {
+    selectedRunStatus = null;
+    selectedRunStatusRoot = rootJobId;
+  }
+  render();
+}
+
 async function selectRun(rootJobId: string): Promise<void> {
   if (!rootJobId || rootJobId === inspectRunRoot()) {
     return;
@@ -361,6 +461,8 @@ async function selectRun(rootJobId: string): Promise<void> {
   if (selected) {
     await loadNodeLog(selected);
     render();
+  } else {
+    await ensureSelectedRunStatus();
   }
 }
 
@@ -380,7 +482,10 @@ function flash(text: string, kind: 'info' | 'error' = 'info'): void {
  */
 function refreshSelectionUI(): void {
   for (const element of document.querySelectorAll<HTMLElement>('.agd-sop-node')) {
-    element.classList.toggle('is-selected', element.dataset.node === selected);
+    element.classList.toggle(
+      'is-selected',
+      element.dataset.node === (selectedInstanceId ?? selected),
+    );
   }
   const inspector = document.querySelector('.agd-sop-inspector');
   if (inspector) {
@@ -437,7 +542,7 @@ async function startRun(): Promise<void> {
   if (runBusy) {
     return;
   }
-  const problems = localIssues(model() ?? { name: '', identities: [], nodes: [] });
+    const problems = localIssues(model() ?? { name: '', identities: [], nodes: [], loops: [] });
   if (problems.some((issue) => issue.level === 'error')) {
     flash(tr('sop.runBlocked'), 'error');
     return;
@@ -593,6 +698,7 @@ function render(): void {
     ${runActive() ? renderRunBanner() : ''}
     ${toast ? `<div class="agd-sop-toast ${toast.kind === 'error' ? 'is-error' : ''}">${esc(toast.text)}</div>` : ''}
     ${pendingImpact ? renderImpact() : ''}
+    ${loopSettingsName ? renderLoopSettings() : ''}
   </div>`;
 
   mountCanvas();
@@ -688,6 +794,32 @@ function renderIdentities(doc: SopDoc | null): string {
            </div>`
         : ''
     }
+  </div>`;
+}
+
+function renderLoopSettings(): string {
+  const loop = model()?.loops.find((item) => item.name === loopSettingsName);
+  if (!loop) {
+    return '';
+  }
+  return `
+  <div class="agd-sop-modal" id="agd-sop-loop-settings-backdrop">
+    <div class="agd-sop-modal-body">
+      <h3>${tr('sop.loopSettings')}</h3>
+      <p>${esc(loop.name)} · ${tr('sop.loopEntry')}: ${esc(loop.entry || loop.nodes[0] || '—')}</p>
+      <label class="agd-sop-field">
+        <span>${tr('sop.loopMaxIterations')}</span>
+        <input id="agd-sop-loop-iterations" class="agd-input" type="number" min="1" max="100" value="${loop.maxIterations || 2}">
+      </label>
+      <div class="agd-sop-field">
+        <span>${tr('sop.loopMembers')}</span>
+        <div class="agd-sop-deps">${loop.nodes.map((name) => `<span class="agd-sop-dep">${esc(name)}</span>`).join('')}</div>
+      </div>
+      <div class="agd-actions">
+        <button type="button" id="agd-sop-loop-cancel" class="agd-btn">${tr('sop.impact.cancel')}</button>
+        <button type="button" id="agd-sop-loop-save" class="agd-btn agd-btn-primary">${tr('sop.loopSave')}</button>
+      </div>
+    </div>
   </div>`;
 }
 
@@ -940,7 +1072,7 @@ function renderInspectLog(node: SopNode): string {
       (step) => `
       <div class="agd-sop-step">
         <div class="agd-sop-step-head">
-          <span class="agd-mono">${esc(step.task_id.slice(0, 8))}</span>
+          <span class="agd-mono">${esc(step.task_id.slice(0, 8))}${step.iteration > 0 ? ` · ${tr('sop.loopIteration', { iteration: step.iteration })}` : ''}</span>
           <span class="agd-dim">${esc(step.status)}${step.exit_code === null ? '' : ` · exit ${step.exit_code}`}</span>
         </div>
         ${step.stdout ? `<div class="agd-sop-stdout agd-md">${renderMarkdown(step.stdout)}</div>` : ''}
@@ -948,8 +1080,10 @@ function renderInspectLog(node: SopNode): string {
       </div>`,
     )
     .join('');
-  const artifacts = selectedRunStatus?.nodes.find((n) => n.name === node.name)
-    ?.artifact_details ?? [];
+  const selectedStatus = selectedInstanceId
+    ? statusById(selectedStatusNodes(), selectedInstanceId)
+    : latestStatusOf(node.name, selectedStatusNodes());
+  const artifacts = selectedStatus?.artifact_details ?? [];
   return `
   ${renderRunHistory()}
   <div class="agd-sop-card agd-sop-log-card">
@@ -1054,6 +1188,87 @@ function providerOptions(node: SopNode): string {
   );
 }
 
+function activeStatusGraph(): SopStatus | null {
+  if (runActive() && runStatus && !runStatus.all_terminal) {
+    return runStatus;
+  }
+  if (editorMode === 'inspect' && selectedRunStatus) {
+    return selectedRunStatus;
+  }
+  return null;
+}
+
+/**
+ * The runtime graph expands every loop iteration into its own node
+ * (``review#1``, ``review#2``) using the backend-provided `depends_on`
+ * display names, so monitor nodes never overwrite each other.
+ */
+function runtimeGraph(doc: SopDoc, status: SopStatus | null): {
+  nodes: SopNodeStatus[];
+  edges: { from: string; to: string; kind?: 'loop' | 'iteration' }[];
+  positions: Record<string, SopPoint>;
+} | null {
+  if (!status) {
+    return null;
+  }
+  const statuses = [...status.nodes].sort(
+    (a, b) => (a.iteration - b.iteration) || a.name.localeCompare(b.name),
+  );
+  const byId = new Map<string, SopNodeStatus>();
+  const ids: string[] = [];
+  for (const node of statuses) {
+    const id = statusInstanceId(node);
+    if (byId.has(id)) {
+      continue;
+    }
+    byId.set(id, node);
+    ids.push(id);
+  }
+
+  const edges: { from: string; to: string; kind?: 'loop' | 'iteration' }[] = [];
+  for (const node of statuses) {
+    const to = statusInstanceId(node);
+    for (const dep of node.depends_on) {
+      if (!byId.has(dep)) {
+        continue;
+      }
+      const parent = byId.get(dep);
+      if (parent && parent.loop_name && parent.loop_name === node.loop_name) {
+        edges.push({
+          from: dep,
+          to,
+          kind: parent.iteration === node.iteration ? 'loop' : 'iteration',
+        });
+      } else {
+        edges.push({ from: dep, to });
+      }
+    }
+  }
+
+  const templateByName = new Map(
+    doc.nodes.map((node) => [node.name, node]),
+  );
+  const pseudo: SopDoc = {
+    name: doc.name,
+    identities: doc.identities,
+    loops: [],
+    nodes: ids.map((id) => ({
+      ...(templateByName.get(baseNodeName(id)) ?? {}),
+      name: id,
+      identity: '',
+      dependsOn: byId.get(id)?.depends_on ?? [],
+      input: '',
+      output: '',
+      provider: '',
+      daemon: '',
+      dir: '',
+      index: 0,
+    })),
+  };
+  const positions = computeLayout(pseudo);
+  return { nodes: statuses, edges, positions };
+}
+
 /** One-line explanation of where the provider list came from. */
 function pinHint(node: SopNode): string {
   const daemons = boot?.daemons ?? [];
@@ -1083,51 +1298,92 @@ function mountCanvas(): void {
     !runRunning() &&
     doc !== null &&
     boot?.parseError === null;
+  const runtime = doc ? runtimeGraph(doc, activeStatusGraph()) : null;
+  const membership = doc ? loopMembership(doc) : new Map<string, string>();
+  const loopsByName = new Map((doc?.loops ?? []).map((loop) => [loop.name, loop]));
+  const displayPositions = runtime ? runtime.positions : positions;
+  const templateNodes = (doc?.nodes ?? []).map((node) => ({
+    name: node.name,
+    provider: canvasProvider(node),
+    badge: node.output ? `→ ${node.output}` : '',
+    loopName: membership.get(node.name),
+    loopIterations: loopsByName.get(membership.get(node.name) ?? '')?.maxIterations,
+    loopEntry: loopsByName.get(membership.get(node.name) ?? '')?.entry === node.name,
+    selected: node.name === (selectedInstanceId ?? selected),
+    status: statusOf(node.name),
+    problem: nodeProblems(node),
+  }));
+  const runtimeNodes = runtime
+    ? runtime.nodes.map((node) => ({
+        name: statusInstanceId(node),
+        provider: node.provider || canvasProvider(templateByName(doc, node.name)),
+        badge: templateByName(doc, node.name).output
+          ? `→ ${templateByName(doc, node.name).output}`
+          : '',
+        loopName: node.loop_name ?? undefined,
+        selected: statusInstanceId(node) === (selectedInstanceId ?? selected),
+        status: node.status,
+        problem: null,
+      }))
+    : [];
+  const nodes = runtime ? runtimeNodes : templateNodes;
+  const edges = runtime
+    ? runtime.edges
+    : (doc?.nodes ?? []).flatMap((node) =>
+        node.dependsOn.map((dep) => ({
+          from: dep,
+          to: node.name,
+          kind:
+            membership.get(dep) !== undefined &&
+            membership.get(dep) === membership.get(node.name)
+              ? ('loop' as const)
+              : undefined,
+        })),
+      );
   const options = {
     editable,
-    nodes: (doc?.nodes ?? []).map((node) => {
-      const problems = nodeIssues(node);
-      return {
-        name: node.name,
-        provider: canvasProvider(node),
-        badge: node.output ? `→ ${node.output}` : '',
-        selected: node.name === selected,
-        status: statusOf(node.name),
-        problem: problems.some((i) => i.level === 'error')
-          ? ('error' as const)
-          : problems.some((i) => i.level === 'warning')
-            ? ('warning' as const)
-            : problems.length > 0
-              ? ('info' as const)
-              : null,
-      };
-    }),
-    edges: (doc?.nodes ?? []).flatMap((node) =>
-      node.dependsOn.map((dep) => ({ from: dep, to: node.name })),
-    ),
-    positions,
-    selected,
+    nodes,
+    edges,
+    positions: displayPositions,
+    selected: selectedInstanceId ?? selected,
     view,
+    onLoopSettings: (name: string) => {
+      loopSettingsName = name;
+      render();
+    },
     onSelect: (name: string | null) => {
-      selected = name;
+      if (name) {
+        const base = baseNodeName(name);
+        selected = doc?.nodes.some((node) => node.name === base) ? base : name;
+        selectedInstanceId = runtime ? name : null;
+      } else {
+        selected = null;
+        selectedInstanceId = null;
+      }
       refreshSelectionUI();
-      if (name && runActive()) {
-        void loadNodeLog(name);
+      if (name && activeStatusGraph()) {
+        void loadNodeLog(selected ?? name);
       }
     },
     onConnect: (from: string, to: string): boolean => {
-      if (!doc || wouldCycle(doc, to, from)) {
-        flash(tr('sop.cycleBlocked'), 'error');
+      if (!doc) {
         return false;
       }
-      void apply({ kind: 'addDependency', node: to, dependsOn: from });
+      const createsLoop = wouldCycle(doc, to, from);
+      void apply({ kind: 'addDependency', node: to, dependsOn: from }).then((applied) => {
+        if (applied && createsLoop) {
+          flash(tr('sop.loopAutoCreated'));
+        }
+      });
       return true;
     },
     onDeleteEdge: (from: string, to: string) => {
       void apply({ kind: 'removeDependency', node: to, dependsOn: from });
     },
     onMove: (name: string, point: SopPoint) => {
-      persistLayout({ ...positions, [name]: point });
+      if (!runtime) {
+        persistLayout({ ...positions, [name]: point });
+      }
     },
     onRename: (name: string) => {
       selected = name;
@@ -1167,7 +1423,11 @@ function wireEvents(): void {
         return;
       }
       editorMode = next;
+      selectedInstanceId = null;
       render();
+      if (next === 'inspect' && boot?.run) {
+        void ensureSelectedRunStatus();
+      }
       // Load the log for the already-selected node when entering inspect.
       if (next === 'inspect' && selected && runActive()) {
         void loadNodeLog(selected);
@@ -1241,6 +1501,7 @@ function wireEvents(): void {
   document.querySelectorAll<HTMLElement>('[data-problem-node]').forEach((element) => {
     element.addEventListener('click', () => {
       selected = element.dataset.problemNode ?? null;
+      selectedInstanceId = null;
       refreshSelectionUI();
     });
   });
@@ -1283,6 +1544,25 @@ function wireEvents(): void {
         value: element.value,
       });
     });
+  });
+  document.getElementById('agd-sop-loop-settings-backdrop')?.addEventListener('mousedown', (event) => {
+    if (event.target === event.currentTarget) {
+      loopSettingsName = null;
+      render();
+    }
+  });
+  document.getElementById('agd-sop-loop-cancel')?.addEventListener('click', () => {
+    loopSettingsName = null;
+    render();
+  });
+  document.getElementById('agd-sop-loop-save')?.addEventListener('click', () => {
+    const input = document.getElementById('agd-sop-loop-iterations') as HTMLInputElement | null;
+    const name = loopSettingsName;
+    const value = Math.max(1, Math.min(100, Number(input?.value) || 2));
+    loopSettingsName = null;
+    if (name) {
+      void apply({ kind: 'setLoopField', name, field: 'maxIterations', value });
+    }
   });
   document.getElementById('agd-sop-impact-cancel')?.addEventListener('click', () => {
     pendingImpact = null;
@@ -1338,11 +1618,12 @@ function wireInspector(): void {
       return;
     }
     const doc = model();
-    if (doc && wouldCycle(doc, node.name, value)) {
-      flash(tr('sop.cycleBlocked'), 'error');
-      return;
-    }
-    void apply({ kind: 'addDependency', node: node.name, dependsOn: value });
+    const createsLoop = doc ? wouldCycle(doc, node.name, value) : false;
+    void apply({ kind: 'addDependency', node: node.name, dependsOn: value }).then((applied) => {
+      if (applied && createsLoop) {
+        flash(tr('sop.loopAutoCreated'));
+      }
+    });
   });
   document.querySelectorAll<HTMLElement>('[data-dep-remove]').forEach((element) => {
     element.addEventListener('click', () => {

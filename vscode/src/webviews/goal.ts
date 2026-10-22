@@ -41,6 +41,7 @@ let liveTaskFor: string | null = null;
 let busy: BusyKind = null;
 let treeLoading = false;
 let logLoading = false;
+const logRequests = new Map<string, Promise<void>>();
 let notice: string | null = null;
 let pollTimer: number | null = null;
 let draft = {
@@ -233,31 +234,39 @@ function startPolling(): void {
 }
 
 async function loadNodeLog(jobId: string, showLoading = true): Promise<void> {
-  if (logLoading && showLoading) return;
-  logLoading = true;
-  if (showLoading) renderMainOnly();
-  try {
-    const result = await bridge.call<JobLogInfo>('goal.nodeLog', { jobId });
-    if (selectedNodeId === jobId) {
-      nodeLog = result;
-      nodeLogJobId = jobId;
-    }
-    const node = selectedNode();
-    if (node?.job_id === jobId && node.current_task_id && (node.status === 'running' || node.status === 'pending')) {
-      liveTask = await bridge.call<TaskStatusInfo>('goal.taskStatus', { taskId: node.current_task_id });
-      liveTaskFor = jobId;
-    }
-  } catch {
-    if (selectedNodeId === jobId) {
-      nodeLog = null;
-      nodeLogJobId = jobId;
-      liveTask = null;
-      liveTaskFor = null;
-    }
-  } finally {
-    logLoading = false;
-    renderMainOnly();
+  const pending = logRequests.get(jobId);
+  if (pending) {
+    return pending;
   }
+  const request = (async (): Promise<void> => {
+    logLoading = true;
+    if (showLoading) renderMainOnly();
+    try {
+      const result = await bridge.call<JobLogInfo>('goal.nodeLog', { jobId });
+      if (selectedNodeId === jobId) {
+        nodeLog = result;
+        nodeLogJobId = jobId;
+      }
+      const node = selectedNode();
+      if (node?.job_id === jobId && node.current_task_id && (node.status === 'running' || node.status === 'pending')) {
+        liveTask = await bridge.call<TaskStatusInfo>('goal.taskStatus', { taskId: node.current_task_id });
+        liveTaskFor = jobId;
+      }
+    } catch {
+      if (selectedNodeId === jobId) {
+        nodeLog = null;
+        nodeLogJobId = jobId;
+        liveTask = null;
+        liveTaskFor = null;
+      }
+    } finally {
+      logLoading = false;
+      logRequests.delete(jobId);
+      renderMainOnly();
+    }
+  })();
+  logRequests.set(jobId, request);
+  return request;
 }
 
 async function selectRun(rootJobId: string): Promise<void> {
@@ -694,16 +703,16 @@ function wireEvents(): void {
   });
   document.querySelectorAll<HTMLElement>('[data-node]').forEach((element) => {
     element.addEventListener('click', () => {
-      selectedNodeId = element.dataset.node ?? null;
+      const jobId = element.dataset.node ?? '';
+      if (!jobId) return;
+      if (!showInspector) {
+        void openNodeModal(jobId);
+        return;
+      }
+      selectedNodeId = jobId;
       nodeLog = null;
       nodeLogJobId = null;
-      if (selectedNodeId) void loadNodeLog(selectedNodeId);
-    });
-    element.addEventListener('dblclick', () => {
-      if (!showInspector) {
-        const jobId = element.dataset.node ?? '';
-        if (jobId) void openNodeModal(jobId);
-      }
+      void loadNodeLog(jobId);
     });
   });
   document.getElementById('agd-goal-log-refresh')?.addEventListener('click', () => {

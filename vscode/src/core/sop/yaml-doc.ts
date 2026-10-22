@@ -13,7 +13,7 @@
  */
 
 import { Document, YAMLMap, YAMLSeq, isMap, isScalar, isSeq, parseDocument } from 'yaml';
-import { rewritePlaceholders, uniqueNodeName } from './graph';
+import { inferLoops, rewritePlaceholders, uniqueNodeName } from './graph';
 import {
   SOP_OPTIONAL_FIELDS,
   emptyDoc,
@@ -99,6 +99,27 @@ export function applyIntent(parsed: ParsedSop, intent: EditIntent): ParsedSop {
         }
       }
       tasksSeq(doc)?.delete(index);
+      for (const [loopIndex, item] of loopsItems(doc).entries()) {
+        const nodes = item.get('nodes');
+        if (isSeq(nodes)) {
+          for (let i = nodes.items.length - 1; i >= 0; i -= 1) {
+            if (scalarText(nodes.items[i]) === intent.name) {
+              nodes.delete(i);
+            }
+          }
+        }
+        if (scalarText(item.get('entry')) === intent.name) {
+          const remaining = isSeq(nodes)
+            ? nodes.items.map((node) => scalarText(node)).filter(Boolean)
+            : [];
+          if (remaining.length > 0) {
+            setScalar(doc, ['loops', loopIndex, 'entry'], remaining[0]);
+          } else {
+            doc.deleteIn(['loops', loopIndex, 'entry']);
+          }
+        }
+      }
+      syncInferredLoops(doc);
       break;
     }
 
@@ -122,6 +143,19 @@ export function applyIntent(parsed: ParsedSop, intent: EditIntent): ParsedSop {
         const input = item.get('input', true);
         if (isScalar(input) && typeof input.value === 'string') {
           input.value = rewritePlaceholders(input.value, intent.from, intent.to);
+        }
+      }
+      for (const [loopIndex, item] of loopsItems(doc).entries()) {
+        const nodes = item.get('nodes');
+        if (isSeq(nodes)) {
+          for (const node of nodes.items) {
+            if (isScalar(node) && node.value === intent.from) {
+              node.value = intent.to;
+            }
+          }
+        }
+        if (scalarText(item.get('entry')) === intent.from) {
+          setScalar(doc, ['loops', loopIndex, 'entry'], intent.to);
         }
       }
       break;
@@ -154,6 +188,7 @@ export function applyIntent(parsed: ParsedSop, intent: EditIntent): ParsedSop {
       } else {
         doc.setIn(['tasks', index, 'depends_on'], [intent.dependsOn]);
       }
+      syncInferredLoops(doc);
       break;
     }
 
@@ -175,6 +210,7 @@ export function applyIntent(parsed: ParsedSop, intent: EditIntent): ParsedSop {
       if (deps.items.length === 0) {
         item.delete('depends_on');
       }
+      syncInferredLoops(doc);
       break;
     }
 
@@ -235,6 +271,69 @@ export function applyIntent(parsed: ParsedSop, intent: EditIntent): ParsedSop {
       break;
     }
 
+    case 'addLoop': {
+      const name = intent.name?.trim() || uniqueLoopName(model);
+      const nodes =
+        intent.nodes?.filter((name) =>
+          model.nodes.some((node) => node.name === name),
+        ) ?? (model.nodes.length > 0 ? [model.nodes[0].name] : []);
+      ensureLoopsSeq(doc).add(
+        doc.createNode({
+          name,
+          nodes,
+          max_iterations: 2,
+          entry: nodes[0] ?? '',
+        }),
+      );
+      break;
+    }
+
+    case 'removeLoop': {
+      const index = loopIndexOf(doc, intent.name);
+      if (index >= 0) {
+        loopsSeq(doc)?.delete(index);
+        const loops = doc.get('loops');
+        if (isSeq(loops) && loops.items.length === 0) {
+          doc.delete('loops');
+        }
+      }
+      break;
+    }
+
+    case 'setLoopField': {
+      const index = loopIndexOf(doc, intent.name);
+      if (index < 0) {
+        break;
+      }
+      const field =
+        intent.field === 'maxIterations' ? 'max_iterations' : intent.field;
+      const path: (string | number)[] = ['loops', index, field];
+      if (intent.value === '') {
+        doc.deleteIn(path);
+      } else {
+        setScalar(doc, path, intent.value);
+      }
+      break;
+    }
+
+    case 'setLoopNodes': {
+      const index = loopIndexOf(doc, intent.name);
+      const item = loopAt(doc, index);
+      if (!item) {
+        break;
+      }
+      item.set('nodes', doc.createNode(intent.nodes));
+      const entry = scalarText(item.get('entry'));
+      if (!intent.nodes.includes(entry)) {
+        if (intent.nodes.length > 0) {
+          item.set('entry', intent.nodes[0]);
+        } else {
+          item.delete('entry');
+        }
+      }
+      break;
+    }
+
     default:
       break;
   }
@@ -259,6 +358,34 @@ function ensureTasksSeq(doc: Document): YAMLSeq {
 
 function tasksItems(doc: Document): YAMLMap[] {
   return (tasksSeq(doc)?.items ?? []).filter(isMap);
+}
+
+function loopsSeq(doc: Document): YAMLSeq | null {
+  const loops = doc.get('loops');
+  return isSeq(loops) ? loops : null;
+}
+
+function ensureLoopsSeq(doc: Document): YAMLSeq {
+  const existing = loopsSeq(doc);
+  if (existing) {
+    return existing;
+  }
+  const seq = doc.createNode([]) as YAMLSeq;
+  doc.set('loops', seq);
+  return seq;
+}
+
+function loopsItems(doc: Document): YAMLMap[] {
+  return (loopsSeq(doc)?.items ?? []).filter(isMap);
+}
+
+function loopAt(doc: Document, index: number): YAMLMap | null {
+  const item = loopsSeq(doc)?.items[index];
+  return isMap(item) ? item : null;
+}
+
+function loopIndexOf(doc: Document, name: string): number {
+  return loopsItems(doc).findIndex((item) => scalarText(item.get('name')) === name);
 }
 
 function taskAt(doc: Document, index: number): YAMLMap | null {
@@ -291,7 +418,7 @@ function scalarText(node: unknown): string {
 function setScalar(
   doc: Document,
   path: (string | number)[],
-  value: string,
+  value: string | number,
 ): void {
   const existing = doc.getIn(path, true);
   if (isScalar(existing)) {
@@ -299,4 +426,51 @@ function setScalar(
     return;
   }
   doc.setIn(path, value);
+}
+
+function uniqueLoopName(model: SopDoc): string {
+  const existing = new Set(model.loops.map((loop) => loop.name));
+  let index = model.loops.length + 1;
+  while (existing.has(`loop-${index}`)) {
+    index += 1;
+  }
+  return `loop-${index}`;
+}
+
+function syncInferredLoops(doc: Document): void {
+  const loops = inferLoops(fromPlainObject(doc.toJS()));
+  const names = new Set(loops.map((loop) => loop.name));
+
+  for (const loop of loops) {
+    const index = loopIndexOf(doc, loop.name);
+    const item = index >= 0 ? loopAt(doc, index) : null;
+    if (!item) {
+      ensureLoopsSeq(doc).add(
+        doc.createNode({
+          name: loop.name,
+          nodes: loop.nodes,
+          entry: loop.entry,
+          max_iterations: loop.maxIterations,
+        }),
+      );
+      continue;
+    }
+    item.set('nodes', doc.createNode(loop.nodes));
+    item.set('entry', loop.entry);
+    item.set('max_iterations', loop.maxIterations);
+  }
+
+  const seq = loopsSeq(doc);
+  if (seq) {
+    for (let i = seq.items.length - 1; i >= 0; i -= 1) {
+      const item = seq.items[i];
+      const name = isMap(item) ? scalarText(item.get('name')) : '';
+      if (!names.has(name)) {
+        seq.delete(i);
+      }
+    }
+    if (seq.items.length === 0) {
+      doc.delete('loops');
+    }
+  }
 }

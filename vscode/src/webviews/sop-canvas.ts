@@ -20,17 +20,29 @@ export interface CanvasNode {
   problem: 'error' | 'warning' | 'info' | null;
   /** Run status for the read-only monitor ('done', 'running', …). */
   status?: string;
+  /** Declared loop name in edit mode, or the run's loop name in inspect mode. */
+  loopName?: string;
+  loopIterations?: number;
+  loopEntry?: boolean;
+}
+
+export interface CanvasEdge {
+  from: string;
+  to: string;
+  /** `loop` is a template edge inside one declared loop; `iteration` advances to the next run. */
+  kind?: 'loop' | 'iteration';
 }
 
 export interface CanvasOptions {
   editable: boolean;
   nodes: CanvasNode[];
-  edges: { from: string; to: string }[];
+  edges: CanvasEdge[];
   positions: Record<string, SopPoint>;
   selected: string | null;
   /** Restored pan/zoom (the webview re-renders on every edit). */
   view?: { scale: number; offset: SopPoint };
   onSelect(name: string | null): void;
+  onLoopSettings(name: string): void;
   /** Return false to reject the drop (e.g. the edge would close a cycle). */
   onConnect(from: string, to: string): boolean;
   onDeleteEdge(from: string, to: string): void;
@@ -129,7 +141,7 @@ export class SopCanvas {
         const x2 = to.x;
         const y2 = to.y + NODE_H / 2;
         const dx = Math.max(28, Math.abs(x2 - x1) * 0.5);
-        return `<path class="agd-sop-edge" data-from="${escapeAttr(edge.from)}" data-to="${escapeAttr(
+        return `<path class="agd-sop-edge ${edge.kind ? `is-${edge.kind}` : ''}" data-from="${escapeAttr(edge.from)}" data-to="${escapeAttr(
           edge.to,
         )}" d="M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}" marker-end="url(#agd-sop-arrow)"/>`;
       })
@@ -160,7 +172,13 @@ export class SopCanvas {
           <div class="agd-sop-node-title">${escapeHtml(node.name)}</div>
           <div class="agd-sop-node-sub" title="${escapeAttr(node.provider)}">
             ${node.provider ? providerLogo(node.provider) : '<span class="agd-sop-node-provider-none">—</span>'}
+            ${node.loopName ? `<span class="agd-sop-node-loop" title="${escapeAttr(node.loopName)}">↻ ${escapeHtml(node.loopName)}</span>` : ''}
           </div>
+          ${
+            node.loopName && node.loopEntry
+              ? `<button type="button" class="agd-sop-loop-chip" data-loop-settings="${escapeAttr(node.loopName)}">↻ ×${node.loopIterations ?? 2}</button>`
+              : ''
+          }
           ${node.badge ? `<div class="agd-sop-node-badge">${escapeHtml(node.badge)}</div>` : ''}
         </div>`;
       })
@@ -241,6 +259,11 @@ export class SopCanvas {
     event.preventDefault();
     this.host.classList.add('is-dragging');
     const target = event.target as HTMLElement;
+    const loopChip = target.closest('[data-loop-settings]') as HTMLElement | null;
+    if (loopChip?.dataset.loopSettings && this.options.editable) {
+      this.options.onLoopSettings(loopChip.dataset.loopSettings);
+      return;
+    }
     const port = target.closest('[data-port]') as HTMLElement | null;
     const nodeEl = target.closest('[data-node]') as HTMLElement | null;
     if (port && port.dataset.port === 'out' && port.dataset.node) {

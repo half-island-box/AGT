@@ -243,6 +243,7 @@ const sopDocs: Record<string, SopDoc> = {
         index: 2,
       },
     ],
+    loops: [],
   },
   '/home/you/project/pipelines/release.sop.yaml': {
     name: 'release',
@@ -271,6 +272,7 @@ const sopDocs: Record<string, SopDoc> = {
         index: 1,
       },
     ],
+    loops: [],
   },
 };
 
@@ -284,6 +286,15 @@ function renderSopYaml(doc: SopDoc): string {
       if (identity.did) parts.push(`did: ${identity.did}`);
       if (identity.provider) parts.push(`provider: ${identity.provider}`);
       lines.push(`  ${identity.alias}: {${parts.join(', ')}}`);
+    }
+  }
+  if (doc.loops.length > 0) {
+    lines.push('loops:');
+    for (const loop of doc.loops) {
+      lines.push(`  - name: ${loop.name}`);
+      lines.push(`    nodes: [${loop.nodes.join(', ')}]`);
+      if (loop.entry) lines.push(`    entry: ${loop.entry}`);
+      lines.push(`    max_iterations: ${loop.maxIterations}`);
     }
   }
   lines.push('tasks:');
@@ -569,6 +580,7 @@ export async function mockCall<T>(_method: string, params?: Record<string, unkno
             index: 0,
           },
         ],
+        loops: [],
       };
       sopTemplates.push({ path, label: path.split('/').pop() ?? path, nodeCount: 1 });
       sopPath = path;

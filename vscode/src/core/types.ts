@@ -203,6 +203,8 @@ export interface SopNodeStatus {
   name: string;
   job_id: string;
   status: string;
+  iteration: number;
+  loop_name: string | null;
   depends_on: string[];
   artifacts: string[];
   artifact_details?: SopArtifactSummary[];
@@ -224,6 +226,7 @@ export interface SopStatus {
 export interface SopNodeLogStep {
   task_id: string;
   status: string;
+  iteration: number;
   session_id: string | null;
   exit_code: number | null;
   stdout: string | null;

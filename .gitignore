@@ -30,6 +30,8 @@ htmlcov/
 
 openspec/
 tests/
+!vscode/tests/
+!vscode/tests/**
 .agents/
 .claude/
 .codex/

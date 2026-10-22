@@ -29,11 +29,24 @@ export interface SopNode {
   index: number;
 }
 
+export interface SopLoop {
+  name: string;
+  nodes: string[];
+  maxIterations: number;
+  entry: string;
+}
+
 export interface SopDoc {
   name: string;
   identities: SopIdentity[];
   nodes: SopNode[];
+  loops: SopLoop[];
 }
+
+export type SopLoopField =
+  | 'name'
+  | 'maxIterations'
+  | 'entry';
 
 /** Node fields the inspector can edit (``name`` has its own intent). */
 export type SopNodeField =
@@ -67,7 +80,16 @@ export type EditIntent =
       alias: string;
       field: 'did' | 'provider';
       value: string;
-    };
+    }
+  | { kind: 'addLoop'; name?: string; nodes?: string[] }
+  | { kind: 'removeLoop'; name: string }
+  | {
+      kind: 'setLoopField';
+      name: string;
+      field: SopLoopField;
+      value: string | number;
+    }
+  | { kind: 'setLoopNodes'; name: string; nodes: string[] };
 
 /**
  * ``error`` blocks a run, ``warning`` is likely a mistake, ``info`` is
@@ -86,7 +108,7 @@ export interface SopIssue {
 }
 
 export function emptyDoc(): SopDoc {
-  return { name: '', identities: [], nodes: [] };
+  return { name: '', identities: [], nodes: [], loops: [] };
 }
 
 function asString(value: unknown): string {
@@ -107,6 +129,10 @@ function asStringList(value: unknown): string[] {
     return [];
   }
   return value.map(asString).filter((item) => item !== '');
+}
+
+function asLoopIterations(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.trunc(value) : 0;
 }
 
 /**
@@ -166,5 +192,22 @@ export function fromPlainObject(value: unknown): SopDoc {
     });
   });
 
-  return { name: asString(raw.name), identities, nodes };
+  const loops: SopLoop[] = [];
+  const loopsRaw = raw.loops;
+  if (Array.isArray(loopsRaw)) {
+    for (const entry of loopsRaw) {
+      if (typeof entry !== 'object' || entry === null) {
+        continue;
+      }
+      const loop = entry as Record<string, unknown>;
+      loops.push({
+        name: asString(loop.name),
+        nodes: asStringList(loop.nodes),
+        maxIterations: asLoopIterations(loop.max_iterations),
+        entry: asString(loop.entry),
+      });
+    }
+  }
+
+  return { name: asString(raw.name), identities, nodes, loops };
 }

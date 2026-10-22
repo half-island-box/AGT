@@ -11,10 +11,12 @@
  * silently accepted document.
  */
 
-import type { SopDoc, SopIssue, SopNode } from './model';
+import type { SopDoc, SopIssue, SopLoop, SopNode } from './model';
 
 /** Mirrors ``agt.sop.dsl.SOP_MAX_NODES``. */
 export const SOP_MAX_NODES = 64;
+/** Mirrors ``agt.sop.dsl.SOP_MAX_ITERATIONS``. */
+export const SOP_MAX_ITERATIONS = 100;
 
 const PLACEHOLDER_RE = /\$\{([A-Za-z0-9_.-]+)\}/g;
 
@@ -35,6 +37,115 @@ export function nodesByName(doc: SopDoc): Map<string, SopNode> {
     }
   }
   return map;
+}
+
+/**
+ * Infer loop declarations from the graph's strongly connected components.
+ *
+ * The Python DSL still requires an explicit ``loops:`` block; this function
+ * is the visual editor's translation layer. A drawn back edge creates an
+ * SCC, and removing the last edge that sustains that SCC removes its loop.
+ */
+export function inferLoops(doc: SopDoc): SopLoop[] {
+  const byName = nodesByName(doc);
+  const reachable = new Map<string, Set<string>>();
+  const reachFrom = (start: string): Set<string> => {
+    const cached = reachable.get(start);
+    if (cached) {
+      return cached;
+    }
+    const found = new Set<string>();
+    const stack = [start];
+    while (stack.length > 0) {
+      const current = stack.pop() as string;
+      if (found.has(current)) {
+        continue;
+      }
+      found.add(current);
+      for (const dep of byName.get(current)?.dependsOn ?? []) {
+        if (byName.has(dep)) {
+          stack.push(dep);
+        }
+      }
+    }
+    reachable.set(start, found);
+    return found;
+  };
+
+  const groups: string[][] = [];
+  const assigned = new Set<string>();
+  for (const node of doc.nodes) {
+    if (node.name === '' || assigned.has(node.name)) {
+      continue;
+    }
+    const reach = reachFrom(node.name);
+    const group = doc.nodes
+      .filter((other) => other.name !== '' && reachFrom(other.name).has(node.name) && reach.has(other.name))
+      .map((other) => other.name);
+    if (group.length > 1) {
+      groups.push(group);
+      group.forEach((name) => assigned.add(name));
+    }
+  }
+
+  const usedNames = new Set<string>();
+  return groups.map((nodes) => {
+    const nodeSet = new Set(nodes);
+    const predecessor = doc.loops
+      .map((loop) => ({
+        loop,
+        overlap: loop.nodes.filter((name) => nodeSet.has(name)).length,
+      }))
+      .filter((item) => item.overlap > 0)
+      .sort((a, b) => b.overlap - a.overlap || a.loop.name.localeCompare(b.loop.name))[0]?.loop;
+    let name = predecessor?.name ?? '';
+    if (name === '' || usedNames.has(name)) {
+      name = uniqueLoopName(doc, usedNames);
+    }
+    usedNames.add(name);
+    const maxIterations =
+      predecessor &&
+      Number.isInteger(predecessor.maxIterations) &&
+      predecessor.maxIterations >= 1 &&
+      predecessor.maxIterations <= SOP_MAX_ITERATIONS
+        ? predecessor.maxIterations
+        : 2;
+    return {
+      name,
+      nodes,
+      maxIterations,
+      entry: predecessor && nodes.includes(predecessor.entry)
+        ? predecessor.entry
+        : nodes[0],
+    };
+  });
+}
+
+function uniqueLoopName(doc: SopDoc, usedNames: Set<string>): string {
+  const existing = new Set([...doc.loops.map((loop) => loop.name), ...usedNames]);
+  let index = 1;
+  while (existing.has(`loop-${index}`)) {
+    index += 1;
+  }
+  return `loop-${index}`;
+}
+
+export function loopMembership(doc: SopDoc): Map<string, string> {
+  const membership = new Map<string, string>();
+  for (const loop of doc.loops) {
+    for (const name of loop.nodes) {
+      if (!membership.has(name)) {
+        membership.set(name, loop.name);
+      }
+    }
+  }
+  return membership;
+}
+
+function inSameLoop(doc: SopDoc, left: string, right: string): boolean {
+  const membership = loopMembership(doc);
+  const leftLoop = membership.get(left);
+  return leftLoop !== undefined && leftLoop === membership.get(right);
 }
 
 /** ``output name → owning node name`` (first declaration wins). */
@@ -63,6 +174,9 @@ export function cycleNodes(doc: SopDoc): Set<string> {
   for (const node of doc.nodes) {
     for (const dep of node.dependsOn) {
       if (!byName.has(dep) || dep === node.name) {
+        continue;
+      }
+      if (inSameLoop(doc, node.name, dep)) {
         continue;
       }
       indegree.set(node.name, (indegree.get(node.name) ?? 0) + 1);
@@ -110,7 +224,11 @@ export function layers(doc: SopDoc): Map<string, number> {
     let layer = 0;
     if (node) {
       for (const dep of node.dependsOn) {
-        if (byName.has(dep) && dep !== name) {
+        if (
+          byName.has(dep) &&
+          dep !== name &&
+          !inSameLoop(doc, name, dep)
+        ) {
           layer = Math.max(layer, depth(dep) + 1);
         }
       }
@@ -292,6 +410,9 @@ export function issues(doc: SopDoc): SopIssue[] {
     }
   }
   for (const node of doc.nodes) {
+    if (loopMembership(doc).has(node.name)) {
+      continue;
+    }
     if (
       node.name !== '' &&
       node.dependsOn.length === 0 &&
@@ -314,8 +435,68 @@ export function issues(doc: SopDoc): SopIssue[] {
     out.push({
       level: 'error',
       node,
-      message: `SOP contains a dependency cycle involving '${node}'`,
+      message: `SOP contains a dependency cycle outside a declared loop involving '${node}'`,
     });
+  }
+
+  const loopNames = new Set<string>();
+  const nodeLoops = new Map<string, string>();
+  for (const loop of doc.loops) {
+    if (loop.name === '') {
+      out.push({ level: 'error', message: "each loop requires a non-empty 'name'" });
+      continue;
+    }
+    if (loopNames.has(loop.name)) {
+      out.push({ level: 'error', message: `duplicate loop name: ${loop.name}` });
+    }
+    loopNames.add(loop.name);
+    if (loop.nodes.length === 0) {
+      out.push({
+        level: 'error',
+        message: `loop '${loop.name}': 'nodes' must be non-empty`,
+      });
+    }
+    const seenNodes = new Set<string>();
+    for (const name of loop.nodes) {
+      if (!byName.has(name)) {
+        out.push({
+          level: 'error',
+          message: `loop '${loop.name}' references unknown task '${name}'`,
+        });
+      }
+      if (seenNodes.has(name)) {
+        out.push({
+          level: 'error',
+          message: `loop '${loop.name}': duplicate node in 'nodes': ${name}`,
+        });
+      }
+      seenNodes.add(name);
+      if (nodeLoops.has(name)) {
+        out.push({
+          level: 'error',
+          message: `task '${name}' belongs to more than one loop`,
+        });
+      } else {
+        nodeLoops.set(name, loop.name);
+      }
+    }
+    if (!Number.isInteger(loop.maxIterations) || loop.maxIterations < 1) {
+      out.push({
+        level: 'error',
+        message: `loop '${loop.name}': 'max_iterations' must be a positive integer`,
+      });
+    } else if (loop.maxIterations > SOP_MAX_ITERATIONS) {
+      out.push({
+        level: 'error',
+        message: `loop '${loop.name}': max_iterations exceeds ${SOP_MAX_ITERATIONS}`,
+      });
+    }
+    if (loop.entry !== '' && !loop.nodes.includes(loop.entry)) {
+      out.push({
+        level: 'error',
+        message: `loop '${loop.name}': entry '${loop.entry}' is not in 'nodes'`,
+      });
+    }
   }
 
   for (const identity of doc.identities) {
@@ -363,6 +544,9 @@ export function wouldCycle(
   if (node === dependsOn) {
     return true;
   }
+  if (inSameLoop(doc, node, dependsOn)) {
+    return false;
+  }
   const byName = nodesByName(doc);
   const stack = [dependsOn];
   const seen = new Set<string>();
@@ -376,7 +560,9 @@ export function wouldCycle(
     }
     seen.add(current);
     for (const dep of byName.get(current)?.dependsOn ?? []) {
-      stack.push(dep);
+      if (!inSameLoop(doc, current, dep)) {
+        stack.push(dep);
+      }
     }
   }
   return false;
