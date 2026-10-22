@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import Response
@@ -59,11 +60,22 @@ def _content_response(content: bytes, artifact: ArtifactModel) -> Response:
     """Serve bytes with untrusted-mime hardening (design D8)."""
     mime = artifact.mime_type or "application/octet-stream"
     safe_name = artifact.name.replace("\\", "/").split("/")[-1] or "artifact"
+    # HTTP headers are encoded as Latin-1 by Starlette. Keep the legacy
+    # ``filename`` parameter ASCII-only and carry the exact Unicode name in
+    # the RFC 5987 ``filename*`` parameter.
+    ascii_name = "".join(
+        char if 32 <= ord(char) < 127 and char not in '"\\' else "_"
+        for char in safe_name
+    ).strip() or "artifact"
+    encoded_name = quote(safe_name, safe="")
     return Response(
         content=content,
         media_type=mime,
         headers={
-            "Content-Disposition": f'attachment; filename="{safe_name}"',
+            "Content-Disposition": (
+                f'attachment; filename="{ascii_name}"; '
+                f"filename*=UTF-8''{encoded_name}"
+            ),
             "X-Content-Type-Options": "nosniff",
         },
     )
