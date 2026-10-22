@@ -335,6 +335,85 @@ select.agd-input { height: 26px; }
 .agd-sop-field > input, .agd-sop-field > select, .agd-sop-field > textarea { width: 100%; box-sizing: border-box; margin-top: 3px; }
 .agd-sop-field > small { display: block; margin-top: 3px; font-size: 10.5px; }
 .agd-sop-field > span { display: block; margin-bottom: 4px; }
+.agd-sop-input-completion { position: relative; }
+.agd-sop-rich-input {
+  width: 100%;
+  min-height: 118px;
+  height: auto;
+  box-sizing: border-box;
+  padding: 8px 9px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.55;
+  cursor: text;
+}
+.agd-sop-rich-input:empty::before {
+  content: attr(data-placeholder);
+  color: var(--vscode-input-placeholderForeground, #8b8b8b);
+  pointer-events: none;
+}
+.agd-sop-rich-input:focus,
+.agd-sop-rich-input:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder, #3794ff);
+  outline-offset: 1px;
+}
+.agd-sop-ref-token {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin: 1px 2px;
+  padding: 1px 6px;
+  border: 1px solid color-mix(in srgb, var(--vscode-focusBorder, #3794ff) 45%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--vscode-focusBorder, #3794ff) 12%, transparent);
+  color: var(--vscode-foreground, #ccc);
+  font-size: 10.5px;
+  line-height: 1.45;
+  user-select: all;
+}
+.agd-sop-ref-node { color: var(--vscode-descriptionForeground, #8b8b8b); }
+.agd-sop-ref-arrow { color: var(--vscode-focusBorder, #3794ff); }
+.agd-sop-ref-output { font-family: var(--vscode-editor-font-family, monospace); font-weight: 600; }
+.agd-sop-input-hint { display: block; margin-top: 4px; font-size: 10.5px; }
+.agd-sop-completion {
+  position: absolute;
+  z-index: 12;
+  left: 0;
+  right: 0;
+  top: calc(100% + 4px);
+  max-height: 190px;
+  overflow: auto;
+  padding: 4px;
+  border: 1px solid var(--vscode-focusBorder, #3794ff);
+  border-radius: 7px;
+  background: var(--vscode-editorWidget-background, #252526);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 30%);
+}
+.agd-sop-completion-item {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  width: 100%;
+  padding: 5px 7px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--vscode-foreground, #ccc);
+  text-align: left;
+  cursor: pointer;
+}
+.agd-sop-completion-item:hover { background: var(--vscode-list-hoverBackground, #2a2d2e); }
+.agd-sop-completion-item strong { font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; }
+.agd-sop-completion-item small { color: var(--vscode-descriptionForeground, #8b8b8b); font-size: 10px; }
+.agd-sop-completion-empty { display: block; padding: 6px 7px; color: var(--vscode-descriptionForeground, #8b8b8b); font-size: 10.5px; }
+.agd-sop-output-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 104px;
+  gap: 6px;
+}
+.agd-sop-output-row > input { min-width: 0; }
+.agd-sop-output-custom { margin-top: 5px; }
 .agd-sop-deps { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 6px; }
 .agd-sop-dep {
   display: inline-flex; align-items: center; gap: 4px;
@@ -417,4 +496,5 @@ select.agd-input { height: 26px; }
 .agd-sop-stdout.agd-md,
 .agd-sop-stderr.agd-md {
   white-space: normal;
+  font-family: var(--vscode-font-family, -apple-system, "Segoe UI", "PingFang SC", sans-serif);
 }

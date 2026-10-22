@@ -72,6 +72,8 @@ interface ServerValidation {
 
 type NodeField = 'name' | 'identity' | 'input' | 'output' | 'provider' | 'daemon' | 'dir';
 
+const OUTPUT_EXTENSIONS = ['.md', '.txt', '.json', '.yaml', '.yml', '.html', '.csv', '.py', '.ts', '.js'] as const;
+
 let boot: SopBoot | null = null;
 let lang: UiLanguage = 'zh';
 let selected: string | null = null;
@@ -183,6 +185,122 @@ function model(): SopDoc | null {
 
 function selectedNode(): SopNode | null {
   return model()?.nodes.find((node) => node.name === selected) ?? null;
+}
+
+function outputExtension(value: string): string {
+  const match = value.match(/\.[^./\\]+$/);
+  return match?.[0] ?? '';
+}
+
+function isKnownOutputExtension(value: string): boolean {
+  return (OUTPUT_EXTENSIONS as readonly string[]).includes(value);
+}
+
+const INPUT_REFERENCE_RE = /\$\{([A-Za-z0-9_.-]+)\.([^}]+)\}/g;
+
+function referenceTokenHtml(node: string, output: string): string {
+  const raw = `\${${node}.${output}}`;
+  return `<span class="agd-sop-ref-token" contenteditable="false" data-ref="${esc(raw)}"><span class="agd-sop-ref-node">${esc(node)}</span><span class="agd-sop-ref-arrow">→</span><span class="agd-sop-ref-output">${esc(output)}</span></span>`;
+}
+
+function richInputHtml(raw: string): string {
+  let html = '';
+  let last = 0;
+  for (const match of raw.matchAll(INPUT_REFERENCE_RE)) {
+    const index = match.index ?? 0;
+    html += esc(raw.slice(last, index)).replaceAll('\n', '<br>');
+    html += referenceTokenHtml(match[1], match[2]);
+    last = index + match[0].length;
+  }
+  html += esc(raw.slice(last)).replaceAll('\n', '<br>');
+  return html;
+}
+
+function serializeRichInput(root: Node): string {
+  let out = '';
+  for (const child of root.childNodes) {
+    if (child.nodeType === Node.TEXT_NODE) {
+      out += child.textContent ?? '';
+      continue;
+    }
+    if (!(child instanceof HTMLElement)) {
+      continue;
+    }
+    if (child.dataset.ref) {
+      out += child.dataset.ref;
+      continue;
+    }
+    if (child.tagName === 'BR') {
+      out += '\n';
+      continue;
+    }
+    const block = child.tagName === 'DIV' || child.tagName === 'P';
+    if (block && out !== '' && !out.endsWith('\n')) {
+      out += '\n';
+    }
+    out += serializeRichInput(child);
+  }
+  return out;
+}
+
+function inputCaretContext(editor: HTMLElement): {
+  query: string;
+  slashNode: Text | null;
+  slashOffset: number;
+} {
+  const selection = window.getSelection();
+  if (!selection?.rangeCount || !selection.isCollapsed) {
+    return { query: '', slashNode: null, slashOffset: -1 };
+  }
+  const caret = selection.getRangeAt(0);
+  if (!editor.contains(caret.startContainer)) {
+    return { query: '', slashNode: null, slashOffset: -1 };
+  }
+
+  type Character = { char: string; node: Text | null; offset: number };
+  const chars: Character[] = [];
+  let stopped = false;
+  const walk = (node: Node): void => {
+    if (stopped) return;
+    if (node.nodeType === Node.TEXT_NODE) {
+      const text = node as Text;
+      const end = text === caret.startContainer ? caret.startOffset : text.data.length;
+      for (let i = 0; i < end; i += 1) {
+        chars.push({ char: text.data[i], node: text, offset: i });
+      }
+      if (text === caret.startContainer) stopped = true;
+      return;
+    }
+    if (node instanceof HTMLElement && node.dataset.ref) {
+      chars.push({ char: ' ', node: null, offset: -1 });
+      return;
+    }
+    if (node instanceof HTMLBRElement) {
+      chars.push({ char: '\n', node: null, offset: -1 });
+      return;
+    }
+    for (const child of node.childNodes) walk(child);
+  };
+  walk(editor);
+
+  let slash: Character | null = null;
+  let query = '';
+  for (const item of chars) {
+    if (/\s/.test(item.char)) {
+      slash = null;
+      query = '';
+    } else if (item.char === '/') {
+      slash = item;
+      query = '';
+    } else if (slash) {
+      query += item.char;
+    }
+  }
+  return {
+    query,
+    slashNode: slash?.node ?? null,
+    slashOffset: slash?.offset ?? -1,
+  };
 }
 
 /**
@@ -1036,8 +1154,26 @@ function renderInspector(): string {
     }
     <label class="agd-sop-field">${tr('sop.field.name')}<input class="agd-input agd-mono" id="agd-sop-node-name" value="${esc(node.name)}"></label>
     <label class="agd-sop-field">${tr('sop.field.identity')}<select class="agd-input" id="agd-sop-node-identity">${identityOptions}</select></label>
-    <label class="agd-sop-field">${tr('sop.field.input')}<textarea class="agd-input agd-sop-textarea" id="agd-sop-node-input" rows="5" placeholder="${tr('sop.field.inputPh')}">${esc(node.input)}</textarea></label>
-    <label class="agd-sop-field">${tr('sop.field.output')}<input class="agd-input agd-mono" id="agd-sop-node-output" value="${esc(node.output)}"></label>
+    <div class="agd-sop-field">
+      <span>${tr('sop.field.input')}</span>
+      <div class="agd-sop-input-completion">
+        <div class="agd-input agd-sop-rich-input" id="agd-sop-node-input" contenteditable="true" role="textbox" aria-multiline="true" data-placeholder="${tr('sop.field.inputPh')}">${richInputHtml(node.input)}</div>
+        <div class="agd-sop-completion" id="agd-sop-input-suggestions" hidden></div>
+      </div>
+      <small class="agd-sop-input-hint">${tr('sop.inputSlashHint')}</small>
+    </div>
+    <div class="agd-sop-field">
+      <span>${tr('sop.field.output')}</span>
+      <div class="agd-sop-output-row">
+        <input class="agd-input agd-mono" id="agd-sop-node-output" value="${esc(node.output)}">
+        <select class="agd-input agd-mono" id="agd-sop-output-ext" title="${tr('sop.outputExtension')}">
+          <option value="">${tr('sop.outputExtNone')}</option>
+          ${OUTPUT_EXTENSIONS.map((ext) => `<option value="${esc(ext)}" ${outputExtension(node.output) === ext ? 'selected' : ''}>${esc(ext)}</option>`).join('')}
+          <option value="__other__" ${outputExtension(node.output) && !isKnownOutputExtension(outputExtension(node.output)) ? 'selected' : ''}>${tr('sop.outputExtOther')}</option>
+        </select>
+      </div>
+      <input class="agd-input agd-mono agd-sop-output-custom" id="agd-sop-output-ext-custom" placeholder="${tr('sop.outputExtCustomPh')}" value="${outputExtension(node.output) && !isKnownOutputExtension(outputExtension(node.output)) ? esc(outputExtension(node.output)) : ''}" ${outputExtension(node.output) && !isKnownOutputExtension(outputExtension(node.output)) ? '' : 'hidden'}>
+    </div>
     <label class="agd-sop-field">
       <span>${tr('sop.field.daemon')}</span>
       <select class="agd-input agd-mono" id="agd-sop-node-daemon">${daemonOptions(node)}</select>
@@ -1601,7 +1737,6 @@ function wireInspector(): void {
   const bindings: [string, NodeField][] = [
     ['agd-sop-node-name', 'name'],
     ['agd-sop-node-identity', 'identity'],
-    ['agd-sop-node-input', 'input'],
     ['agd-sop-node-output', 'output'],
     ['agd-sop-node-provider', 'provider'],
     ['agd-sop-node-daemon', 'daemon'],
@@ -1611,6 +1746,119 @@ function wireInspector(): void {
     const element = document.getElementById(id) as HTMLInputElement | HTMLTextAreaElement | null;
     element?.addEventListener('change', () => commit(field, element.value));
   }
+
+  const input = document.getElementById('agd-sop-node-input') as HTMLElement | null;
+  const suggestions = document.getElementById('agd-sop-input-suggestions');
+  const updateSuggestions = (): void => {
+    const node = selectedNode();
+    const doc = model();
+    if (!input || !suggestions || !node || !doc) {
+      if (suggestions) suggestions.hidden = true;
+      return;
+    }
+    const { query, slashNode } = inputCaretContext(input);
+    if (!slashNode || query.length >= 40) {
+      suggestions.hidden = true;
+      suggestions.innerHTML = '';
+      return;
+    }
+    const needle = query.toLowerCase();
+    const dependencies = node.dependsOn
+      .map((name) => doc.nodes.find((other) => other.name === name))
+      .filter((other): other is NonNullable<typeof other> => Boolean(other?.output))
+      .filter((other) =>
+        other.output.toLowerCase().includes(needle) ||
+        other.name.toLowerCase().includes(needle),
+      );
+    suggestions.hidden = dependencies.length === 0;
+    suggestions.innerHTML = dependencies.length === 0
+      ? `<span class="agd-sop-completion-empty">${tr('sop.inputNoSuggestions')}</span>`
+      : dependencies
+          .map((other) => `
+            <button type="button" class="agd-sop-completion-item" data-suggestion-node="${esc(other.name)}" data-suggestion-output="${esc(other.output)}">
+              <strong>${esc(other.output)}</strong>
+              <small>${esc(other.name)}</small>
+            </button>`,
+          )
+          .join('');
+  };
+  input?.addEventListener('input', updateSuggestions);
+  input?.addEventListener('click', updateSuggestions);
+  input?.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && suggestions) {
+      suggestions.hidden = true;
+    }
+  });
+  input?.addEventListener('blur', () => {
+    window.setTimeout(() => {
+      if (suggestions && !suggestions.contains(document.activeElement)) {
+        suggestions.hidden = true;
+      }
+    }, 80);
+    if (input) commit('input', serializeRichInput(input));
+  });
+  suggestions?.addEventListener('mousedown', (event) => {
+    const button = (event.target as HTMLElement | null)?.closest<HTMLElement>(
+      '[data-suggestion-output]',
+    );
+    if (!button || !input) return;
+    event.preventDefault();
+    const context = inputCaretContext(input);
+    if (!context.slashNode) return;
+    const selection = window.getSelection();
+    if (!selection?.rangeCount) return;
+    const range = selection.getRangeAt(0);
+    const endContainer = range.endContainer;
+    const endOffset = range.endOffset;
+    range.setStart(context.slashNode, context.slashOffset);
+    range.setEnd(endContainer, endOffset);
+    range.deleteContents();
+    const holder = document.createElement('span');
+    holder.innerHTML = referenceTokenHtml(
+      button.dataset.suggestionNode ?? '',
+      button.dataset.suggestionOutput ?? '',
+    );
+    const token = holder.firstElementChild;
+    if (!token) return;
+    range.insertNode(token);
+    const space = document.createTextNode(' ');
+    token.after(space);
+    range.setStartAfter(space);
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    suggestions.hidden = true;
+    commit('input', serializeRichInput(input));
+  });
+
+  const output = document.getElementById('agd-sop-node-output') as HTMLInputElement | null;
+  const outputExtensionSelect = document.getElementById('agd-sop-output-ext') as HTMLSelectElement | null;
+  const outputExtensionInput = document.getElementById('agd-sop-output-ext-custom') as HTMLInputElement | null;
+  outputExtensionSelect?.addEventListener('change', () => {
+    const node = selectedNode();
+    if (!node || !output) return;
+    const base = node.output.replace(/\.[^./\\]+$/, '');
+    if (outputExtensionSelect.value === '__other__') {
+      if (outputExtensionInput) {
+        outputExtensionInput.hidden = false;
+        outputExtensionInput.value = '';
+        outputExtensionInput.focus();
+      }
+      return;
+    }
+    output.value = `${base}${outputExtensionSelect.value}`;
+    if (outputExtensionInput) outputExtensionInput.hidden = true;
+    commit('output', output.value);
+  });
+  outputExtensionInput?.addEventListener('change', () => {
+    const node = selectedNode();
+    if (!node || !output) return;
+    const raw = outputExtensionInput.value.trim();
+    const suffix = raw === '' ? '' : raw.startsWith('.') ? raw : `.${raw}`;
+    const base = node.output.replace(/\.[^./\\]+$/, '');
+    output.value = `${base}${suffix}`;
+    commit('output', output.value);
+  });
   document.getElementById('agd-sop-dep-add')?.addEventListener('change', (event) => {
     const value = (event.target as HTMLSelectElement).value;
     const node = selectedNode();

@@ -588,6 +588,11 @@ body {
   font-size: 11px;
 }
 .agd-sop-stderr { color: #f85149; margin-top: 4px; }
+.agd-sop-stdout.agd-md,
+.agd-sop-stderr.agd-md {
+  white-space: normal;
+  font-family: var(--vscode-font-family, -apple-system, "Segoe UI", "PingFang SC", sans-serif);
+}
 .agd-sop-steps {
   display: flex;
   flex-direction: column;

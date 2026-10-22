@@ -1,7 +1,9 @@
 import './styles.css';
 import './mode-switcher.css';
+import './markdown.css';
 import './goal.css';
 import { providerLogo } from '../core/icons';
+import { renderMarkdown } from './markdown';
 import { t, type MessageKey } from '../core/i18n';
 import type {
   GoalJobTreeNode,
@@ -537,8 +539,8 @@ function renderLog(node: GoalJobTreeNode): string {
         <span class="agd-mono">${esc(step.task_id.slice(0, 8))}</span>
         <span class="agd-dim">${esc(step.status)}${step.exit_code === null ? '' : ` · exit ${step.exit_code}`}</span>
       </div>
-      ${step.stdout ? `<pre class="agd-sop-stdout">${esc(step.stdout)}</pre>` : ''}
-      ${step.stderr ? `<pre class="agd-sop-stderr">${esc(step.stderr)}</pre>` : ''}
+      ${step.stdout ? `<div class="agd-sop-stdout agd-md">${renderMarkdown(step.stdout)}</div>` : ''}
+      ${step.stderr ? `<div class="agd-sop-stderr agd-md">${renderMarkdown(step.stderr)}</div>` : ''}
     </div>
   `).join('');
 }
