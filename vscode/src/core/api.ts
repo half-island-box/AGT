@@ -278,6 +278,7 @@ export class AgtApi {
     provider?: string | null;
     daemonId?: string | null;
     dir?: string | null;
+    cwd?: string | null;
     maxDepth?: number;
     maxDescendants?: number;
   }): Promise<GoalSubmitResult> {
@@ -287,6 +288,7 @@ export class AgtApi {
       provider: input.provider ?? null,
       daemon_id: input.daemonId ?? null,
       dir: input.dir ?? null,
+      cwd: input.cwd ?? null,
       max_depth: input.maxDepth ?? 5,
       max_descendants: input.maxDescendants ?? 64,
     });

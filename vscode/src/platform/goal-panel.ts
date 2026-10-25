@@ -40,6 +40,7 @@ function toGoalRunInfo(run: RunInfo): GoalRunInfo {
     provider: run.provider,
     identity_did: run.identity_did,
     daemon_id: run.daemon_id,
+    cwd: run.cwd,
     created_at: run.created_at,
     updated_at: run.updated_at,
     total_nodes: 0,
@@ -62,6 +63,7 @@ function runInfoFromTree(tree: GoalTreeInfo): GoalRunInfo {
     provider: root.provider,
     identity_did: root.identity_did,
     daemon_id: root.daemon_id,
+    cwd: null,
     created_at: '',
     updated_at: '',
     total_nodes: 0,
@@ -246,6 +248,7 @@ export class GoalPanel {
           const daemonId = String(msg.params?.daemonId ?? '');
           const identityDid = msg.params?.identityDid ? String(msg.params.identityDid) : null;
           const dir = msg.params?.dir ? String(msg.params.dir) : null;
+          const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null;
           const maxDepth = Number(msg.params?.maxDepth ?? 5);
           const maxDescendants = Number(msg.params?.maxDescendants ?? 64);
           const submitted = await this.ctx.lifecycle.api.submitGoal({
@@ -254,6 +257,7 @@ export class GoalPanel {
             provider,
             daemonId,
             dir,
+            cwd,
             maxDepth,
             maxDescendants,
           });
@@ -268,6 +272,7 @@ export class GoalPanel {
             provider,
             identity_did: identityDid,
             daemon_id: daemonId || null,
+            cwd,
             created_at: now,
             updated_at: now,
             total_nodes: 0,

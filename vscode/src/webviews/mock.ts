@@ -469,6 +469,7 @@ const goalRun: GoalRunInfo = {
   provider: 'claude',
   identity_did: null,
   daemon_id: 'dev-box-1',
+  cwd: '/home/you/project',
   created_at: '2026-09-25 09:58:00',
   updated_at: '2026-09-25 10:01:00',
   total_nodes: 3,

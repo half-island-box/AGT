@@ -277,6 +277,7 @@ export interface GoalRunInfo {
   provider: string;
   identity_did: string | null;
   daemon_id: string | null;
+  cwd: string | null;
   created_at: string;
   updated_at: string;
   total_nodes: number;
