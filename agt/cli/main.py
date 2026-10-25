@@ -675,7 +675,7 @@ def _chat_turn_remote(
 
     Remote session state belongs to the daemon, not this cwd — the session
     index is written on the daemon's machine (``<agent_cwd>/.agt/
-    sessions.json``) and by the Server (``TaskModel``); the local cwd store
+    sessions.json``) and by the Server (``StepModel``); the local cwd store
     is deliberately left untouched. Use ``agt chat --list --daemon=X`` to
     read it back from the Server.
     """

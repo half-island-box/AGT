@@ -14,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db, session_scope
-from ..models import RuntimeModel, TaskModel
+from ..models import RuntimeModel, StepModel
 from ..schemas import (
     ArtifactOut,
     ClaimRequest,
@@ -31,14 +31,14 @@ from ..schemas import (
     TaskStatusResponse,
 )
 from ..services.claim_service import (
-    claim_tasks_for_daemon,
-    cancelled_tasks_for_daemon,
-    notify_task_available,
+    claim_steps_for_daemon,
+    cancelled_steps_for_daemon,
+    notify_steps_available,
 )
 from ..services.artifact_service import artifact_to_out, artifacts_for_steps
 from ..services.report_service import (
-    record_task_progress_for_daemon,
-    record_task_result_for_daemon,
+    record_step_progress_for_daemon,
+    record_step_result_for_daemon,
 )
 from ..services.runtime_service import is_stale
 from ..services.selection_service import SelectionError, select_runtime
@@ -150,7 +150,7 @@ async def submit_task(
 
     task_id = payload.task_id or _new_task_id()
 
-    existing = await db.get(TaskModel, task_id)
+    existing = await db.get(StepModel, task_id)
     if existing is not None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -196,7 +196,7 @@ async def _notify_daemons(
     Both are fire-and-forget: failures are swallowed because the normal
     claim poll will pick up the task anyway.
     """
-    notify_task_available()
+    notify_steps_available()
 
     daemon_links: dict[str, Any] = getattr(request.app.state, "daemon_links", {})
     if target_daemon_id:
@@ -238,14 +238,14 @@ async def claim_task(
     payload: ClaimRequest,
     db: AsyncSession = Depends(get_db),
 ) -> ClaimResponse:
-    """HTTP entry point for ``claim_tasks_for_daemon``.
+    """HTTP entry point for ``claim_steps_for_daemon``.
 
     The wire format (``{daemon_id, max_concurrent, timeout_seconds,
     runtime_ids}`` → ``{tasks: [...]}``) is preserved for backward
     compatibility. The reverse-dial ``DaemonLink`` (server side) uses
     the same service function over WebSocket.
     """
-    tasks = await claim_tasks_for_daemon(
+    tasks = await claim_steps_for_daemon(
         db,
         daemon_id=payload.daemon_id,
         max_tasks=payload.max_concurrent,
@@ -254,7 +254,7 @@ async def claim_task(
     )
     # Phase 4: HTTP long-poll cancel channel — this daemon's unreported
     # cancellations ride along on every claim response.
-    cancelled_ids = await cancelled_tasks_for_daemon(db, payload.daemon_id)
+    cancelled_ids = await cancelled_steps_for_daemon(db, payload.daemon_id)
     return ClaimResponse(tasks=tasks, cancelled_task_ids=cancelled_ids)
 
 
@@ -266,14 +266,14 @@ async def report_task(
 ) -> ReportResponse:
     """Daemon reports the result of an executed task.
 
-    Business logic lives in :func:`record_task_result_for_daemon` so
+    Business logic lives in :func:`record_step_result_for_daemon` so
     the HTTP path and the reverse-dial WS path stay in lock-step.
     """
     try:
-        result = await record_task_result_for_daemon(
+        result = await record_step_result_for_daemon(
             db,
             daemon_id=payload.daemon_id,
-            task_id=task_id,
+            step_id=task_id,
             exit_code=payload.exit_code,
             stdout=payload.stdout,
             stderr=payload.stderr,
@@ -300,14 +300,14 @@ async def progress_task(
 ) -> ProgressResponse:
     """Daemon reports an incremental stdout prefix mid-execution.
 
-    HTTP fallback entry for ``record_task_progress_for_daemon`` — the
+    HTTP fallback entry for ``record_step_progress_for_daemon`` — the
     reverse-dial WS path routes to the same service function.
     """
     try:
-        result = await record_task_progress_for_daemon(
+        result = await record_step_progress_for_daemon(
             db,
             daemon_id=payload.daemon_id,
-            task_id=task_id,
+            step_id=task_id,
             stdout_prefix=payload.stdout_prefix,
         )
         return ProgressResponse(**result)
@@ -326,16 +326,16 @@ async def list_tasks(
     db: AsyncSession = Depends(get_db),
 ) -> list[TaskStatusResponse]:
     """List tasks (Phase 4: backs ``agt task clean --all-done``)."""
-    stmt = select(TaskModel).order_by(TaskModel.updated_at.desc()).limit(limit)
+    stmt = select(StepModel).order_by(StepModel.updated_at.desc()).limit(limit)
     if statuses:
         wanted = [s.strip() for s in statuses.split(",") if s.strip()]
         if wanted:
-            stmt = stmt.where(TaskModel.status.in_(wanted))
+            stmt = stmt.where(StepModel.status.in_(wanted))
     rows = (await db.execute(stmt)).scalars().all()
-    artifact_map = await artifacts_for_steps(db, [t.task_id for t in rows])
+    artifact_map = await artifacts_for_steps(db, [t.step_id for t in rows])
     return [
         TaskStatusResponse(
-            task_id=t.task_id,
+            task_id=t.step_id,
             provider=t.provider,
             status=t.status,
             session_id=t.session_id,
@@ -352,7 +352,7 @@ async def list_tasks(
             agent_cwd=t.agent_cwd,
             artifacts=[
                 ArtifactOut(**artifact_to_out(r))
-                for r in artifact_map.get(t.task_id, [])
+                for r in artifact_map.get(t.step_id, [])
             ],
         )
         for t in rows
@@ -364,11 +364,11 @@ async def task_status(
     task_id: str,
     db: AsyncSession = Depends(get_db),
 ) -> TaskStatusResponse:
-    task = await db.get(TaskModel, task_id)
+    task = await db.get(StepModel, task_id)
     if task is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="task not found")
     return TaskStatusResponse(
-        task_id=task.task_id,
+        task_id=task.step_id,
         provider=task.provider,
         status=task.status,
         session_id=task.session_id,
@@ -416,7 +416,7 @@ async def stream_task(
     """
     factory = request.app.state.session_factory
     async with session_scope(factory) as db:
-        task = await db.get(TaskModel, task_id)
+        task = await db.get(StepModel, task_id)
         if task is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="task not found"

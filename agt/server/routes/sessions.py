@@ -29,7 +29,7 @@ from ...agent_history import (
 from ...comm.errors import RPCRejected, WSRPCUnavailable, WSRPCUncertain
 from ...net import host_of_url, is_local_host
 from ..database import get_db
-from ..models import JobModel, SessionModel, TaskModel
+from ..models import JobModel, SessionModel, StepModel
 from ...task.session import CwdSessionStore
 from ..schemas import SessionHistoryOut, SessionResolveOut
 from ..services.artifact_service import artifact_to_out, artifacts_for_job
@@ -134,15 +134,15 @@ async def resolve_session(
     # backward-compatible callers; the CLI resume path uses job_id.
     latest_step = (
         await db.execute(
-            select(TaskModel)
-            .where(TaskModel.job_id == job.job_id)
-            .order_by(TaskModel.updated_at.desc())
+            select(StepModel)
+            .where(StepModel.job_id == job.job_id)
+            .order_by(StepModel.updated_at.desc())
         )
     ).scalars().first()
 
     return SessionResolveOut(
         job_id=job.job_id,
-        task_id=latest_step.task_id if latest_step else "",
+        task_id=latest_step.step_id if latest_step else "",
         session_id=sess.session_id,
         provider=job.provider,
         identity_did=job.identity_did,
@@ -187,9 +187,9 @@ async def list_session_artifacts(
 
     latest_step = (
         await db.execute(
-            select(TaskModel)
-            .where(TaskModel.job_id == job.job_id)
-            .order_by(TaskModel.updated_at.desc())
+            select(StepModel)
+            .where(StepModel.job_id == job.job_id)
+            .order_by(StepModel.updated_at.desc())
         )
     ).scalars().first()
     owning_daemon = job.target_daemon_id or (
@@ -459,9 +459,9 @@ async def delete_session(
             job = await db.get(JobModel, sess.job_id)
             latest = (
                 await db.execute(
-                    select(TaskModel)
-                    .where(TaskModel.job_id == sess.job_id)
-                    .order_by(TaskModel.updated_at.desc())
+                    select(StepModel)
+                    .where(StepModel.job_id == sess.job_id)
+                    .order_by(StepModel.updated_at.desc())
                 )
             ).scalars().first()
             owning = latest.daemon_id if latest else None
@@ -528,7 +528,7 @@ async def delete_session(
 
     tasks = (
         await db.execute(
-            select(TaskModel).where(TaskModel.session_id == session_id)
+            select(StepModel).where(StepModel.session_id == session_id)
         )
     ).scalars().all()
     session_by_job: dict[str, SessionModel] = {
@@ -681,9 +681,9 @@ async def get_session_history(
 
     latest_step = (
         await db.execute(
-            select(TaskModel)
-            .where(TaskModel.job_id == sess.job_id)
-            .order_by(TaskModel.updated_at.desc())
+            select(StepModel)
+            .where(StepModel.job_id == sess.job_id)
+            .order_by(StepModel.updated_at.desc())
         )
     ).scalars().first()
     provider = latest_step.provider if latest_step else sess.provider

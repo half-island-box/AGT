@@ -23,7 +23,7 @@ from agt.server.config import ServerConfig
 from agt.server.database import make_engine, make_session_factory
 from agt.server.main import create_app
 from agt.server.migrate_schema import ensure_schema
-from agt.server.models import Base, TaskModel
+from agt.server.models import Base, StepModel
 
 
 SECRET = "identity-routes-test-secret"
@@ -72,8 +72,8 @@ def _add_task_ref(engine, did: str, task_id: str) -> None:
 
     async def _insert() -> None:
         async with factory() as session:
-            session.add(TaskModel(
-                task_id=task_id, provider="claude", prompt="hi",
+            session.add(StepModel(
+                step_id=task_id, provider="claude", prompt="hi",
                 status="completed",
                 created_at="2026-01-01 00:00:00",
                 updated_at="2026-01-01 00:00:00",

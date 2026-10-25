@@ -29,7 +29,7 @@ from agt.server.config import ServerConfig
 from agt.server.database import make_engine, make_session_factory
 from agt.server.main import create_app
 from agt.server.migrate_schema import ensure_schema
-from agt.server.models import Base, JobModel, SessionModel, TaskModel
+from agt.server.models import Base, JobModel, SessionModel, StepModel
 
 
 SECRET = "daemon-sessions-test-secret"
@@ -80,8 +80,8 @@ async def _seed_task(
                 job_id=task_id, identity_did=identity_did or "", provider=provider,
                 session_id=session_id, created_at=now, updated_at=now,
             ))
-        session.add(TaskModel(
-            task_id=task_id, job_id=task_id, provider=provider, prompt=prompt,
+        session.add(StepModel(
+            step_id=task_id, job_id=task_id, provider=provider, prompt=prompt,
             status="completed", daemon_id=daemon_id, session_id=session_id,
             agent_cwd=agent_cwd, work_dir=work_dir, identity_did=identity_did,
             created_at=now, updated_at=now,

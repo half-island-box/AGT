@@ -10,11 +10,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db
-from ..models import ArtifactModel, JobModel, TaskModel
+from ..models import ArtifactModel, JobModel, StepModel
 from ..schemas import ArtifactOut, GoalMetaSummary, SubmitTaskRequest, SubmitTaskResponse
 from ..services.artifact_service import artifact_to_out, artifacts_for_steps
 from ..services.goal_view import ask_question, current_task_id, goal_meta_summary
-from ..services.claim_service import notify_task_available
+from ..services.claim_service import notify_steps_available
 from ..services.job_service import (
     append_step,
     cancel_job,
@@ -141,7 +141,7 @@ async def create_job_route(
     await _notify_daemons(request, effective_target, effective_provider)
     return CreateJobResponse(
         job_id=job.job_id,
-        task_id=job.steps[0].task_id,
+        task_id=job.steps[0].step_id,
         status=job.status,
     )
 
@@ -172,7 +172,7 @@ async def job_input(
     await _notify_daemons(request, job.target_daemon_id, job.provider)
     return CreateJobResponse(
         job_id=job_id,
-        task_id=step.task_id,
+        task_id=step.step_id,
         status=job.status,
     )
 
@@ -220,7 +220,7 @@ async def job_stop(
                 await link.notify_cancel(task_id)
             except Exception:
                 pass
-    notify_task_available()
+    notify_steps_available()
     return {
         "job_id": job.job_id,
         "status": job.status,
@@ -265,7 +265,7 @@ async def job_cancel(
             await link.notify_cancel(task_id)
         except Exception:
             pass  # log-and-continue: the claim channel still delivers
-    notify_task_available()
+    notify_steps_available()
     return {"cancelled": True}
     return {"cancelled": True}
 
@@ -282,7 +282,7 @@ async def job_status(
     current = None
     for step in reversed(job.steps):
         if step.status in ("running", "pending", "completed", "failed", "timeout", "cancelled"):
-            current = step.task_id
+            current = step.step_id
             break
 
     artifact_rows = (
@@ -443,7 +443,7 @@ async def job_log(
         status=job.status,
         steps=[
             JobLogStep(
-                task_id=s.task_id,
+                task_id=s.step_id,
                 status=s.status,
                 session_id=s.session_id,
                 exit_code=s.exit_code,

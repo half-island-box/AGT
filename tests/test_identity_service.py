@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
 from agt.server.database import make_session_factory
-from agt.server.models import Base, TaskModel
+from agt.server.models import Base, StepModel
 from agt.server.services.identity_service import (
     _dir_name,
     _render_agent_md,
@@ -219,8 +219,8 @@ async def _sync_via(db: _DB, did: str, tmp_path: Path):
 
 async def _add_task(db: _DB, task_id: str, identity_did: str) -> None:
     async with db.session() as session:
-        session.add(TaskModel(
-            task_id=task_id, provider="claude", prompt="hi",
+        session.add(StepModel(
+            step_id=task_id, provider="claude", prompt="hi",
             status="completed", created_at="2026-01-01T00:00:00",
             updated_at="2026-01-01T00:00:00", identity_did=identity_did,
         ))

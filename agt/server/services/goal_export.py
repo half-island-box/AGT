@@ -66,7 +66,7 @@ def _parse_goal_meta(root: JobModel) -> dict | None:
 
 def _ordered_steps(job: JobModel) -> list:
     steps = list(job.steps or [])
-    steps.sort(key=lambda s: (s.created_at or "", s.task_id or ""))
+    steps.sort(key=lambda s: (s.created_at or "", s.step_id or ""))
     return steps
 
 
@@ -255,17 +255,17 @@ async def export_goal(
         base = slug_of[j.job_id]
         if not spawned:
             v = _Vertex(name=base, job=j, kind="leaf",
-                        step_ids=[s.task_id for s in steps])
+                        step_ids=[s.step_id for s in steps])
             _fill_vertex(v, steps)
             vertices.append(v)
             continue
         plan_steps = steps[:-1] if len(steps) > 1 else steps
         synth_steps = steps[-1:]
         plan = _Vertex(name=base, job=j, kind="plan",
-                       step_ids=[s.task_id for s in plan_steps])
+                       step_ids=[s.step_id for s in plan_steps])
         _fill_vertex(plan, plan_steps, needs_input_notes=True)
         synth = _Vertex(name=synth_name[j.job_id], job=j, kind="synth",
-                        step_ids=[s.task_id for s in synth_steps])
+                        step_ids=[s.step_id for s in synth_steps])
         _fill_vertex(synth, synth_steps)
         vertices.extend([plan, synth])
 

@@ -9,7 +9,7 @@ spinning until timeout.
 
 Covers:
 
-- The shared service ``record_task_result_for_daemon`` (HTTP + WS paths
+- The shared service ``record_step_result_for_daemon`` (HTTP + WS paths
   both call it): happy write, session upsert, resume-rejected cleanup,
   task-not-found, task-not-owned.
 - ``DaemonLink._handle_tasks_report`` mapping service errors to
@@ -37,8 +37,8 @@ from agt.server.config import ServerConfig
 from agt.server.database import make_engine, make_session_factory, session_scope
 from agt.server.main import create_app
 from agt.server.migrate_schema import ensure_schema, migrate_identities_and_sessions
-from agt.server.models import Base, JobModel, SessionModel, TaskModel
-from agt.server.services.report_service import record_task_result_for_daemon
+from agt.server.models import Base, JobModel, SessionModel, StepModel
+from agt.server.services.report_service import record_step_result_for_daemon
 
 
 SECRET = "report-over-ws-test-secret"
@@ -76,7 +76,7 @@ def _fresh_db():
             await conn.run_sync(migrate_identities_and_sessions, Path("/tmp"))
         factory = make_session_factory(engine)
         async with session_scope(factory) as db:
-            await db.execute(delete(TaskModel))
+            await db.execute(delete(StepModel))
             await db.execute(delete(SessionModel))
             await db.execute(delete(JobModel))
             await db.commit()
@@ -92,17 +92,17 @@ async def _seed_task(factory, task_id: str, daemon_id: str | None) -> None:
             job_id=task_id, status="running", job_type="task",
             provider="claude", created_at=now, updated_at=now,
         ))
-        db.add(TaskModel(
-            task_id=task_id, job_id=task_id, provider="claude", prompt="hi",
+        db.add(StepModel(
+            step_id=task_id, job_id=task_id, provider="claude", prompt="hi",
             status="running", daemon_id=daemon_id,
             created_at=now, updated_at=now,
         ))
         await db.commit()
 
 
-async def _row(factory, task_id: str) -> TaskModel | None:
+async def _row(factory, task_id: str) -> StepModel | None:
     async with session_scope(factory) as db:
-        return await db.get(TaskModel, task_id)
+        return await db.get(StepModel, task_id)
 
 
 def test_service_writes_result_to_task() -> None:
@@ -112,8 +112,8 @@ def test_service_writes_result_to_task() -> None:
     async def _run() -> None:
         await _seed_task(factory, "t1", "d1")
         async with session_scope(factory) as db:
-            result = await record_task_result_for_daemon(
-                db, daemon_id="d1", task_id="t1",
+            result = await record_step_result_for_daemon(
+                db, daemon_id="d1", step_id="t1",
                 exit_code=0, stdout="ok\n", stderr="", duration=1.23,
                 status="completed", session_id="sess-1", resume_rejected=False,
             )
@@ -139,8 +139,8 @@ def test_service_session_id_upserts_session_model() -> None:
         await _seed_task(factory, "t1", "d1")
         # First report inserts SessionModel row.
         async with session_scope(factory) as db:
-            await record_task_result_for_daemon(
-                db, daemon_id="d1", task_id="t1",
+            await record_step_result_for_daemon(
+                db, daemon_id="d1", step_id="t1",
                 exit_code=0, stdout="", stderr="", duration=0.1,
                 status="completed", session_id="sess-A", resume_rejected=False,
             )
@@ -153,8 +153,8 @@ def test_service_session_id_upserts_session_model() -> None:
 
         # Second report with a new session_id updates in place.
         async with session_scope(factory) as db:
-            await record_task_result_for_daemon(
-                db, daemon_id="d1", task_id="t1",
+            await record_step_result_for_daemon(
+                db, daemon_id="d1", step_id="t1",
                 exit_code=0, stdout="", stderr="", duration=0.2,
                 status="completed", session_id="sess-B", resume_rejected=False,
             )
@@ -184,8 +184,8 @@ def test_service_resume_rejected_deletes_session_model() -> None:
             await db.commit()
         # Report with resume_rejected=True — must drop the SessionModel row.
         async with session_scope(factory) as db:
-            await record_task_result_for_daemon(
-                db, daemon_id="d1", task_id="t1",
+            await record_step_result_for_daemon(
+                db, daemon_id="d1", step_id="t1",
                 exit_code=0, stdout="", stderr="", duration=0.1,
                 status="completed", session_id="ignored-when-rejected",
                 resume_rejected=True,
@@ -209,8 +209,8 @@ def test_service_task_not_found_raises_value_error() -> None:
     async def _run() -> None:
         async with session_scope(factory) as db:
             try:
-                await record_task_result_for_daemon(
-                    db, daemon_id="d1", task_id="missing",
+                await record_step_result_for_daemon(
+                    db, daemon_id="d1", step_id="missing",
                     exit_code=0, stdout="", stderr="", duration=0.0,
                     status="completed", session_id=None, resume_rejected=False,
                 )
@@ -231,8 +231,8 @@ def test_service_task_not_owned_raises_value_error() -> None:
         await _seed_task(factory, "t1", "d-real")
         async with session_scope(factory) as db:
             try:
-                await record_task_result_for_daemon(
-                    db, daemon_id="d-imposter", task_id="t1",
+                await record_step_result_for_daemon(
+                    db, daemon_id="d-imposter", step_id="t1",
                     exit_code=0, stdout="", stderr="", duration=0.0,
                     status="completed", session_id=None, resume_rejected=False,
                 )
@@ -244,8 +244,8 @@ def test_service_task_not_owned_raises_value_error() -> None:
         await _seed_task(factory, "t2", None)
         async with session_scope(factory) as db:
             try:
-                await record_task_result_for_daemon(
-                    db, daemon_id="d1", task_id="t2",
+                await record_step_result_for_daemon(
+                    db, daemon_id="d1", step_id="t2",
                     exit_code=0, stdout="", stderr="", duration=0.0,
                     status="completed", session_id=None, resume_rejected=False,
                 )
@@ -409,7 +409,7 @@ def test_http_report_route_still_works() -> None:
             await conn.run_sync(ensure_schema)
         factory = make_session_factory(engine)
         async with session_scope(factory) as db:
-            await db.execute(delete(TaskModel))
+            await db.execute(delete(StepModel))
             await db.execute(delete(SessionModel))
             await db.execute(delete(JobModel))
             await db.commit()
@@ -630,7 +630,7 @@ def test_report_end_to_end_over_reverse_dial() -> None:
             # Belt-and-suspenders: wipe any rows left over from a
             # previous run, then seed.
             async with session_scope(factory) as db:
-                await db.execute(delete(TaskModel))
+                await db.execute(delete(StepModel))
                 await db.execute(delete(SessionModel))
                 await db.execute(delete(JobModel))
                 await db.commit()

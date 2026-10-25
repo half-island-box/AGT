@@ -1,6 +1,6 @@
 """Phase 4 workdir supplement: server persists ``agent_cwd`` from submit.
 
-- Submit with ``agent_cwd``: server stores it on ``TaskModel``.
+- Submit with ``agent_cwd``: server stores it on ``StepModel``.
 - Status echoes ``agent_cwd`` back.
 - Claim payload includes ``agent_cwd`` (Phase 4 workdir supplement).
 - ``None`` agent_cwd stays ``None`` end-to-end (backward compatibility).

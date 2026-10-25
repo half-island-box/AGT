@@ -1,4 +1,4 @@
-"""Phase 4 Step 4 + Option D — ``claim_tasks_for_daemon`` identity rendering.
+"""Phase 4 Step 4 + Option D — ``claim_steps_for_daemon`` identity rendering.
 
 When a task with ``identity_did`` is claimed, the server reads the
 current IdentityModel and inlines the rendered AGENTS.md body into the
@@ -26,15 +26,16 @@ import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 
+from sqlalchemy import inspect
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from agt.server.config import ServerConfig
 from agt.server.database import make_engine, make_session_factory
 from agt.server.main import create_app
 from agt.server.migrate_schema import ensure_schema, migrate_identities_and_sessions
-from agt.server.models import Base, JobModel, RuntimeModel, TaskModel
+from agt.server.models import Base, JobModel, RuntimeModel, StepModel, TaskModel
 from agt.server.services.binding_service import create_binding
-from agt.server.services.claim_service import claim_tasks_for_daemon
+from agt.server.services.claim_service import claim_steps_for_daemon
 from agt.server.services.identity_service import (
     _render_agent_md,
     create_identity,
@@ -116,8 +117,8 @@ async def _submit_task(factory, *, identity_did: str | None) -> str:
             provider="claude", identity_did=identity_did,
             created_at=now, updated_at=now,
         )
-        task = TaskModel(
-            task_id="t1", job_id="t1", provider="claude",
+        task = StepModel(
+            step_id="t1", job_id="t1", provider="claude",
             prompt="hi", status="pending",
             work_dir=None, agent_cwd=None,
             identity_did=identity_did,
@@ -149,7 +150,7 @@ class TestIdentityMdRendering:
 
             async def _claim() -> list:
                 async with factory() as session:
-                    return await claim_tasks_for_daemon(
+                    return await claim_steps_for_daemon(
                         session,
                         daemon_id="d1", max_tasks=1,
                         timeout_seconds=1,
@@ -177,7 +178,7 @@ class TestIdentityMdRendering:
 
             async def _claim() -> list:
                 async with factory() as session:
-                    return await claim_tasks_for_daemon(
+                    return await claim_steps_for_daemon(
                         session,
                         daemon_id="d1", max_tasks=1,
                         timeout_seconds=1,
@@ -220,7 +221,7 @@ class TestIdentityMdRendering:
 
             async def _claim() -> list:
                 async with factory() as session:
-                    return await claim_tasks_for_daemon(
+                    return await claim_steps_for_daemon(
                         session,
                         daemon_id="d1", max_tasks=1,
                         timeout_seconds=1,
@@ -254,7 +255,7 @@ class TestIdentityMdRendering:
 
             async def _claim() -> str | None:
                 async with factory() as session:
-                    results = await claim_tasks_for_daemon(
+                    results = await claim_steps_for_daemon(
                         session,
                         daemon_id="d1", max_tasks=1,
                         timeout_seconds=1,
@@ -287,8 +288,8 @@ class TestIdentityMdRendering:
                         provider="claude", identity_did="did:agt:dynamic",
                         created_at=now, updated_at=now,
                     ))
-                    session.add(TaskModel(
-                        task_id="t2", job_id="t2", provider="claude",
+                    session.add(StepModel(
+                        step_id="t2", job_id="t2", provider="claude",
                         prompt="again", status="pending",
                         work_dir=None, agent_cwd=None,
                         identity_did="did:agt:dynamic",
@@ -328,3 +329,39 @@ class TestIdentityMdRendering:
 
 # Silence the unused import — the test only needs the engine dispose.
 _ = create_app  # keep the import surface stable for some IDE checkers
+
+
+def test_step_model_maps_logical_step_id_to_legacy_task_column() -> None:
+    step = StepModel(
+        step_id="step-1",
+        provider="claude",
+        prompt="hi",
+        status="pending",
+        created_at="2026-10-21 00:00:00",
+        updated_at="2026-10-21 00:00:00",
+    )
+
+    assert StepModel.__tablename__ == "tasks"
+    assert [column.name for column in StepModel.__table__.primary_key.columns] == [
+        "task_id"
+    ]
+    assert step.step_id == "step-1"
+    assert step.task_id == "step-1"
+    assert "step_id" in inspect(StepModel).attrs
+    assert "task_id" in inspect(StepModel).attrs
+
+
+def test_step_model_keeps_task_id_constructor_compatibility() -> None:
+    step = StepModel(
+        task_id="step-legacy",
+        provider="claude",
+        prompt="hi",
+        status="pending",
+        created_at="2026-10-21 00:00:00",
+        updated_at="2026-10-21 00:00:00",
+    )
+
+    assert step.step_id == "step-legacy"
+    assert step.task_id == "step-legacy"
+    assert TaskModel is StepModel
+    assert inspect(JobModel).relationships.steps.mapper.class_ is StepModel

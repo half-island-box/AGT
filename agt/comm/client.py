@@ -394,6 +394,7 @@ class ServerClient:
         provider: str | None = None,
         daemon_id: str | None = None,
         dir: str | None = None,
+        cwd: str | None = None,
         max_depth: int | None = None,
         max_descendants: int | None = None,
     ) -> dict[str, Any]:
@@ -404,6 +405,7 @@ class ServerClient:
             ("provider", provider),
             ("daemon_id", daemon_id),
             ("dir", dir),
+            ("cwd", cwd),
             ("max_depth", max_depth),
             ("max_descendants", max_descendants),
         ):

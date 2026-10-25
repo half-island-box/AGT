@@ -29,10 +29,10 @@ from ..comm.errors import RPCRejected, WSRPCUnavailable
 from ..comm.wsrpc_link import WsRpcLink
 from .database import session_scope
 from .services.auth_service import TaskToken
-from .services.claim_service import claim_tasks_for_daemon
+from .services.claim_service import claim_steps_for_daemon
 from .services.report_service import (
-    record_task_progress_for_daemon,
-    record_task_result_for_daemon,
+    record_step_progress_for_daemon,
+    record_step_result_for_daemon,
 )
 from .services.runtime_service import upsert_daemon_runtimes
 
@@ -490,7 +490,7 @@ class DaemonLink:
             max_tasks = 1
 
         async with session_scope(self._session_factory) as db:
-            tasks = await claim_tasks_for_daemon(
+            tasks = await claim_steps_for_daemon(
                 db,
                 daemon_id=self.daemon_id,
                 max_tasks=max_tasks,
@@ -499,9 +499,9 @@ class DaemonLink:
             )
             # Phase 4: cancel delivery rides the claim response on the
             # WS path too — same shape as the HTTP ClaimResponse.
-            from .services.claim_service import cancelled_tasks_for_daemon
+            from .services.claim_service import cancelled_steps_for_daemon
 
-            cancelled_ids = await cancelled_tasks_for_daemon(db, self.daemon_id)
+            cancelled_ids = await cancelled_steps_for_daemon(db, self.daemon_id)
         return {
             "tasks": [t.model_dump() for t in tasks],
             "cancelled_task_ids": cancelled_ids,
@@ -530,7 +530,7 @@ class DaemonLink:
         ``daemon_id`` comes from the configured target, never the body —
         a misbehaving daemon can't report on behalf of another. This is
         the reverse-dial counterpart to ``POST /api/tasks/{id}/report``;
-        both paths funnel through :func:`record_task_result_for_daemon`.
+        both paths funnel through :func:`record_step_result_for_daemon`.
 
         Business rejections (task missing / not owned) surface as
         ``RPCRejected(404|403)`` so the daemon can tell the difference
@@ -549,10 +549,10 @@ class DaemonLink:
                 })
         try:
             async with session_scope(self._session_factory) as db:
-                return await record_task_result_for_daemon(
+                return await record_step_result_for_daemon(
                     db,
                     daemon_id=self.daemon_id,
-                    task_id=body["task_id"],
+                    step_id=body["task_id"],
                     exit_code=int(body["exit_code"]),
                     stdout=str(body["stdout"]),
                     stderr=str(body["stderr"]),
@@ -599,10 +599,10 @@ class DaemonLink:
                 })
         try:
             async with session_scope(self._session_factory) as db:
-                return await record_task_progress_for_daemon(
+                return await record_step_progress_for_daemon(
                     db,
                     daemon_id=self.daemon_id,
-                    task_id=body["task_id"],
+                    step_id=body["task_id"],
                     stdout_prefix=str(body["stdout_prefix"]),
                 )
         except ValueError as exc:

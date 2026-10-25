@@ -469,16 +469,16 @@ async def delete_identity(
     Raises:
         ValueError: If tasks reference this identity
     """
-    from agt.server.models import TaskModel
+    from agt.server.models import StepModel
 
     # Check for task references (identity_did column)
     tasks_result = await db.execute(
-        select(TaskModel).where(TaskModel.identity_did == did)
+        select(StepModel).where(StepModel.identity_did == did)
     )
     referencing_tasks = tasks_result.scalars().all()
 
     if referencing_tasks:
-        task_ids = [t.task_id for t in referencing_tasks]
+        task_ids = [t.step_id for t in referencing_tasks]
         raise ValueError(
             f"Cannot delete identity {did}: {len(task_ids)} task(s) still reference it: {', '.join(task_ids[:5])}"
             + (f"..." if len(task_ids) > 5 else "")

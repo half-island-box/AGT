@@ -5,7 +5,7 @@ Verifies that ``runtime_ids`` actually filters pending tasks by provider:
 - A daemon declaring only ``claude`` cannot claim ``codex`` tasks.
 - A daemon declaring multiple providers can claim any of them.
 - Empty ``runtime_ids`` returns no tasks (explicit "I have nothing").
-- HTTP path exercises the shared ``claim_tasks_for_daemon`` service; the
+- HTTP path exercises the shared ``claim_steps_for_daemon`` service; the
   reverse-dial WS path is covered in ``test_reverse_dial.py``.
 """
 
@@ -22,7 +22,7 @@ from agt.server.config import ServerConfig
 from agt.server.database import make_engine, make_session_factory, session_scope
 from agt.server.main import create_app
 from agt.server.migrate_schema import ensure_schema, migrate_identities_and_sessions
-from agt.server.models import Base, JobModel, TaskModel
+from agt.server.models import Base, JobModel, StepModel
 
 
 SECRET = "step-3-4-test-secret"
@@ -51,7 +51,7 @@ def _build_app_with_tasks(
             await conn.run_sync(migrate_identities_and_sessions, Path("/tmp"))
         factory = make_session_factory(engine)
         async with session_scope(factory) as db:
-            await db.execute(delete(TaskModel))
+            await db.execute(delete(StepModel))
             await db.execute(delete(JobModel))
             now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
             for tid, provider in tasks:
@@ -59,8 +59,8 @@ def _build_app_with_tasks(
                     job_id=tid, status="queued", job_type="task",
                     provider=provider, created_at=now, updated_at=now,
                 ))
-                db.add(TaskModel(
-                    task_id=tid, job_id=tid, provider=provider, prompt="x",
+                db.add(StepModel(
+                    step_id=tid, job_id=tid, provider=provider, prompt="x",
                     status="pending", created_at=now, updated_at=now,
                 ))
             await db.commit()

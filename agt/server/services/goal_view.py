@@ -150,8 +150,8 @@ def current_task_id(job: JobModel) -> str | None:
     """
     for step in reversed(job.steps):
         if step.status in ("pending", "running"):
-            return step.task_id
-    return job.steps[-1].task_id if job.steps else None
+            return step.step_id
+    return job.steps[-1].step_id if job.steps else None
 
 
 def ask_question(job: JobModel) -> str | None:

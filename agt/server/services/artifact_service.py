@@ -40,7 +40,7 @@ from ...a2a import (
     REPORT_INLINE_BUDGET_BYTES,
     make_artifact_uri,
 )
-from ..models import ArtifactModel, TaskModel
+from ..models import ArtifactModel, StepModel
 
 if TYPE_CHECKING:
     from ..schemas import ArtifactReportItem
@@ -129,14 +129,14 @@ def _decode_inline(item: "ArtifactReportItem", *, used_budget: int) -> tuple[byt
 async def register_step_artifacts(
     db: AsyncSession,
     *,
-    task: TaskModel,
+    step: StepModel,
     daemon_id: str,
     items: list["ArtifactReportItem"],
 ) -> list[str]:
     """Persist artifact rows reported for one Step.
 
     Called from the shared report entry point AFTER ownership was checked
-    (``task.daemon_id == daemon_id``). Best-effort per item: invalid names,
+    (``step.daemon_id == daemon_id``). Best-effort per item: invalid names,
     over-limit counts, and bad inline payloads are skipped with warnings —
     a scan problem must never fail the Step report. Returns the ids of the
     rows actually created.
@@ -144,9 +144,9 @@ async def register_step_artifacts(
     if not items:
         return []
 
-    if task.job_id is None:
+    if step.job_id is None:
         # Legacy rows never got a Job — nowhere to hang lineage from.
-        log.warning("task %s has no job_id; dropping %d artifact(s)", task.task_id, len(items))
+        log.warning("step %s has no job_id; dropping %d artifact(s)", step.step_id, len(items))
         return []
 
     now = _now()
@@ -158,7 +158,7 @@ async def register_step_artifacts(
     # (name, sha256) pairs return the existing id instead of duplicating.
     existing_rows = (
         await db.execute(
-            select(ArtifactModel).where(ArtifactModel.step_id == task.task_id)
+            select(ArtifactModel).where(ArtifactModel.step_id == step.step_id)
         )
     ).scalars().all()
     existing_keys = {(r.name, r.sha256): r.artifact_id for r in existing_rows}
@@ -167,12 +167,12 @@ async def register_step_artifacts(
         if index >= MAX_ARTIFACTS_PER_STEP:
             log.warning(
                 "task %s: artifact count exceeds %d; dropping the rest",
-                task.task_id,
+                step.step_id,
                 MAX_ARTIFACTS_PER_STEP,
             )
             break
         if not _valid_artifact_name(item.name):
-            log.warning("task %s: rejecting artifact name %r", task.task_id, item.name)
+            log.warning("step %s: rejecting artifact name %r", step.step_id, item.name)
             continue
         prior_id = existing_keys.get((item.name, item.sha256))
         if prior_id is not None:
@@ -191,9 +191,9 @@ async def register_step_artifacts(
         db.add(
             ArtifactModel(
                 artifact_id=artifact_id,
-                job_id=task.job_id,
-                step_id=task.task_id,
-                producer_identity_id=task.identity_did,
+                job_id=step.job_id,
+                step_id=step.step_id,
+                producer_identity_id=step.identity_did,
                 name=item.name,
                 mime_type=item.mime_type or "",
                 summary=item.summary,
@@ -256,13 +256,13 @@ async def artifacts_for_daemon(db: AsyncSession, daemon_id: str) -> list[dict]:
     cross-session view. ``origin_daemon_id`` is the claim-time daemon that
     reported the artifact, so this is "what did this daemon actually
     produce". ``session_id`` comes from the producing Step's
-    ``TaskModel.session_id`` (the same source ``list_daemon_sessions``
+    ``StepModel.session_id`` (the same source ``list_daemon_sessions``
     uses).
     """
     rows = (
         await db.execute(
-            select(ArtifactModel, TaskModel.session_id)
-            .join(TaskModel, ArtifactModel.step_id == TaskModel.task_id)
+            select(ArtifactModel, StepModel.session_id)
+            .join(StepModel, ArtifactModel.step_id == StepModel.step_id)
             .where(ArtifactModel.origin_daemon_id == daemon_id)
             .order_by(ArtifactModel.created_at.desc())
         )

@@ -45,6 +45,7 @@ async def submit_goal(
     provider: str | None = None,
     daemon_id: str | None = None,
     dir: str | None = None,
+    cwd: str | None = None,
     max_depth: int = DEFAULT_MAX_DEPTH,
     max_descendants: int = DEFAULT_MAX_DESCENDANTS,
 ) -> JobModel:
@@ -57,6 +58,9 @@ async def submit_goal(
     - explicit ``(provider, daemon)`` pin → live runtime required.
     - no identity AND no daemon pin → at least one live runtime must
       offer the provider (review fix: otherwise the root pends forever).
+
+    ``cwd`` is the submitter's project directory used to group run history.
+    ``dir`` remains the optional daemon-side execution directory.
     """
     if not goal or not goal.strip():
         raise ValueError({"type": "empty_goal", "message": "goal must be a non-empty string"})
@@ -111,6 +115,7 @@ async def submit_goal(
         prompt=prompt,
         target_daemon_id=effective_target,
         agent_cwd=dir,
+        cwd=cwd,
         identity_did=identity_did,
         job_type="goal",
         goal_meta=json.dumps(meta, ensure_ascii=False),

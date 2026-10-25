@@ -26,10 +26,10 @@ from agt.server.config import ServerConfig
 from agt.server.database import make_engine, make_session_factory, session_scope
 from agt.server.main import create_app
 from agt.server.migrate_schema import ensure_schema
-from agt.server.models import Base, TaskModel
+from agt.server.models import Base, StepModel
 from agt.server.services.report_service import (
-    record_task_progress_for_daemon,
-    record_task_result_for_daemon,
+    record_step_progress_for_daemon,
+    record_step_result_for_daemon,
 )
 
 SECRET = "client-stream-test-secret"
@@ -85,8 +85,8 @@ async def _seed_task(factory, task_id: str, daemon_id: str | None) -> None:
     now = _utcnow()
     async with session_scope(factory) as db:
         db.add(
-            TaskModel(
-                task_id=task_id,
+            StepModel(
+                step_id=task_id,
                 provider="claude",
                 prompt="hi",
                 status="running",
@@ -116,7 +116,7 @@ def test_stream_task_parses_snapshot_delta_done(tmp_path) -> None:
             await conn.run_sync(Base.metadata.create_all)
             await conn.run_sync(ensure_schema)
         async with session_scope(factory) as db:
-            await db.execute(delete(TaskModel))
+            await db.execute(delete(StepModel))
             await db.commit()
 
     asyncio.run(_setup())
@@ -138,20 +138,20 @@ def test_stream_task_parses_snapshot_delta_done(tmp_path) -> None:
             # Let the server's subscribe settle, then publish progress.
             await asyncio.sleep(0.1)
             async with session_scope(factory) as db:
-                await record_task_progress_for_daemon(
+                await record_step_progress_for_daemon(
                     db,
                     daemon_id="d-client",
-                    task_id="t-client",
+                    step_id="t-client",
                     stdout_prefix="hello",
                 )
             delta = await asyncio.wait_for(gen.__anext__(), timeout=5)
             assert delta == {"type": "delta", "chunk": "hello"}
 
             async with session_scope(factory) as db:
-                await record_task_result_for_daemon(
+                await record_step_result_for_daemon(
                     db,
                     daemon_id="d-client",
-                    task_id="t-client",
+                    step_id="t-client",
                     exit_code=0,
                     stdout="hello world",
                     stderr="",

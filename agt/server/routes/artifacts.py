@@ -5,13 +5,14 @@ from __future__ import annotations
 import base64
 import binascii
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db
-from ..models import ArtifactModel, TaskModel
+from ..models import ArtifactModel, StepModel
 from ..schemas import ArtifactOut, ArtifactUploadRequest
 from ..services.artifact_service import (
     ArtifactFetchError,
@@ -59,11 +60,22 @@ def _content_response(content: bytes, artifact: ArtifactModel) -> Response:
     """Serve bytes with untrusted-mime hardening (design D8)."""
     mime = artifact.mime_type or "application/octet-stream"
     safe_name = artifact.name.replace("\\", "/").split("/")[-1] or "artifact"
+    # HTTP headers are encoded as Latin-1 by Starlette. Keep the legacy
+    # ``filename`` parameter ASCII-only and carry the exact Unicode name in
+    # the RFC 5987 ``filename*`` parameter.
+    ascii_name = "".join(
+        char if 32 <= ord(char) < 127 and char not in '"\\' else "_"
+        for char in safe_name
+    ).strip() or "artifact"
+    encoded_name = quote(safe_name, safe="")
     return Response(
         content=content,
         media_type=mime,
         headers={
-            "Content-Disposition": f'attachment; filename="{safe_name}"',
+            "Content-Disposition": (
+                f'attachment; filename="{ascii_name}"; '
+                f"filename*=UTF-8''{encoded_name}"
+            ),
             "X-Content-Type-Options": "nosniff",
         },
     )
@@ -134,17 +146,17 @@ async def upload_artifact(
     (inline <4KB / server disk) — the artifact lands ``ready`` in one
     step, so the subsequent report can reference it metadata-only.
     """
-    task = await db.get(TaskModel, payload.task_id)
-    if task is None:
+    step = await db.get(StepModel, payload.task_id)
+    if step is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="task not found"
         )
-    if task.daemon_id != payload.daemon_id:
+    if step.daemon_id != payload.daemon_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="task not owned by this daemon",
         )
-    if task.job_id is None:
+    if step.job_id is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="task has no job; cannot register artifacts",
@@ -168,7 +180,7 @@ async def upload_artifact(
     prior = (
         await db.execute(
             select(ArtifactModel).where(
-                ArtifactModel.step_id == task.task_id,
+                ArtifactModel.step_id == step.step_id,
                 ArtifactModel.name == item.name,
                 ArtifactModel.sha256 == item.sha256,
             )
@@ -180,9 +192,9 @@ async def upload_artifact(
 
     artifact = ArtifactModel(
         artifact_id=str(uuid4()),
-        job_id=task.job_id,
-        step_id=task.task_id,
-        producer_identity_id=task.identity_did,
+        job_id=step.job_id,
+        step_id=step.step_id,
+        producer_identity_id=step.identity_did,
         name=item.name,
         mime_type=item.mime_type or "",
         summary=item.summary,
