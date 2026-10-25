@@ -99,7 +99,7 @@ class ProviderAdapter:
     stream_sink_factory: Callable[[], StreamingSink]
     resume_rejection_detector: ResumeRejectionDetector
     permission_args: tuple[str, ...] = ()
-    # Phase B: how this provider discovers the catalog MCP server (or
+    # Phase B: how this provider discovers the AGT MCP server (or
     # None when it has no supported MCP-config mechanism).
     mcp_profile: McpConfigProfile | None = None
 

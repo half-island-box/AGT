@@ -2,7 +2,7 @@
 
 [中文文档](README_zh.md) | **English**
 
-**agt** is a local bridge for AI coding-agent CLIs. It discovers installed agents, runs them from the terminal, and provides a server/daemon layer for queued, concurrent, multi-machine execution — including goal-driven orchestration, dynamic sub-agent spawning, static DAG pipelines, artifact management, and an MCP runtime catalog.
+**agt** is a local bridge for AI coding-agent CLIs. It discovers installed agents, runs them from the terminal, and provides a server/daemon layer for queued, concurrent, multi-machine execution — including goal-driven orchestration, MCP-driven sub-agent spawning, static DAG pipelines, artifact management, and an MCP runtime catalog.
 
 It is an experimental Python foundation for a future multi-agent desktop client. The desktop UI has intentionally not been chosen yet.
 
@@ -18,7 +18,7 @@ It is an experimental Python foundation for a future multi-agent desktop client.
 ### Orchestration
 
 - **Goal-driven orchestration**: hand one requirement to a root orchestrator agent (`agt goal`), which decomposes it, recursively spawns child agents within a per-run budget (`--max-depth` / `--max-descendants` / `max_batch`), and synthesizes the final answer. Goal history is grouped by the submitter cwd independently from the optional daemon-side execution directory. A full Job-tree view (`agt goal status`), `AGT-ASK` questions answered via `agt goal input`, cascade cancel, and artifact download round out the entry.
-- **Dynamic spawn**: a parent agent emits `AGT-SPAWN <json>` marker lines to delegate parallel sub-tasks; the server materializes child Jobs, waits for completion, then spawns a synthesis step that aggregates child artifacts.
+- **Dynamic spawn**: MCP-capable agents call `spawn_subagents` with structured child envelopes. The task-scoped tool authenticates the current Goal Step, creates child Jobs immediately, enforces budgets, deduplicates retries, waits for completion, then spawns a synthesis step. Providers without MCP keep the `AGT-SPAWN <json>` marker fallback.
 - **Static DAG pipelines (SOP)**: author reusable multi-agent workflows in YAML with `depends_on`, `${node.output}` dataflow references, and dependency-gated activation (`blocked → queued`). Terminal-node artifacts are the pipeline's final output. A successful goal run can be distilled back into a SOP draft via `agt goal export`.
 - **Identity-based routing**: identities (DID) bind to `(daemon, provider)` runtimes; sub-tasks route dynamically across daemons by capability + affinity + load, while chat sessions stay pinned.
 - **Cancellation**: cancels cascade to spawn descendants and DAG dependents; running remote subprocesses are terminated via `tasks.cancel` push (reverse-dial) or claim-response delivery (HTTP).
@@ -31,9 +31,9 @@ It is an experimental Python foundation for a future multi-agent desktop client.
 
 ### Infrastructure
 
-- **Server**: FastAPI + SQLite (`jobs`, `tasks`, `runtimes`, `sessions`, `identities`, `identity_bindings`, `artifacts`, `job_parents`), Alembic migrations, HMAC task tokens.
+- **Server**: FastAPI + SQLite (`jobs`, `tasks`, `runtimes`, `sessions`, `identities`, `identity_bindings`, `artifacts`, `job_parents`, `spawn_batches`), Alembic migrations, HMAC task tokens.
 - **Daemon**: HTTP long-poll or reverse-dial WebSocket (NAT traversal), semaphore-based concurrency (`AGT_MAX_CONCURRENT`), heartbeat + runtime registration.
-- **MCP runtime catalog**: `list_runtimes` tool served at `/mcp/` (Streamable HTTP) so parent agents can discover which daemons/providers are online before spawning children. Claude Code gets it via project `.mcp.json`; Codex via global `~/.codex/config.toml`.
+- **MCP tools**: `/mcp/` (Streamable HTTP) exposes `list_runtimes` plus the authenticated Goal `spawn_subagents` tool. Claude Code gets the endpoint via project `.mcp.json`; Codex via global `~/.codex/config.toml`. Both configs reference `AGT_TASK_TOKEN` instead of storing credentials.
 - **Provider adapters**: command builders, session locators, stream sinks, resume-rejection detectors, and MCP config profiles are registered per provider — adding a new agent means adding a registry row, not touching the executor.
 - **VS Code extension (in development)**: TypeScript client in `vscode/` — activity-bar daemon tree, server + local daemon lifecycle management, status bar, settings webview, Chat mode, a visual SOP editor, Goal orchestration, and zh/en UI. It talks to the same HTTP API as the CLI; no Python logic is duplicated.
 
@@ -208,7 +208,7 @@ Full option descriptions: [CLI reference](<docs/guide%20docs/commands.md>).
 └───────────┘                └───────────┘                  └────────────┘
                                   │                               │
                                   │ SQLite (jobs/tasks/artifacts) │ fresh subprocess
-                                  │ MCP catalog (/mcp)            ▼
+                                  │ MCP catalog + spawn (/mcp)    ▼
                                   │ SOP DAG (job_parents)    ┌────────────┐
                                   ▼                          │ Agent CLI  │
                             ┌───────────┐                    └────────────┘
@@ -250,7 +250,7 @@ agt/
 │   ├── services/  job lifecycle, spawn orchestration, artifact registry,
 │   │              claim, report, selection, SOP expansion, goal submit/export,
 │   │              catalog
-│   ├── mcp_server MCP runtime catalog (FastMCP)
+│   ├── mcp_server MCP catalog + authenticated Goal spawn (FastMCP)
 │   └── stream_hub SSE pub/sub for remote streaming
 ├── sop/           SOP DSL parsing + static validation
 └── task/          Task executor (3 modes), session store, artifact scanner,

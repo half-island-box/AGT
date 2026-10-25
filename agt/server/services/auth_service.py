@@ -128,4 +128,27 @@ class TaskToken:
             raise PermissionError(f"invalid token: {exc}") from exc
 
 
-__all__ = ["TaskToken"]
+def verify_task_token_claims(token: str, secret: str) -> dict[str, Any]:
+    """Verify an agent callback token and require its task binding."""
+    claims = TaskToken.verify(token, secret, issuer="agt-server")
+    task_id = claims.get("task_id")
+    if not isinstance(task_id, str) or not task_id:
+        raise PermissionError("token is not task scoped")
+    return claims
+
+
+def bearer_token_from_header(value: str | None) -> str | None:
+    """Extract a non-empty bearer token from an HTTP Authorization value."""
+    if not isinstance(value, str):
+        return None
+    scheme, separator, token = value.strip().partition(" ")
+    if not separator or scheme.lower() != "bearer" or not token.strip():
+        return None
+    return token.strip()
+
+
+__all__ = [
+    "TaskToken",
+    "verify_task_token_claims",
+    "bearer_token_from_header",
+]

@@ -172,11 +172,11 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     bind_get_db(app, session_factory)
     bind_verify_task_token(app, cfg.secret)
 
-    # Phase B: mount the catalog MCP endpoint on the existing FastAPI app at
+    # Phase B: mount the AGT MCP endpoint on the existing FastAPI app at
     # ``/mcp`` (Streamable HTTP) — no new listen port. The session manager's
     # lifespan is run inside our own lifespan (see above) because a mounted
     # sub-app's lifespan is not auto-run by Starlette.
-    app.state.mcp = build_catalog_mcp(session_factory, daemon_defs)
+    app.state.mcp = build_catalog_mcp(session_factory, daemon_defs, cfg.secret)
     app.mount("/mcp", catalog_mcp_asgi(app.state.mcp))
 
     app.include_router(runtimes_router)

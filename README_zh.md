@@ -2,7 +2,7 @@
 
 **中文** | [English](README.md)
 
-**agt** 是一个本地 AI 编码 Agent CLI 桥接器。它能发现已安装的 agent、从终端直接执行，并提供 Server/Daemon 层实现任务队列、并发执行与多机调度——包括动态子 Agent 派生（spawn）、静态 DAG 流水线（SOP）、产物管理与 MCP 运行时目录。
+**agt** 是一个本地 AI 编码 Agent CLI 桥接器。它能发现已安装的 agent、从终端直接执行，并提供 Server/Daemon 层实现任务队列、并发执行与多机调度——包括 MCP 驱动的动态子 Agent 派生（spawn）、静态 DAG 流水线（SOP）、产物管理与 MCP 运行时目录。
 
 这是一个面向未来多 Agent 桌面客户端的实验性 Python 基础项目。桌面端技术栈暂未选定。
 
@@ -17,7 +17,7 @@
 
 ### 多 Agent 编排
 
-- **动态派生（Dynamic Spawn）**：父 Agent 在 stdout 输出 `AGT-SPAWN <json>` 标记行声明子任务；Server 同事务物化并行子 Job，全部完成后自动追加 synthesis Step 聚合子产物。
+- **动态派生（Dynamic Spawn）**：支持 MCP 的 Agent 调用 `spawn_subagents` 提交结构化子任务；工具通过 task token 绑定当前 Goal Step，立即创建子 Job、执行预算与幂等校验，全部完成后自动追加 synthesis Step。未接 MCP 的 provider 继续使用 `AGT-SPAWN <json>` 回退。
 - **静态 DAG 流水线（SOP）**：用 YAML 声明可复用的多 Agent 流程，支持 `depends_on` 依赖、`${node.output}` 数据流引用、依赖门控激活（`blocked → queued`）。末端节点产物即最终结果。
 - **身份路由**：Identity（DID）绑定到 `(daemon, provider)` 运行时；子任务按能力 + 亲和 + 负载动态路由到不同 daemon，chat 会话保持钉住同一台。
 - **取消级联**：取消操作级联到 spawn 后代与 DAG 下游；运行中的远程子进程通过 `tasks.cancel` 推送（反向拨号）或 claim 响应（HTTP）终止。
@@ -30,9 +30,9 @@
 
 ### 基础设施
 
-- **Server**：FastAPI + SQLite（`jobs`、`tasks`、`runtimes`、`sessions`、`identities`、`identity_bindings`、`artifacts`、`job_parents`），Alembic 迁移，HMAC 任务令牌。
+- **Server**：FastAPI + SQLite（`jobs`、`tasks`、`runtimes`、`sessions`、`identities`、`identity_bindings`、`artifacts`、`job_parents`、`spawn_batches`），Alembic 迁移，HMAC 任务令牌。
 - **Daemon**：HTTP 长轮询或**反向拨号 WebSocket**（NAT 穿透），信号量并发控制（`AGT_MAX_CONCURRENT`），心跳 + 运行时注册。
-- **MCP 运行时目录**：在 `/mcp/`（Streamable HTTP）暴露 `list_runtimes` 工具，让父 Agent 在派生子任务前发现哪些 daemon/provider 在线。Claude Code 通过项目 `.mcp.json` 接入；Codex 通过全局 `~/.codex/config.toml` 接入。
+- **MCP 工具**：`/mcp/`（Streamable HTTP）同时暴露 `list_runtimes` 与需要 task token 的 Goal `spawn_subagents`。Claude Code 通过项目 `.mcp.json` 接入；Codex 通过全局 `~/.codex/config.toml` 接入；配置只引用 `AGT_TASK_TOKEN` 环境变量，不落真实 token。
 - **Provider 适配器**：命令构造、会话定位、流式 sink、resume 拒绝检测、MCP 配置注入均按 provider 注册——新增 Agent 只需加一行注册表，无需改执行器。
 
 ## 环境要求
@@ -150,7 +150,7 @@ agt sop run pipeline.yaml
 └───────────┘                └───────────┘                  └────────────┘
                                   │                               │
                                   │ SQLite (jobs/tasks/artifacts) │ 每次新子进程
-                                  │ MCP 目录 (/mcp)               ▼
+                                  │ MCP 目录 + spawn (/mcp)       ▼
                                   │ SOP DAG (job_parents)    ┌────────────┐
                                   ▼                          │ Agent CLI  │
                             ┌───────────┐                    └────────────┘
@@ -188,7 +188,7 @@ agt/
 │   │              daemons、runtimes、heartbeat、sop
 │   ├── services/  Job 生命周期、spawn 编排、产物登记、
 │   │              claim、report、选路、SOP 展开、运行时目录
-│   ├── mcp_server MCP 运行时目录（FastMCP）
+│   ├── mcp_server MCP 目录 + 认证 Goal spawn（FastMCP）
 │   └── stream_hub SSE 发布/订阅（远程流式）
 ├── sop/           SOP DSL 解析 + 静态校验
 └── task/          任务执行器（3 种模式）、会话存储、产物扫描、

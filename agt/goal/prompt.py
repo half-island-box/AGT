@@ -1,9 +1,9 @@
 """Goal-mode orchestrator prompt (D2: built-in template + identity override).
 
 The template teaches *strategy* (when to decompose, how to write a
-brief, that synthesis may retry). The mechanics (AGT-SPAWN syntax) are
-taught separately to every Step by ``SPAWN_INSTRUCTION``; together the
-root agent knows both what to do and how to express it.
+brief, that synthesis may retry). The mechanics are taught separately to
+every Step: MCP-capable providers use ``spawn_subagents`` and fall back
+to ``AGT-SPAWN`` when the tool is unavailable.
 
 Injection rule (goal-mode G2):
 
@@ -24,7 +24,7 @@ ORCHESTRATOR_TEMPLATE = (
     "   需要上游产物用 agt-artifact:// 引用（inputs）；约定 return（交付物形态）。\n"
     "   用 identity 指定执行者；不指定则由系统按能力路由。\n"
     "3. 子任务尽量一层拆完；确需更深层拆解时，子任务可自行 spawn（有全局预算）。\n"
-    "4. 子任务失败不等于任务失败：synthesis 阶段你可以选择重试（再次 AGT-SPAWN，\n"
+    "4. 子任务失败不等于任务失败：synthesis 阶段你可以选择重试（再次派生子任务，\n"
     "   换 identity 或缩小范围）、或如实报告部分完成及原因。\n"
     "5. 最终：综合所有子交付物，写出面向用户的完整结论，放入 .agt/outputs/。"
 )
