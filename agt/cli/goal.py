@@ -58,11 +58,13 @@ def _goal_options(f):
 
 
 def _submit_kwargs(kwargs: dict) -> dict:
+    cwd = str(Path.cwd())
     return {
         "identity_did": kwargs.get("identity"),
         "provider": kwargs.get("provider"),
         "daemon_id": kwargs.get("daemon"),
-        "dir": kwargs.get("dir") or str(Path.cwd()),
+        "dir": kwargs.get("dir") or cwd,
+        "cwd": cwd,
         "max_depth": kwargs.get("max_depth"),
         "max_descendants": kwargs.get("max_descendants"),
     }

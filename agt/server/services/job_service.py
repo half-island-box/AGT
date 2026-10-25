@@ -71,6 +71,7 @@ async def create_job(
     target_daemon_id: str | None = None,
     work_dir: str | None = None,
     agent_cwd: str | None = None,
+    cwd: str | None = None,
     identity_did: str | None = None,
     job_id: str | None = None,
     task_id: str | None = None,
@@ -103,6 +104,9 @@ async def create_job(
     - ``root_job_id`` — explicit root override. SOP nodes share the root
       WITHOUT a spawn ``parent_job_id``, so the default "root = self"
       would silently break the shared-root invariant (review G2).
+    - ``cwd`` — explicit run-history directory (submitter project cwd).
+      It takes precedence over ``work_dir`` / ``agent_cwd``; ``agent_cwd``
+      remains the daemon-side execution directory.
     """
     now = _now()
     j_id = job_id or _new_id()
@@ -111,11 +115,11 @@ async def create_job(
     # Phase 6: normalize the project directory used for run isolation.
     # Prefer work_dir (local client cwd); fall back to agent_cwd (daemon-side
     # execution directory). Resolve to an absolute path without trailing slash.
-    raw_cwd = work_dir or agent_cwd
+    raw_cwd = cwd or work_dir or agent_cwd
     try:
-        cwd = str(Path(raw_cwd).resolve()) if raw_cwd else None
+        effective_cwd = str(Path(raw_cwd).resolve()) if raw_cwd else None
     except (OSError, ValueError):
-        cwd = raw_cwd
+        effective_cwd = raw_cwd
 
     # Phase 3: lineage — children inherit the parent's root; roots carry
     # their own id (denormalized for subtree/budget queries). Phase 5:
@@ -127,8 +131,8 @@ async def create_job(
             raise ValueError({"type": "parent_job_not_found", "message": parent_job_id})
         effective_root = root_job_id or parent.root_job_id
         # Children run in the same project context as their parent by default.
-        if cwd is None:
-            cwd = parent.cwd
+        if effective_cwd is None:
+            effective_cwd = parent.cwd
 
     blocked = not with_step
     job = JobModel(
@@ -142,7 +146,7 @@ async def create_job(
         target_daemon_id=target_daemon_id,
         work_dir=work_dir,
         agent_cwd=agent_cwd,
-        cwd=cwd,
+        cwd=effective_cwd,
         sop_node=sop_node,
         goal_meta=goal_meta,
         sop_loop_name=sop_loop_name,

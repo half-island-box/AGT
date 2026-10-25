@@ -29,6 +29,7 @@ class GoalSubmitRequest(BaseModel):
     provider: str | None = None
     daemon_id: str | None = None
     dir: str | None = None
+    cwd: str | None = None
     max_depth: int = Field(default=DEFAULT_MAX_DEPTH, ge=1, le=10)
     max_descendants: int = Field(default=DEFAULT_MAX_DESCENDANTS, ge=1, le=512)
 
@@ -70,6 +71,7 @@ async def goal_submit(
             provider=payload.provider,
             daemon_id=payload.daemon_id,
             dir=payload.dir,
+            cwd=payload.cwd,
             max_depth=payload.max_depth,
             max_descendants=payload.max_descendants,
         )
