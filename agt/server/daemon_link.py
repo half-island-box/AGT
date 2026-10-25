@@ -348,6 +348,8 @@ class DaemonLink:
             return await self._handle_artifacts_get(body)
         if method == "catalog.list":
             return await self._handle_catalog_list(body)
+        if method == "spawn.create":
+            return await self._handle_spawn_create(body)
         raise ValueError({"type": "unknown_method", "message": method})
 
     async def _handle_catalog_list(self, body: dict) -> dict:
@@ -385,6 +387,48 @@ class DaemonLink:
                 daemon_defs=self._daemon_defs,
                 capability=capability,
                 provider=provider,
+            )
+
+    async def _handle_spawn_create(self, body: dict) -> dict:
+        """Create Goal children on behalf of an authenticated remote agent.
+
+        The caller's daemon identity comes from this reverse-dial link,
+        never from the body. The task token is forwarded by the local
+        proxy and still has to name a running Goal Step owned by that
+        daemon.
+        """
+        task_token = body.get("task_token")
+        children = body.get("children")
+        if not isinstance(task_token, str) or not task_token:
+            raise ValueError({
+                "type": "unauthenticated",
+                "code": "unauthenticated",
+                "message": "task token required",
+            })
+        if not isinstance(children, list):
+            raise ValueError({
+                "type": "invalid_spawn_request",
+                "code": "invalid_spawn_request",
+                "message": "children must be a list",
+            })
+        idempotency_key = body.get("idempotency_key")
+        if idempotency_key is not None and not isinstance(idempotency_key, str):
+            raise ValueError({
+                "type": "invalid_spawn_request",
+                "code": "invalid_spawn_request",
+                "message": "idempotency_key must be a string",
+            })
+
+        from .services.spawn_service import spawn_children_for_token
+
+        async with session_scope(self._session_factory) as db:
+            return await spawn_children_for_token(
+                db,
+                task_token=task_token,
+                secret=self._secret,
+                children=children,
+                idempotency_key=idempotency_key,
+                trusted_daemon_id=self.daemon_id,
             )
 
     async def _handle_artifacts_get(self, body: dict) -> dict:

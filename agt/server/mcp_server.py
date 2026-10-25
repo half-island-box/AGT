@@ -1,16 +1,12 @@
-"""Server-side MCP endpoint — exposes the live runtime catalog to agent CLIs.
+"""Server-side MCP endpoint for runtime discovery and Goal child spawning.
 
 Mounted onto the existing FastAPI app at ``/mcp`` (Streamable HTTP), so a
-local agent (or a local daemon's agent) can query which daemons are live
-before spawning a child. The tool is a thin adapter over
-:func:`agt.server.services.catalog_service.render_runtime_catalog`; the
-reverse-dial ``catalog.list`` RPC (in :mod:`agt.server.daemon_link`) runs
-the *same* render for remote daemons, so the two paths can't drift.
+local agent (or a local daemon's agent) can query the live runtime catalog
+and spawn children in Goal mode. The spawn tool authenticates the caller
+with the task-scoped bearer token injected into the agent environment.
 
-Only the tool *logic* is kept importable/testable here
-(:func:`list_runtimes_impl`); the MCP transport (``FastMCP`` + Streamable
-HTTP) is a thin wrapper, so tests exercise the logic without a live MCP
-connection.
+Only the tool logic is kept importable/testable here; the MCP transport
+(``FastMCP`` + Streamable HTTP) is a thin wrapper.
 """
 
 from __future__ import annotations
@@ -19,12 +15,18 @@ import json
 import logging
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 
 from .database import session_scope
+from .services.auth_service import bearer_token_from_header
 from .services.catalog_service import (
     CATALOG_TOOL_DESCRIPTION,
     render_runtime_catalog,
+)
+from .services.spawn_service import (
+    SPAWN_TOOL_DESCRIPTION,
+    SpawnChildInput,
+    spawn_children_for_token,
 )
 
 log = logging.getLogger("agt.server.mcp")
@@ -51,11 +53,42 @@ async def list_runtimes_impl(
     return json.dumps(catalog)
 
 
+async def spawn_subagents_impl(
+    session_factory: Any,
+    secret: str,
+    authorization: str | None,
+    children: list[dict],
+    idempotency_key: str | None = None,
+) -> dict[str, Any]:
+    """Authenticate and create Goal child Jobs through the MCP surface."""
+    token = bearer_token_from_header(authorization)
+    try:
+        async with session_scope(session_factory) as db:
+            return await spawn_children_for_token(
+                db,
+                task_token=token,
+                secret=secret,
+                children=children,
+                idempotency_key=idempotency_key,
+            )
+    except ValueError as exc:
+        payload = exc.args[0] if exc.args and isinstance(exc.args[0], dict) else {}
+        code = payload.get("code") or payload.get("type") or "spawn_failed"
+        return {
+            "ok": False,
+            "error": {
+                "code": code,
+                "message": payload.get("message", str(exc)),
+            },
+        }
+
+
 def build_catalog_mcp(
     session_factory: Any,
     daemon_defs: dict[str, Any],
+    secret: str = "",
 ) -> FastMCP:
-    """Build the Server's catalog MCP server (one tool: ``list_runtimes``).
+    """Build the Server MCP app (catalog + Goal spawn tools).
 
     ``streamable_http_path="/"`` is deliberate: the app is mounted at
     ``/mcp`` on the FastAPI app (``app.mount("/mcp", ...)``), so the
@@ -72,6 +105,24 @@ def build_catalog_mcp(
     ) -> str:
         return await list_runtimes_impl(
             session_factory, daemon_defs, capability, provider,
+        )
+
+    @mcp.tool(description=SPAWN_TOOL_DESCRIPTION)
+    async def spawn_subagents(
+        ctx: Context,
+        children: list[SpawnChildInput],
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        request = ctx.request_context.request
+        authorization = (
+            request.headers.get("authorization") if request is not None else None
+        )
+        return await spawn_subagents_impl(
+            session_factory,
+            secret,
+            authorization,
+            [child.model_dump(exclude_none=True, by_alias=True) for child in children],
+            idempotency_key,
         )
 
     return mcp
@@ -97,6 +148,7 @@ def catalog_mcp_asgi(mcp: FastMCP) -> Any:
 
 __all__ = [
     "list_runtimes_impl",
+    "spawn_subagents_impl",
     "build_catalog_mcp",
     "catalog_mcp_asgi",
 ]

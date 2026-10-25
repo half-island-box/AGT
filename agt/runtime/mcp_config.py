@@ -1,7 +1,7 @@
 """Provider MCP-config injection profiles (Phase B).
 
-The live runtime catalog is served over MCP. To let a spawned agent
-*discover* that MCP server, the executor injects a provider-specific
+The AGT MCP server exposes runtime discovery and Goal child spawning. To
+let a spawned agent discover it, the executor injects a provider-specific
 config file into the spawn environment before spawn, then reclaims it in
 ``finally``. Providers read MCP config from different places and formats,
 so the injection is modelled as a small strategy per provider:
@@ -35,9 +35,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
-# The MCP server name an agent references when it calls the catalog tool.
+# The MCP server name an agent references for AGT's tools.
 # Both profiles write (or would write) an entry under this name.
 MCP_SERVER_NAME = "agt-catalog"
+
+# Name only, never the token value. Provider configs reference this env var
+# so concurrent tasks can share one MCP entry without overwriting credentials.
+MCP_BEARER_TOKEN_ENV = "AGT_TASK_TOKEN"
 
 # Sidecar prefix (project-scoped JSON profile) under ``<cwd>/.agt/``.
 _SIDECAR_PREFIX = ".agt-mcp"
@@ -52,7 +56,12 @@ class McpConfigProfile(Protocol):
     executor never branches on provider name or config format.
     """
 
-    def inject(self, cwd: Path, mcp_url: str) -> None: ...
+    def inject(
+        self,
+        cwd: Path,
+        mcp_url: str,
+        bearer_token_env_var: str | None = MCP_BEARER_TOKEN_ENV,
+    ) -> None: ...
 
     def reclaim(self, cwd: Path) -> None: ...
 
@@ -80,7 +89,12 @@ class ProjectJsonMcpConfig:
             aagt / f"{_SIDECAR_PREFIX}-managed-{self.filename}",
         )
 
-    def inject(self, cwd: Path, mcp_url: str) -> None:
+    def inject(
+        self,
+        cwd: Path,
+        mcp_url: str,
+        bearer_token_env_var: str | None = MCP_BEARER_TOKEN_ENV,
+    ) -> None:
         cwd = Path(cwd)
         cwd.mkdir(parents=True, exist_ok=True)
         # Crash-self-heal: strip a leftover from a prior run before
@@ -117,7 +131,15 @@ class ProjectJsonMcpConfig:
             managed.touch()
 
         servers = dict(original.get("mcpServers") or {})
-        servers[MCP_SERVER_NAME] = {"type": "http", "url": mcp_url}
+        entry: dict[str, str | dict[str, str]] = {
+            "type": "http",
+            "url": mcp_url,
+        }
+        if bearer_token_env_var:
+            entry["headers"] = {
+                "Authorization": f"Bearer ${{{bearer_token_env_var}}}",
+            }
+        servers[MCP_SERVER_NAME] = entry
         merged = dict(original)
         merged["mcpServers"] = servers
         target.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
@@ -247,21 +269,40 @@ class GlobalTomlMcpConfig:
         except (FileNotFoundError, OSError):
             return None
 
-    def _block(self, mcp_url: str) -> str:
+    def _block(
+        self,
+        mcp_url: str,
+        bearer_token_env_var: str | None,
+    ) -> str:
         # ``json.dumps`` produces a double-quoted, correctly-escaped string
         # that is also a valid TOML basic string for our URL values.
-        return f"{self._header}\nurl = {json.dumps(mcp_url)}\n"
+        lines = [self._header, f"url = {json.dumps(mcp_url)}"]
+        if bearer_token_env_var:
+            lines.append(
+                "bearer_token_env_var = "
+                f"{json.dumps(bearer_token_env_var)}"
+            )
+        return "\n".join(lines) + "\n"
 
-    def inject(self, cwd: Path, mcp_url: str) -> None:
+    def inject(
+        self,
+        cwd: Path,
+        mcp_url: str,
+        bearer_token_env_var: str | None = MCP_BEARER_TOKEN_ENV,
+    ) -> None:
         with self._locked():
-            self._inject_locked(mcp_url)
+            self._inject_locked(mcp_url, bearer_token_env_var)
 
-    def _inject_locked(self, mcp_url: str) -> None:
+    def _inject_locked(
+        self,
+        mcp_url: str,
+        bearer_token_env_var: str | None,
+    ) -> None:
         existed = self.path.exists()
         text = self._read_text() or ""
         # Idempotent: drop any prior copy of our table before appending.
         stripped = _strip_table(text, self._header).rstrip()
-        block = self._block(mcp_url)
+        block = self._block(mcp_url, bearer_token_env_var)
         new_text = f"{stripped}\n\n{block}" if stripped else block
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(new_text, encoding="utf-8")
@@ -296,11 +337,14 @@ class GlobalTomlMcpConfig:
 
 
 def inject_mcp_config(
-    profile: McpConfigProfile | None, cwd: Path, mcp_url: str
+    profile: McpConfigProfile | None,
+    cwd: Path,
+    mcp_url: str,
+    bearer_token_env_var: str | None = MCP_BEARER_TOKEN_ENV,
 ) -> None:
-    """Register the catalog MCP for ``profile``; no-op when ``None``."""
+    """Register the AGT MCP server for ``profile``; no-op when ``None``."""
     if profile is not None:
-        profile.inject(cwd, mcp_url)
+        profile.inject(cwd, mcp_url, bearer_token_env_var)
 
 
 def reclaim_mcp_config(profile: McpConfigProfile | None, cwd: Path) -> None:
@@ -311,6 +355,7 @@ def reclaim_mcp_config(profile: McpConfigProfile | None, cwd: Path) -> None:
 
 __all__ = [
     "MCP_SERVER_NAME",
+    "MCP_BEARER_TOKEN_ENV",
     "McpConfigProfile",
     "ProjectJsonMcpConfig",
     "GlobalTomlMcpConfig",

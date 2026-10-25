@@ -396,6 +396,55 @@ class JobParentModel(Base):
     created_at: Mapped[str] = mapped_column(String(32), nullable=False)
 
 
+class SpawnBatchModel(Base):
+    """One idempotent child-spawn request made by a running Goal Step.
+
+    MCP creates children while the parent agent is still running, so the
+    report path needs a durable way to know that a Step already spawned
+    work. The stored response is also replayed when an agent retries the
+    same tool call after a transport timeout.
+    """
+
+    __tablename__ = "spawn_batches"
+    __table_args__ = (
+        UniqueConstraint(
+            "parent_step_id",
+            "idempotency_key",
+            name="uq_spawn_batch_step_key",
+        ),
+        UniqueConstraint(
+            "parent_step_id",
+            "request_digest",
+            name="uq_spawn_batch_step_digest",
+        ),
+    )
+
+    spawn_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    parent_step_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("tasks.task_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    parent_job_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("jobs.job_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    root_job_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("jobs.job_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    result_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[str] = mapped_column(String(32), nullable=False)
+    updated_at: Mapped[str] = mapped_column(String(32), nullable=False)
+
+
 # Compatibility alias: the ORM was originally exposed as ``TaskModel`` before
 # the Job/Step split made its actual Step semantics explicit.
 TaskModel = StepModel
@@ -412,4 +461,5 @@ __all__ = [
     "IdentityBindingModel",
     "ArtifactModel",
     "JobParentModel",
+    "SpawnBatchModel",
 ]

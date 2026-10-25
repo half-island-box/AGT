@@ -23,6 +23,7 @@ This matches the existing convention used by ``claim_service`` and
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -31,6 +32,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..models import JobModel, SessionModel, StepModel
 from ..stream_hub import default_hub
 from .artifact_service import artifact_to_out, artifacts_for_steps, register_step_artifacts
+from .spawn_service import children_for_step, spawn_batches_for_step
+
+log = logging.getLogger(__name__)
+
+_TERMINAL_STEP_STATUSES = {"completed", "failed", "timeout", "cancelled"}
 
 
 async def record_step_result_for_daemon(
@@ -95,6 +101,20 @@ async def record_step_result_for_daemon(
             "artifacts": [],
         }
 
+    # A spawn Step is immutable once its first report materialized the
+    # batch. Replaying that report after synthesis starts must not move
+    # the parent Job back to waiting_children or append a second
+    # synthesis Step.
+    if (
+        step.status in _TERMINAL_STEP_STATUSES
+        and await spawn_batches_for_step(db, step_id)
+    ):
+        return {
+            "recorded": False,
+            "reason": "already_terminal",
+            "artifacts": [],
+        }
+
     step.exit_code = exit_code
     step.stdout = stdout
     step.stderr = stderr
@@ -116,8 +136,6 @@ async def record_step_result_for_daemon(
             outcome = "needs_input"
         else:
             outcome = "done" if exit_code == 0 else "error"
-    step.outcome = outcome
-
     step.updated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
     # Phase 3: persist the structured-outcome sidecar (spawn envelopes).
@@ -192,44 +210,72 @@ async def record_step_result_for_daemon(
 
     await db.flush()
 
+    parent_job = await db.get(JobModel, job_id) if job_id is not None else None
+    spawned_children = (
+        await children_for_step(db, step_id) if job_id is not None else []
+    )
+
+    # MCP spawn creates children while the parent Step is still running.
+    # Marker spawns are materialized here for legacy daemons. Both paths
+    # converge on the same Step outcome and parent state transition.
+    if outcome == "spawn_subjob" and not spawned_children:
+        marker_children: list[dict] = []
+        if isinstance(outcome_payload, dict):
+            raw_children = outcome_payload.get("children")
+            if isinstance(raw_children, list):
+                marker_children = [
+                    child
+                    for child in raw_children
+                    if isinstance(child, dict) and child.get("goal")
+                ]
+        if parent_job is not None and marker_children:
+            from .job_service import spawn_children
+
+            spawned_children = await spawn_children(
+                db,
+                parent_job=parent_job,
+                children=marker_children,
+                daemon_id=daemon_id,
+                parent_step_id=step_id,
+            )
+        if not spawned_children:
+            outcome = "error"
+            message = "spawn request produced no child jobs"
+            step.stderr = f"{step.stderr}\n{message}".strip()
+    elif spawned_children:
+        if outcome == "error":
+            # A failed/timed-out parent cannot synthesize. Cancel its
+            # descendants locally so late reports are rejected cleanly.
+            from .job_service import cancel_job
+
+            for child in spawned_children:
+                await cancel_job(db, child.job_id)
+            spawned_children = []
+        else:
+            if outcome == "needs_input":
+                log.warning(
+                    "Step %s emitted needs_input after spawning children; "
+                    "spawn wins",
+                    step_id,
+                )
+            outcome = "spawn_subjob"
+
+    step.outcome = outcome
+
     # Drive the parent Job state machine.
     if job_id is not None:
-        from .job_service import report_step
+        from .job_service import on_child_done, report_step, try_wake_dependents
 
         await report_step(db, step_id, outcome)
 
-        # Phase 3 hook A: materialize spawn intents as parallel child
-        # Jobs (same transaction — a failed spawn rolls back with the
-        # report). Failed-at-birth children (unknown identity) count as
-        # terminal, so run the wakeup check immediately afterwards.
-        if outcome == "spawn_subjob":
-            from .job_service import on_child_done, spawn_children
-
-            children = []
-            if isinstance(outcome_payload, dict):
-                raw_children = outcome_payload.get("children")
-                if isinstance(raw_children, list):
-                    children = [
-                        c for c in raw_children if isinstance(c, dict) and c.get("goal")
-                    ]
-            parent_job = await db.get(JobModel, job_id)
-            if parent_job is not None:
-                await spawn_children(
-                    db,
-                    parent_job=parent_job,
-                    children=children,
-                    daemon_id=daemon_id,
-                )
-                if children:
-                    await on_child_done(db, job_id, synthesis_daemon_id=daemon_id)
+        if outcome == "spawn_subjob" and spawned_children:
+            await on_child_done(db, job_id, synthesis_daemon_id=daemon_id)
 
         # Phase 3 hook B: this Step's Job may itself be a child — its
         # terminal report wakes the parent's wakeup check (synthesis
         # spawns inline when all siblings are terminal).
         current_job = await db.get(JobModel, job_id)
         if current_job is not None and current_job.parent_job_id is not None:
-            from .job_service import on_child_done
-
             await on_child_done(
                 db,
                 current_job.parent_job_id,
@@ -244,8 +290,6 @@ async def record_step_result_for_daemon(
         if current_job is not None and current_job.status in (
             "done", "failed", "cancelled"
         ):
-            from .job_service import try_wake_dependents
-
             await try_wake_dependents(db, current_job.job_id)
 
     await db.commit()

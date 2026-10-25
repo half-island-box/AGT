@@ -39,6 +39,19 @@ SPAWN_INSTRUCTION = (
     "fails instead of being rerouted."
 )
 
+MCP_SPAWN_INSTRUCTION = (
+    "[agt] When you need to delegate parallel sub-tasks, prefer the "
+    "`spawn_subagents` MCP tool. Pass one object per child with `goal`, "
+    "optional `identity`, `inputs`, `return`, `daemon_id`, and `provider`. "
+    "The tool response is authoritative: do not claim success unless it "
+    "returns ok=true. If the tool is unavailable, fall back to the existing "
+    'AGT-SPAWN protocol and output one line per child exactly as '
+    'AGT-SPAWN {"identity":"<did or empty>","goal":"...","inputs":[],'
+    '"return":"...","daemon_id":"<optional>","provider":"<optional>"} — '
+    "single-line JSON, no code fences. spawn_unavailable or unauthenticated "
+    "errors also allow fallback. Do not use both for the same child batch."
+)
+
 # ── AGT-ASK: explicit "ask the user" marker (goal mode G2b) ─────────
 #
 # task-type Jobs have no implicit needs_input path (that derivation is
@@ -55,7 +68,7 @@ ASK_INSTRUCTION = (
     'user\'s answer, output exactly one line: AGT-ASK {"question": "..."} '
     "— single-line JSON, no code fences. Use it ONLY when truly blocked; "
     "the task pauses until answered. Do not combine AGT-ASK with "
-    "AGT-SPAWN in the same turn (the ask wins, spawn intents are dropped)."
+    "AGT-SPAWN or spawn_subagents in the same turn."
 )
 
 
@@ -220,6 +233,7 @@ def derive_marker_outcome(stdout: str) -> tuple[str, str | None, dict | None]:
 __all__ = [
     "SPAWN_PREFIX",
     "SPAWN_INSTRUCTION",
+    "MCP_SPAWN_INSTRUCTION",
     "ASK_PREFIX",
     "ASK_INSTRUCTION",
     "SpawnParseResult",

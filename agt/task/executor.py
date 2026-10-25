@@ -38,7 +38,11 @@ from ..daemon.identity_inject import (
     _reclaim_identity,
     _reclaim_outputs_instruction,
 )
-from ..runtime.mcp_config import inject_mcp_config, reclaim_mcp_config
+from ..runtime.mcp_config import (
+    MCP_BEARER_TOKEN_ENV,
+    inject_mcp_config,
+    reclaim_mcp_config,
+)
 from ..runtime.models import Runtime
 from ..runtime.registry import (
     ProviderAdapter,
@@ -193,13 +197,12 @@ def _stream_args_for(sink: StreamingSink) -> list[str]:
 
 
 def _mcp_url_for(config: DaemonConfig) -> str:
-    """The MCP catalog endpoint a spawned agent should call.
+    """The AGT MCP endpoint a spawned agent should call.
 
     Reverse-dial (remote) agents cannot reach the Server's HTTP MCP
-    endpoint (NAT), so they hit their daemon's proxy MCP on loopback —
-    that proxy runs the FastMCP ASGI app at its root, so its endpoint is
-    the single ``/mcp``. Local agents reach the Server, where the same app
-    is *mounted at* ``/mcp`` and its sub-route is ``/`` (see
+    endpoint (NAT), so they hit their daemon's proxy MCP on loopback.
+    Local agents reach the Server, where the app is mounted at ``/mcp``
+    and its sub-route is ``/`` (see
     :func:`agt.server.mcp_server.build_catalog_mcp`), so the assembled
     endpoint is ``/mcp/``.
     """
@@ -269,6 +272,7 @@ class TaskExecutor:
         )
         from .spawn_intent import (
             ASK_INSTRUCTION,
+            MCP_SPAWN_INSTRUCTION,
             SPAWN_INSTRUCTION,
             derive_marker_outcome,
         )
@@ -282,7 +286,12 @@ class TaskExecutor:
             instruction = OUTPUTS_INSTRUCTION.replace(
                 "'.agt/outputs/'", f"'{task.outputs_subdir}'"
             )
-        instruction = f"{instruction}\n{SPAWN_INSTRUCTION}\n{ASK_INSTRUCTION}"
+        spawn_instruction = (
+            MCP_SPAWN_INSTRUCTION
+            if adapter.mcp_profile is not None
+            else SPAWN_INSTRUCTION
+        )
+        instruction = f"{instruction}\n{spawn_instruction}\n{ASK_INSTRUCTION}"
         outputs_snapshot = snapshot_outputs(outputs_dir)
         # Deliver the deliverables (+spawn) contract through the provider's
         # project-instructions file (CLAUDE.md / AGENTS.md) instead of
@@ -316,12 +325,16 @@ class TaskExecutor:
                 identity_md=task.identity_md,
             )
 
-        # Phase B (MCP): register the live runtime catalog as an MCP
-        # server so the agent can query it before spawning children. The
-        # provider's adapter selects the config profile (project JSON vs
-        # global TOML); a ``None`` profile is a no-op. Reclaimed in
-        # ``finally`` alongside identity.
-        inject_mcp_config(adapter.mcp_profile, work_dir, _mcp_url_for(self._config))
+        # Phase B (MCP): register the AGT MCP server so the agent can
+        # query live runtimes and spawn Goal children. Authentication is
+        # referenced through AGT_TASK_TOKEN, never written to the config.
+        # The provider adapter selects the profile; ``None`` is a no-op.
+        inject_mcp_config(
+            adapter.mcp_profile,
+            work_dir,
+            _mcp_url_for(self._config),
+            bearer_token_env_var=MCP_BEARER_TOKEN_ENV,
+        )
 
         start = time.monotonic()
         result: TaskResult | None = None
@@ -351,8 +364,8 @@ class TaskExecutor:
                 # empty" decision and must run last so it sees the file
                 # after the outputs block is already gone.
                 _reclaim_identity(work_dir, did=task.identity_did)
-            # Phase B (MCP): undo the catalog MCP config injection. A
-            # no-op when the provider's adapter has no MCP profile.
+            # Phase B (MCP): undo the MCP config injection. A no-op when
+            # the provider's adapter has no MCP profile.
             reclaim_mcp_config(adapter.mcp_profile, work_dir)
             # Phase 2: post-exit whitelist scan, AFTER identity files are
             # reclaimed so they can never be picked up. Runs on every
