@@ -2,107 +2,89 @@
 
 **中文** | [English](README.md)
 
-**agt** 是一个本地 AI 编码 Agent CLI 桥接器。它能发现已安装的 agent、从终端直接执行，并提供 Server/Daemon 层实现任务队列、并发执行与多机调度——包括 MCP 驱动的动态子 Agent 派生（spawn）、静态 DAG 流水线（SOP）、产物管理与 MCP 运行时目录。
+**面向 AI 编码 Agent CLI 的本地桥接器与编排层。**
 
-这是一个面向未来多 Agent 桌面客户端的实验性 Python 基础项目。桌面端技术栈暂未选定。
+`agt` 可以发现本机已安装的编码 Agent，并通过统一的命令行、Server 和
+Daemon 接口使用它们。在基础执行能力之上，项目提供持久会话、跨机器调度、
+Goal 驱动的子 Agent 编排、静态 DAG 工作流和统一产物注册表。
 
-## 功能特性
+> [!NOTE]
+> `agt` 正在积极开发中。CLI、Server、Daemon、Goal 模式和 SOP 工作流已经
+> 可用；桌面客户端仍在规划中，技术栈尚未确定。
 
-### Agent 执行
+## 功能概览
 
-- **发现**本地 Agent CLI：Claude Code、Codex、Cursor Agent、GitHub Copilot、Qwen、Kimi、OpenCode、OpenClaw。
-- **一次性执行**（`run`）或**交互式对话**（`chat`），支持会话续接（provider 原生 `--resume`）。
-- **流式输出**：本地 Claude Code 逐 token 实时打印；远程 `--daemon` 对话通过 SSE 增量推送（`snapshot → delta* → done`）。
-- **会话恢复**：跨调用持久化 session ID，随时 `--resume` 续接。
+- **统一 Agent 执行**：通过一套 CLI 运行和对话不同 Provider，支持原生会话
+  续接和流式输出。
+- **Goal 编排**：root Agent 拆解目标，在全局预算内派生子 Agent，并综合各
+  节点的交付物。
+- **静态工作流**：使用 YAML 定义可复用的多 Agent DAG，支持 `depends_on`
+  和 `${node.output}` 数据引用。
+- **Artifact 交接**：把声明的交付物注册为稳定的 `agt-artifact://<id>`，
+  记录血缘、摘要和 SHA-256。
+- **分布式 Worker**：通过 Server 队列化执行，并使用 HTTP 或反向拨号
+  WebSocket 跨机器调度。
+- **Identity 路由**：定义 reviewer、tester 等角色，并按 Provider、Daemon
+  亲和性和 Runtime 可用性路由。
+- **MCP 与编辑器集成**：向支持 MCP 的 Agent 暴露子 Agent Spawn 工具，并
+  提供早期 VS Code 扩展，用于 Chat、Goal 和 SOP 编辑。
 
-### 多 Agent 编排
-
-- **动态派生（Dynamic Spawn）**：支持 MCP 的 Agent 调用 `spawn_subagents` 提交结构化子任务；工具通过 task token 绑定当前 Goal Step，立即创建子 Job、执行预算与幂等校验，全部完成后自动追加 synthesis Step。未接 MCP 的 provider 继续使用 `AGT-SPAWN <json>` 回退。
-- **静态 DAG 流水线（SOP）**：用 YAML 声明可复用的多 Agent 流程，支持 `depends_on` 依赖、`${node.output}` 数据流引用、依赖门控激活（`blocked → queued`）。末端节点产物即最终结果。
-- **身份路由**：Identity（DID）可配置可选的 `(daemon, provider)` 路由偏好，但不要求 binding 存在；任何匹配的在线 runtime 都能执行该身份。子任务按能力 + 亲和 + 负载动态路由到不同 daemon，chat 会话保持钉住同一台。
-- **取消级联**：取消操作级联到 spawn 后代与 DAG 下游；运行中的远程子进程通过 `tasks.cancel` 推送（反向拨号）或 claim 响应（HTTP）终止。
-
-### 产物与数据流
-
-- **产物登记**：Agent 将交付文件放在 `.agt/outputs/`（可通过 `manifest.json` 声明元数据）；Server 登记 lineage/mime/摘要/sha256，生成 `agt-artifact://<id>` 引用。
-- **按需传输**：同 daemon 消费零拷贝（本地路径提示）；跨 daemon 懒拉取字节（反向拨号 RPC），校验 sha256 后在 Server 物化。
-- **产物 CLI**：`agt artifact list --session <sid> [--daemon <id>]` 查看产物；`agt artifact get <uri|id>` 单条下载或 `--session --out-dir` 批量下载。
-
-### 基础设施
-
-- **Server**：FastAPI + SQLite（`jobs`、`tasks`、`runtimes`、`sessions`、`identities`、`identity_bindings`、`artifacts`、`job_parents`、`spawn_batches`），Alembic 迁移，HMAC 任务令牌。
-- **Daemon**：HTTP 长轮询或**反向拨号 WebSocket**（NAT 穿透），信号量并发控制（`AGT_MAX_CONCURRENT`），心跳 + 运行时注册。
-- **MCP 工具**：`/mcp/`（Streamable HTTP）同时暴露 `list_runtimes` 与需要 task token 的 Goal `spawn_subagents`。Claude Code 通过项目 `.mcp.json` 接入；Codex 通过全局 `~/.codex/config.toml` 接入；配置只引用 `AGT_TASK_TOKEN` 环境变量，不落真实 token。
-- **Provider 适配器**：命令构造、会话定位、流式 sink、resume 拒绝检测、MCP 配置注入均按 provider 注册——新增 Agent 只需加一行注册表，无需改执行器。
+当前支持 Claude Code、Codex、Cursor Agent、GitHub Copilot、Qwen、Kimi、
+OpenCode、OpenClaw，以及自定义 CLI。
 
 ## 环境要求
 
 - Python 3.12+
 - [`uv`](https://docs.astral.sh/uv/) 或 pip
-- 至少一个受支持的 Agent CLI 已安装并认证
+- 至少一个受支持的 Agent CLI 已安装并完成认证
 
 ## 安装
 
 ```bash
-git clone <repository-url>
-cd agt
+git clone https://github.com/half-island-box/agent-team.git
+cd agent-team
 uv sync
+uv run agt --help
 ```
 
-或用 pip：
+也可以使用 pip：
 
 ```bash
 python -m pip install -e .
+agt --help
 ```
 
-两种方式都提供 `agt` 命令。用 uv 时在命令前加 `uv run`。
+## 快速开始
 
-## 快速上手
+### 运行或对话 Agent
 
 ```bash
-# 发现 Agent
 agt probe
-
-# 一次性执行（本地，流式输出）
 agt run --provider claude --prompt "解释这个仓库"
-
-# 交互式对话（本地）
 agt chat --provider claude
 
-# 远程对话（钉到某个 daemon，SSE 流式）
-agt chat --provider codex --daemon <daemon-id>
-
-# 查看 / 恢复会话
+# 恢复持久会话
 agt chat --list
-agt chat --list --daemon <daemon-id>   # 跨目录查看远程会话
-agt chat --resume <session-id> --daemon <daemon-id>
+agt chat --resume <session-id>
 ```
 
-会话元数据存储在 `<project>/.agt/sessions.json`。在 Git 仓库中，agt 会幂等地把 `.agt/` 加入 `.gitignore`。
-
-## Server / Daemon 模式
+### 编排开放目标
 
 ```bash
-agt server init
-
-agt server start --detach
-agt daemon start --detach
-
-agt task submit --prompt "用三个词打招呼"
-agt task status <task-id>
-
-agt daemon stop
-agt server stop
+agt goal run "审查这个仓库并修复所有 P0 问题"
+agt goal status <root-job-id>
+agt goal runs
 ```
 
-`agt server init` 会把共享 secret 写入 `~/.agt/server.secret`；`agt server start` 和
-`agt daemon start` 都会自动读取。显式设置的 `AGT_SERVER_SECRET` 优先级更高。
+Goal 模式会创建动态 Job 树。Agent 可以递归委派、暂停并等待用户输入，
+在 synthesis 阶段重试失败任务，也可以把成功运行导出为可复用的 SOP：
 
-默认 Server 监听 `127.0.0.1:8420`，OpenAPI 文档在 [http://127.0.0.1:8420/docs](http://127.0.0.1:8420/docs)。
+```bash
+agt goal input <job-id> "使用中文，并按模块拆分任务"
+agt goal export <root-job-id> -o pipeline.yaml
+```
 
-远程 Daemon 通过 HTTP 或**反向拨号 WebSocket**（Server 主动拨出，穿透 NAT）接入。详见[快速启动指南](<docs/guide%20docs/quick_start.md>)。
-
-## SOP 示例
+### 运行可复用工作流
 
 ```yaml
 # pipeline.yaml
@@ -113,11 +95,11 @@ identities:
 tasks:
   - name: review
     identity: reviewer
-    input: 审查 diff 并把结论写到 .agt/outputs/
+    input: 审查 diff，并把结论写到 .agt/outputs/
     output: review-report
   - name: test
     identity: tester
-    input: 基于 ${review.review-report} 跑测试
+    input: 基于 ${review.review-report} 运行测试
     depends_on: [review]
     output: test-result
 ```
@@ -127,23 +109,42 @@ agt sop validate pipeline.yaml
 agt sop run pipeline.yaml
 ```
 
-## CLI 总览
+### 启动 Server 与 Daemon
 
-| 命令                 | 说明                                                      |
-| -------------------- | --------------------------------------------------------- |
-| `agt probe`        | 探测已安装的 Agent CLI。                                  |
-| `agt run`          | 本地或通过 Daemon 执行一次 prompt。                       |
-| `agt chat`         | 开始、列出或恢复交互式 Agent 会话。                       |
-| `agt sop`          | 静态 DAG 流水线：validate / submit / run / status / log。 |
-| `agt artifact`     | 查看和下载声明的交付产物。                                |
-| `agt server`       | 启动、停止或查看任务服务器。                              |
-| `agt daemon`       | 启动、停止、查看、列出或展示 Daemon。                     |
-| `agt task`         | 提交任务并查看或清理任务状态。                            |
-| `agt runtime list` | 列出 Server 上注册的运行时。                              |
-| `agt identity`     | 管理身份、身份文件和可选的运行时路由偏好。                |
-| `agt token issue`  | 签发任务级令牌（用于 API 测试）。                         |
+需要任务队列、远程 Worker、共享运行历史或多机编排时，可以启用
+Server / Daemon：
 
-完整参数说明：[CLI 命令参考](<docs/guide%20docs/commands.md>)。
+```bash
+agt server init
+agt server start --detach
+agt daemon start --detach
+agt task submit --prompt "用三个词打招呼"
+```
+
+Server 默认监听 `127.0.0.1:8420`，OpenAPI 文档位于
+`http://127.0.0.1:8420/docs`。部署拓扑和配置详见
+[快速启动指南](<docs/guide%20docs/quick_start.md>)。
+
+## CLI
+
+| 命令 | 用途 |
+|---|---|
+| `agt probe` | 发现已安装的 Agent CLI |
+| `agt run` | 执行一次 Prompt |
+| `agt chat` | 开始、列出、恢复或继续对话 |
+| `agt goal` | 运行和观测 Goal Agent 树 |
+| `agt sop` | 校验并运行静态 DAG 工作流 |
+| `agt artifact` | 查看或下载声明的交付产物 |
+| `agt session` | 删除已记录的 Chat 会话 |
+| `agt server` | 管理任务服务器 |
+| `agt daemon` | 管理执行 Daemon |
+| `agt task` | 提交和查看单个任务 |
+| `agt identity` | 管理角色和路由偏好 |
+| `agt runtime` | 查看已注册的 Runtime |
+| `agt token` | 签发用于 API 测试的任务级 Token |
+
+完整参数、环境变量和退出码见
+[CLI 命令参考](<docs/guide%20docs/commands.md>)。
 
 ## 架构
 
@@ -152,98 +153,43 @@ agt sop run pipeline.yaml
 │   CLI     │ ◄────────────► │  Server   │ ◄──────────────► │  Daemon    │
 └───────────┘                └───────────┘                  └────────────┘
                                   │                               │
-                                  │ SQLite (jobs/tasks/artifacts) │ 每次新子进程
-                                  │ MCP 目录 + spawn (/mcp)       ▼
-                                  │ SOP DAG (job_parents)    ┌────────────┐
-                                  ▼                          │ Agent CLI  │
-                            ┌───────────┐                    └────────────┘
-                            │ Artifacts │
+                                  │ SQLite + Artifacts            │ 子进程
+                                  │ Job 树 + MCP + SOP            ▼
+                                  ▼                         ┌────────────┐
+                            ┌───────────┐                   │ Agent CLI  │
+                            │ Artifacts │                   └────────────┘
                             └───────────┘
 ```
 
-### 核心不变式
-
-- 每次 Agent 调用都是**独立子进程**；agt 不保持 Agent 进程存活。
-- 会话连续性委托给 provider，通过持久化 session ID 恢复。
-- Provider 特定行为隔离在**运行时适配器**（注册表模式）之后。
-- **Server** 负责协调和持久化；**Daemon** 负责本地执行。
-- Spawn 谱系（`parent_job_id`）与 DAG 依赖（`job_parents`）是正交关系，可共存。
-
-### 项目结构
-
-```text
-agt/
-├── a2a.py         A2A 形状的内部对象模型（Message/Part/Artifact）
-├── agent_history  Provider 转录读取器（Claude Code / Codex）
-├── ids.py         稳定 ID 派生（基于 daemon URL 的 uuid5）
-├── cli/           Click 命令行接口
-│   ├── main.py    所有核心命令（probe/run/chat/server/daemon/task/...）
-│   └── sop.py     SOP 流水线命令（validate/submit/run/status/log）
-├── comm/          HTTP + WebSocket 客户端、WS-RPC 链路
-├── daemon/        运行时注册、任务认领、反向拨号 WS 服务端、
-│                  MCP 代理、运行中任务追踪、本地资源服务
-├── probe/         Agent CLI 发现（which/shell 回退）
-├── runtime/       Provider 适配器注册表：
-│                  命令构造、会话定位、流式 sink、
-│                  resume 拒绝检测、MCP 配置注入
-├── server/        FastAPI 应用：
-│   ├── routes/    tasks、jobs、artifacts、identities、sessions、
-│   │              daemons、runtimes、heartbeat、sop
-│   ├── services/  Job 生命周期、spawn 编排、产物登记、
-│   │              claim、report、选路、SOP 展开、运行时目录
-│   ├── mcp_server MCP 目录 + 认证 Goal spawn（FastMCP）
-│   └── stream_hub SSE 发布/订阅（远程流式）
-├── sop/           SOP DSL 解析 + 静态校验
-└── task/          任务执行器（3 种模式）、会话存储、产物扫描、
-                   spawn 意图解析、消息渲染
-```
-
-## 配置
-
-| 变量                    | 默认值                    | 说明                                                  |
-| ----------------------- | ------------------------- | ----------------------------------------------------- |
-| `AGT_SERVER_URL`      | `http://127.0.0.1:8420` | CLI 和 Daemon 使用的 Server 地址。                    |
-| `AGT_SERVER_SECRET`   | 回退 `~/.agt/server.secret` | Server 与 Daemon 共用的 HMAC 密钥。                |
-| `AGT_SERVER_PORT`     | `8420`                  | Server 端口。                                         |
-| `AGT_DB_PATH`         | `~/.agt/agt.db`         | SQLite 数据库位置。                                   |
-| `AGT_MAX_CONCURRENT`  | `1`                     | 每个 Daemon 最大并发任务数。                          |
-| `AGT_AGENT_TIMEOUT`   | `600`                   | Agent 子进程超时（秒）。                              |
-| `AGT_LISTEN_MODE`     | `0`                     | 设为`1` 启用反向拨号（NAT 穿透）模式。              |
-| `AGT_DAEMON_WS_PORT`  | `8422`                  | 反向拨号 WS 监听端口。                                |
-| `AGT_DAEMON_MCP_PORT` | `8428`                  | 本地回环 MCP 代理端口（远程 Daemon）。                |
-| `AGT_EXTRA_AGENTS`    | —                        | 额外 Agent：`cmd:provider:显示名[:stream_format]`。 |
-
-### 常用文件
-
-| 数据              | 位置                                         |
-| ----------------- | -------------------------------------------- |
-| Server 数据库     | `~/.agt/agt.db`                            |
-| 项目对话会话      | `<project>/.agt/sessions.json`             |
-| 身份文件          | `~/.agt/identities/<slug>/AGENTS.md`       |
-| Server PID / 日志 | `~/.agt/server.pid`、`~/.agt/server.log` |
-| Daemon PID / 日志 | `~/.agt/daemon.pid`、`~/.agt/daemon.log` |
-
-## 文档
-
-- [CLI 命令参考](<docs/guide%20docs/commands.md>)
-- [端到端快速启动](<docs/guide%20docs/quick_start.md>)
-- [新 Provider 接入指南](<docs/guide%20docs/provider-registration.md>)
-- [编排架构设计](docs/impl/agent-orchestration-design.md)
-- [SOP 设计](docs/impl/phase5-sop-design.md)
-- [动态 Spawn 设计](docs/impl/phase3-dynamic-spawn-design.md)
+- **CLI** 负责提交工作并展示可读的运行状态。
+- **Server** 负责协调、持久化、选路、MCP 和 Artifact。
+- **Daemon** 负责本地进程执行、并发控制和心跳。
+- **Agent CLI** 以独立子进程运行，会话连续性由 Provider 负责。
 
 ## 开发
 
 ```bash
+uv sync
+uv run pytest
 uv run agt --help
-.venv/bin/python -m pytest
 ```
 
-> 在有 pytest 插件冲突的系统上（如 ROS），使用：
-> `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest`
+## 参与贡献
 
-保持改动小，Provider 特定逻辑放在运行时适配器接口之后。
+欢迎提交 Issue 和 Pull Request。较大的改动请先创建 Issue。请尽量把
+Provider 特定逻辑放在运行时适配器中，保持 Python-first 的小型架构，并在
+提交前运行相关测试。
 
-## 状态
+## 文档
 
-积极开发中。多 Agent 任务编排（动态 spawn + 静态 SOP）和产物流水线已可用。桌面客户端在规划中；当前重点是 CLI、运行时、Server 和 Daemon 基础设施。
+- [CLI 命令参考](<docs/guide%20docs/commands.md>)
+- [快速启动与部署指南](<docs/guide%20docs/quick_start.md>)
+- [接入新 Provider](<docs/guide%20docs/provider-registration.md>)
+- [编排架构](docs/impl/agent-orchestration-design.md)
+- [Goal 模式设计](docs/impl/goal-mode-design.md)
+- [本地运行时流程](docs/spec/local-agent-runtime-flow.md)
+
+## 许可证
+
+当前仓库尚未声明开源许可证。在公开发布项目，或按特定许可证接受外部贡献
+之前，需要先添加 `LICENSE` 文件。
