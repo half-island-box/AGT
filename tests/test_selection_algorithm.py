@@ -1,7 +1,8 @@
-"""Tests for the selection algorithm (Phase 4 Step 2, spec: selection-algorithm).
+"""Tests for identity runtime selection.
 
-Covers the four-step decision flow from phase4-design.md §5.1:
-identity validation → load bindings → runtime_hint filter → default/priority.
+Bindings are optional routing preferences. Explicit daemon/provider values
+are hard constraints, and the live runtime registry is the fallback when no
+binding matches.
 """
 
 from __future__ import annotations
@@ -78,9 +79,13 @@ async def _bind(db: _DB, **kw) -> None:
         await create_binding(DID, payload, session)
 
 
-async def _select(db: _DB, hint: str | None):
+async def _select(
+    db: _DB,
+    hint: str | None,
+    target_daemon_id: str | None = None,
+):
     async with db.session() as session:
-        return await select_runtime(DID, hint, "local", session)
+        return await select_runtime(DID, hint, target_daemon_id, session)
 
 
 async def _seed_runtime(
@@ -150,6 +155,33 @@ class TestHappyPaths:
         second = db.run(_select, db, None)
         assert first.provider == second.provider == "claude"
 
+    def test_no_bindings_uses_live_runtime(self, db: _DB, tmp_path: Path) -> None:
+        db.run(_mk_identity, db, tmp_path)
+        db.run(_seed_runtime, db, "runtime-a", "claude")
+
+        result = db.run(_select, db, "claude")
+        assert result.daemon_id == "runtime-a"
+        assert result.provider == "claude"
+        assert result.identity_did == DID
+
+    def test_unbound_provider_is_allowed(self, db: _DB, tmp_path: Path) -> None:
+        db.run(_mk_identity, db, tmp_path)
+        db.run(_bind, db, provider="claude")
+        db.run(_seed_runtime, db, "runtime-b", "cursor")
+
+        result = db.run(_select, db, "cursor")
+        assert result.daemon_id == "runtime-b"
+        assert result.provider == "cursor"
+
+    def test_explicit_daemon_is_a_hard_constraint(self, db: _DB, tmp_path: Path) -> None:
+        db.run(_mk_identity, db, tmp_path)
+        db.run(_bind, db, provider="claude", daemon_id="bound-daemon")
+        db.run(_seed_runtime, db, "bound-daemon", "claude")
+        db.run(_seed_runtime, db, "selected-daemon", "claude")
+
+        result = db.run(_select, db, "claude", "selected-daemon")
+        assert result.daemon_id == "selected-daemon"
+
 
 # ── liveness-aware preference ───────────────────────────────────────
 
@@ -215,6 +247,15 @@ class TestLivenessPreference:
         assert result.daemon_id == "live-daemon"
         assert result.provider == "codex"
 
+    def test_live_unbound_runtime_beats_stale_binding(self, db: _DB, tmp_path) -> None:
+        db.run(_mk_identity, db, tmp_path)
+        db.run(_bind, db, provider="claude", daemon_id="dead-daemon")
+        db.run(_seed_runtime, db, "dead-daemon", "claude", stale=True)
+        db.run(_seed_runtime, db, "live-unbound", "claude")
+
+        result = db.run(_select, db, "claude")
+        assert result.daemon_id == "live-unbound"
+
 
 # ── error paths ────────────────────────────────────────────────────
 
@@ -239,14 +280,14 @@ class TestErrors:
             db.run(_select, db, None)
         assert exc_info.value.err_type == "identity_not_active"
 
-    def test_no_bindings(self, db: _DB, tmp_path: Path) -> None:
+    def test_no_matching_runtime(self, db: _DB, tmp_path: Path) -> None:
         db.run(_mk_identity, db, tmp_path)
         with pytest.raises(SelectionError) as exc_info:
-            db.run(_select, db, None)
-        assert exc_info.value.err_type == "no_bindings"
-        assert "agt identity bind" in str(exc_info.value)
+            db.run(_select, db, "claude")
+        assert exc_info.value.err_type == "no_live_runtime"
+        assert exc_info.value.context["runtime"] == "claude"
 
-    def test_no_binding_for_runtime(self, db: _DB, tmp_path: Path) -> None:
+    def test_unbound_provider_without_runtime_errors(self, db: _DB, tmp_path: Path) -> None:
         db.run(_mk_identity, db, tmp_path)
         db.run(_bind, db, provider="claude")
         db.run(_bind, db, provider="codex")
@@ -254,7 +295,7 @@ class TestErrors:
         with pytest.raises(SelectionError) as exc_info:
             db.run(_select, db, "cursor")
         err = exc_info.value
-        assert err.err_type == "no_binding_for_runtime"
+        assert err.err_type == "no_live_runtime"
         assert err.context["runtime"] == "cursor"
         assert err.context["available"] == ["claude", "codex"]
 

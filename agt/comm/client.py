@@ -81,6 +81,13 @@ class ServerClient:
             raise RPCRejected(resp.status_code, resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {"raw": resp.text})
         return resp.json()
 
+    async def _patch(self, path: str, payload: dict) -> dict[str, Any]:
+        assert self._client is not None, "ServerClient must be used as async context manager"
+        resp = await self._client.patch(path, json=payload, headers=self._headers())
+        if resp.status_code >= 300:
+            raise RPCRejected(resp.status_code, resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {"raw": resp.text})
+        return resp.json()
+
     # ── Runtimes ──────────────────────────────────────────────────
 
     async def register_runtimes(self, runtimes: list[Runtime]) -> int:
@@ -692,6 +699,20 @@ class ServerClient:
         resp = await self._get("/api/identities", params=params or None)
         return resp.get("identities", [])
 
+    async def list_identity_overviews(
+        self,
+        daemon_id: str | None = None,
+        status: str | None = None,
+    ) -> list[dict]:
+        """List identities with their bindings and runtime liveness embedded."""
+        params: dict[str, Any] = {}
+        if daemon_id:
+            params["daemon_id"] = daemon_id
+        if status:
+            params["status_filter"] = status
+        resp = await self._get("/api/identities/overview", params=params or None)
+        return resp.get("identities", [])
+
     async def create_identity(self, payload: dict) -> dict:
         """Create a new identity. Returns the full identity (incl. did)."""
         return await self._post("/api/identities", payload)
@@ -751,6 +772,12 @@ class ServerClient:
         """Create a binding (daemon_id + provider + priority/is_default)."""
         return await self._post(f"/api/identities/{did}/bindings", payload)
 
+    async def update_binding(self, did: str, binding_id: int, payload: dict) -> dict:
+        """Update binding priority/default in place."""
+        return await self._patch(
+            f"/api/identities/{did}/bindings/{binding_id}", payload
+        )
+
     async def delete_binding(self, did: str, binding_id: int) -> bool:
         """Delete a binding by id. Returns True on 204."""
         assert self._client is not None, "ServerClient must be used as async context manager"
@@ -777,10 +804,12 @@ class ServerClient:
         self,
         identity_did: str,
         runtime_hint: str | None = None,
-        daemon_id: str = "local",
+        daemon_id: str | None = None,
     ) -> dict:
         """Dry-run selection: which runtime would this identity run on?"""
-        payload: dict[str, Any] = {"identity_did": identity_did, "daemon_id": daemon_id}
+        payload: dict[str, Any] = {"identity_did": identity_did}
+        if daemon_id is not None:
+            payload["daemon_id"] = daemon_id
         if runtime_hint is not None:
             payload["runtime_hint"] = runtime_hint
         return await self._post("/api/identities/resolve", payload)

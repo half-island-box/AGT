@@ -106,15 +106,16 @@ async def submit_task(
         render_message(payload.message) if payload.message else payload.prompt
     )
 
-    # Phase 4 Step 4: identity resolves the runtime + validates binding.
-    # MUST run before the target_daemon live-runtime check, because the
-    # selection result determines which daemon we check against.
+    # Identity resolves the runtime. Bindings are preferences only; an
+    # explicit daemon/provider pair may use any live runtime even when no
+    # matching binding exists. MUST run before the live-runtime check,
+    # because selection determines which daemon/provider we check.
     if payload.identity_did:
         try:
             result = await select_runtime(
                 payload.identity_did,
                 payload.provider,
-                "local",  # placeholder; select_runtime derives daemon from bindings
+                payload.target_daemon_id,
                 db,
             )
         except SelectionError as exc:

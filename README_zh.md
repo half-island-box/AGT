@@ -19,7 +19,7 @@
 
 - **动态派生（Dynamic Spawn）**：支持 MCP 的 Agent 调用 `spawn_subagents` 提交结构化子任务；工具通过 task token 绑定当前 Goal Step，立即创建子 Job、执行预算与幂等校验，全部完成后自动追加 synthesis Step。未接 MCP 的 provider 继续使用 `AGT-SPAWN <json>` 回退。
 - **静态 DAG 流水线（SOP）**：用 YAML 声明可复用的多 Agent 流程，支持 `depends_on` 依赖、`${node.output}` 数据流引用、依赖门控激活（`blocked → queued`）。末端节点产物即最终结果。
-- **身份路由**：Identity（DID）绑定到 `(daemon, provider)` 运行时；子任务按能力 + 亲和 + 负载动态路由到不同 daemon，chat 会话保持钉住同一台。
+- **身份路由**：Identity（DID）可配置可选的 `(daemon, provider)` 路由偏好，但不要求 binding 存在；任何匹配的在线 runtime 都能执行该身份。子任务按能力 + 亲和 + 负载动态路由到不同 daemon，chat 会话保持钉住同一台。
 - **取消级联**：取消操作级联到 spawn 后代与 DAG 下游；运行中的远程子进程通过 `tasks.cancel` 推送（反向拨号）或 claim 响应（HTTP）终止。
 
 ### 产物与数据流
@@ -140,7 +140,7 @@ agt sop run pipeline.yaml
 | `agt daemon`       | 启动、停止、查看、列出或展示 Daemon。                     |
 | `agt task`         | 提交任务并查看或清理任务状态。                            |
 | `agt runtime list` | 列出 Server 上注册的运行时。                              |
-| `agt identity`     | 管理身份、身份文件和运行时绑定。                          |
+| `agt identity`     | 管理身份、身份文件和可选的运行时路由偏好。                |
 | `agt token issue`  | 签发任务级令牌（用于 API 测试）。                         |
 
 完整参数说明：[CLI 命令参考](<docs/guide%20docs/commands.md>)。

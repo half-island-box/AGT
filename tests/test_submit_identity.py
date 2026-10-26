@@ -199,7 +199,7 @@ class TestErrorMapping:
         finally:
             dispose()
 
-    def test_no_bindings_400(self, tmp_path) -> None:
+    def test_no_bindings_allowed_with_live_runtime(self, tmp_path) -> None:
         client, dispose, factory = _build_app(tmp_path)
         try:
             async def _seed() -> None:
@@ -207,19 +207,22 @@ class TestErrorMapping:
                     factory, slug="lonely",
                     root_dir=tmp_path,
                 )
-                # No binding created.
+                await _seed_runtime(factory, daemon_id="d1", provider="claude")
 
             asyncio.run(_seed())
             r = client.post("/api/tasks/submit", json={
                 "prompt": "hi", "provider": "claude",
                 "identity_did": "did:agt:lonely",
             })
-            assert r.status_code == 400
-            assert r.json()["detail"]["type"] == "no_bindings"
+            assert r.status_code == 201
+            status = client.get(f"/api/tasks/{r.json()['task_id']}/status").json()
+            assert status["identity_did"] == "did:agt:lonely"
+            assert status["provider"] == "claude"
+            assert status["target_daemon_id"] == "d1"
         finally:
             dispose()
 
-    def test_binding_mismatch_400(self, tmp_path) -> None:
+    def test_unbound_provider_allowed_with_live_runtime(self, tmp_path) -> None:
         client, dispose, factory = _build_app(tmp_path)
         try:
             async def _seed() -> None:
@@ -232,17 +235,37 @@ class TestErrorMapping:
                     daemon_id="d1", provider="claude",
                 )
                 await _seed_runtime(factory, daemon_id="d1", provider="claude")
+                await _seed_runtime(factory, daemon_id="d2", provider="cursor")
 
             asyncio.run(_seed())
             r = client.post("/api/tasks/submit", json={
                 "prompt": "hi", "provider": "cursor",
                 "identity_did": "did:agt:only-claude",
             })
+            assert r.status_code == 201
+            status = client.get(f"/api/tasks/{r.json()['task_id']}/status").json()
+            assert status["provider"] == "cursor"
+            assert status["target_daemon_id"] == "d2"
+            assert status["identity_did"] == "did:agt:only-claude"
+        finally:
+            dispose()
+
+    def test_no_binding_or_runtime_400(self, tmp_path) -> None:
+        client, dispose, factory = _build_app(tmp_path)
+        try:
+            async def _seed() -> None:
+                await _seed_identity_with_root(
+                    factory, slug="lonely",
+                    root_dir=tmp_path,
+                )
+
+            asyncio.run(_seed())
+            r = client.post("/api/tasks/submit", json={
+                "prompt": "hi", "provider": "claude",
+                "identity_did": "did:agt:lonely",
+            })
             assert r.status_code == 400
-            detail = r.json()["detail"]
-            assert detail["type"] == "no_binding_for_runtime"
-            assert detail["runtime"] == "cursor"
-            assert detail["available"] == ["claude"]
+            assert r.json()["detail"]["type"] == "no_live_runtime"
         finally:
             dispose()
 

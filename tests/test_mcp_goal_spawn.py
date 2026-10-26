@@ -13,7 +13,7 @@ from sqlalchemy import func, select
 
 from agt.server.database import make_engine, make_session_factory, session_scope
 from agt.server.mcp_server import spawn_subagents_impl
-from agt.server.models import Base, JobModel, SpawnBatchModel, StepModel
+from agt.server.models import Base, IdentityModel, JobModel, SpawnBatchModel, StepModel
 from agt.server.services.claim_service import claim_steps_for_daemon
 from agt.server.services.report_service import record_step_result_for_daemon
 from agt.server.services.spawn_service import spawn_children_for_token
@@ -102,6 +102,51 @@ def _child(index: int = 0) -> dict:
         "inputs": [],
         "return": "result",
     }
+
+
+def test_spawn_child_keeps_identity_without_binding(tmp_path) -> None:
+    engine, factory = _factory(tmp_path)
+
+    async def _run() -> None:
+        await _seed_goal(factory)
+        now = _now()
+        async with session_scope(factory) as db:
+            db.add(
+                IdentityModel(
+                    did="did:agt:reviewer",
+                    daemon_id="local",
+                    name="Reviewer",
+                    description="",
+                    capabilities="[]",
+                    status="active",
+                    visibility="private",
+                    created_by="user",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        async with session_scope(factory) as db:
+            spawned = await spawn_children_for_token(
+                db,
+                task_token=_token(),
+                secret=SECRET,
+                children=[
+                    {
+                        **_child(),
+                        "identity": "did:agt:reviewer",
+                    }
+                ],
+            )
+        assert spawned["accepted"] == 1
+        child_id = spawned["children"][0]["child_job_id"]
+        async with session_scope(factory) as db:
+            child = await db.get(JobModel, child_id)
+            assert child is not None
+            assert child.identity_did == "did:agt:reviewer"
+            assert child.status != "failed"
+
+    asyncio.run(_run())
+    asyncio.run(engine.dispose())
 
 
 def test_spawn_creates_children_and_replays_idempotently(tmp_path) -> None:

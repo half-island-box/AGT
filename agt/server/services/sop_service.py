@@ -123,6 +123,21 @@ async def _validate_explicit_targets(db: AsyncSession, spec) -> None:
         if provider is None and node.identity:
             entry = spec.identities.get(node.identity)
             provider = entry.provider if entry else None
+            if provider is None and entry is not None and entry.did:
+                # Bindings are optional, but when one exists on the pinned
+                # daemon it can provide the missing provider hint.
+                binding_providers = (
+                    await db.execute(
+                        select(IdentityBindingModel.provider)
+                        .where(
+                            IdentityBindingModel.identity_did == entry.did,
+                            IdentityBindingModel.daemon_id == node.daemon,
+                        )
+                        .distinct()
+                    )
+                ).scalars().all()
+                if len(binding_providers) == 1:
+                    provider = binding_providers[0]
         if provider is None:
             raise ValueError({
                 "type": "sop_explicit_provider_required",
@@ -149,13 +164,14 @@ async def _validate_explicit_targets(db: AsyncSession, spec) -> None:
 
 
 async def _validate_identities(db: AsyncSession, spec) -> None:
-    """Identity ``did`` refs must exist, be active, and have a binding.
+    """Identity ``did`` refs must exist and be active.
 
     Checked at expansion so a typo'd ``did`` (or a deleted/disowned
     identity) fails the submit immediately instead of parking the node
     pending forever. ``activate_job``'s unknown-identity check remains as
     a defensive backstop (an identity could be deleted between submit and
-    activation).
+    activation). Bindings are routing preferences and are deliberately
+    not required.
     """
     for alias, entry in spec.identities.items():
         if not entry.did:
@@ -175,20 +191,6 @@ async def _validate_identities(db: AsyncSession, spec) -> None:
                 "identity": alias,
                 "did": entry.did,
                 "status": ident.status,
-            })
-        binding = (
-            await db.execute(
-                select(IdentityBindingModel).where(
-                    IdentityBindingModel.identity_did == entry.did
-                )
-            )
-        ).scalars().first()
-        if binding is None:
-            raise ValueError({
-                "type": "sop_identity_no_bindings",
-                "message": f"identity '{alias}' (did '{entry.did}') has no bindings",
-                "identity": alias,
-                "did": entry.did,
             })
 
 
@@ -248,6 +250,20 @@ async def _validate_routability(db: AsyncSession, spec) -> None:
             continue  # daemon pins validated by _validate_explicit_targets
         providers = await _intended_providers(db, node, spec.identities)
         if not providers:
+            if node.identity:
+                entry = spec.identities.get(node.identity)
+                if entry is not None and entry.did and not entry.provider:
+                    raise ValueError({
+                        "type": "sop_identity_provider_required",
+                        "message": (
+                            f"task '{node.name}' uses identity '{node.identity}' "
+                            "without a provider or matching binding; add "
+                            "'provider' to the task or identity alias"
+                        ),
+                        "task": node.name,
+                        "identity": node.identity,
+                        "did": entry.did,
+                    })
             continue
         if not await _live_provider_set(db, providers):
             raise ValueError({

@@ -150,6 +150,60 @@ class TestBindingRoutes:
         finally:
             dispose()
 
+    def test_patch_priority_and_default(self, tmp_path, monkeypatch) -> None:
+        client, dispose = _build_app(tmp_path)
+        try:
+            _mk_identity(client, tmp_path, monkeypatch)
+            first = _mk_binding(client, provider="claude", is_default=True)
+            second = _mk_binding(client, provider="codex")
+
+            resp = client.patch(
+                f"/api/identities/{DID}/bindings/{second['id']}",
+                json={"priority": 20, "is_default": True},
+            )
+            assert resp.status_code == 200
+            assert resp.json()["priority"] == 20
+            assert resp.json()["is_default"] is True
+
+            listed = client.get(
+                f"/api/identities/{DID}/bindings"
+            ).json()["bindings"]
+            flags = {row["id"]: row["is_default"] for row in listed}
+            assert flags[first["id"]] is False
+            assert flags[second["id"]] is True
+        finally:
+            dispose()
+
+
+class TestIdentityOverview:
+    def test_embeds_bindings_and_runtime_liveness(self, tmp_path, monkeypatch) -> None:
+        client, dispose = _build_app(tmp_path)
+        try:
+            _mk_identity(client, tmp_path, monkeypatch)
+            _mk_binding(client)
+            registered = client.post("/api/runtimes/register", json={
+                "daemon_id": "local",
+                "runtimes": [{
+                    "name": "claude",
+                    "type": "claude",
+                    "version": "1.0",
+                    "status": "online",
+                    "device_name": "test",
+                }],
+            })
+            assert registered.status_code == 201
+
+            resp = client.get("/api/identities/overview")
+            assert resp.status_code == 200
+            identity = resp.json()["identities"][0]
+            assert identity["did"] == DID
+            assert len(identity["bindings"]) == 1
+            assert identity["bindings"][0]["provider"] == "claude"
+            assert identity["bindings"][0]["runtime_online"] is True
+            assert identity["bindings"][0]["last_seen"]
+        finally:
+            dispose()
+
 
 # ── daemon-scoped bindings (inverse view) ───────────────────────────
 
@@ -215,7 +269,7 @@ class TestResolve:
             _mk_binding(client, provider="codex", daemon_id="remote")
 
             resp = client.post("/api/identities/resolve", json={
-                "identity_did": DID, "runtime_hint": "codex", "daemon_id": "local",
+                "identity_did": DID, "runtime_hint": "codex",
             })
             assert resp.status_code == 200
             assert resp.json()["provider"] == "codex"

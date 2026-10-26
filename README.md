@@ -20,7 +20,7 @@ It is an experimental Python foundation for a future multi-agent desktop client.
 - **Goal-driven orchestration**: hand one requirement to a root orchestrator agent (`agt goal`), which decomposes it, recursively spawns child agents within a per-run budget (`--max-depth` / `--max-descendants` / `max_batch`), and synthesizes the final answer. Goal history is grouped by the submitter cwd independently from the optional daemon-side execution directory. A full Job-tree view (`agt goal status`), `AGT-ASK` questions answered via `agt goal input`, cascade cancel, and artifact download round out the entry.
 - **Dynamic spawn**: MCP-capable agents call `spawn_subagents` with structured child envelopes. The task-scoped tool authenticates the current Goal Step, creates child Jobs immediately, enforces budgets, deduplicates retries, waits for completion, then spawns a synthesis step. Providers without MCP keep the `AGT-SPAWN <json>` marker fallback.
 - **Static DAG pipelines (SOP)**: author reusable multi-agent workflows in YAML with `depends_on`, `${node.output}` dataflow references, and dependency-gated activation (`blocked → queued`). Terminal-node artifacts are the pipeline's final output. A successful goal run can be distilled back into a SOP draft via `agt goal export`.
-- **Identity-based routing**: identities (DID) bind to `(daemon, provider)` runtimes; sub-tasks route dynamically across daemons by capability + affinity + load, while chat sessions stay pinned.
+- **Identity-based routing**: identities (DID) can record optional `(daemon, provider)` routing preferences, but any matching live runtime can execute an identity. Sub-tasks route dynamically across daemons by capability + affinity + load, while chat sessions stay pinned.
 - **Cancellation**: cancels cascade to spawn descendants and DAG dependents; running remote subprocesses are terminated via `tasks.cancel` push (reverse-dial) or claim-response delivery (HTTP).
 
 ### Artifacts & data flow
@@ -189,7 +189,7 @@ agt sop validate pipeline.yaml && agt sop run pipeline.yaml
 | `agt daemon` | Start, stop, inspect, list, show, or configure daemons. |
 | `agt task` | Submit tasks and inspect or clean task state. |
 | `agt runtime list` | List runtimes registered with the server. |
-| `agt identity` | Manage identities, identity files, and runtime bindings. |
+| `agt identity` | Manage identities, identity files, and optional runtime routing preferences. |
 | `agt token issue` | Issue a task-scoped token for API testing. |
 
 Full option descriptions: [CLI reference](<docs/guide%20docs/commands.md>).

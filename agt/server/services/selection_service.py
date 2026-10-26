@@ -1,15 +1,19 @@
-"""Selection service — pick a runtime for an identity (Phase 4 Step 2).
+"""Selection service — pick a runtime for an identity.
 
-Implements the algorithm from phase4-design.md §5.1:
+Bindings are routing preferences, not an allow-list. An identity may run
+on any live runtime selected by the caller; a missing or mismatched
+binding must not make the identity unusable with another provider.
+
+Selection rules:
 
 1. Validate the identity (exists, status == active).
-2. Load its bindings.
-3. If the caller named a runtime (``runtime_hint``), filter to it.
-4. Prefer bindings whose daemon has a **live runtime** (``last_seen``
-   within the liveness TTL) — a stale binding must never shadow a
-   healthy one just because it was created earlier.
-5. Otherwise prefer ``is_default``, then highest ``priority``, with a
-   stable id-ascending tie-break.
+2. Prefer bindings matching any explicit daemon/provider constraints.
+3. Prefer live bindings, then ``is_default``, then highest ``priority``,
+   with a stable id-ascending tie-break.
+4. Fall back to the live runtime registry when no binding matches.
+5. If no runtime is live but a matching binding exists, return that
+   binding so the caller's existing fail-fast liveness check can produce
+   the authoritative error.
 
 The caller (Step 4's submit_task) decides whether to call this at all:
 ``identity_did=None`` means "no identity path" and must bypass selection
@@ -77,15 +81,15 @@ class SelectionError(ValueError):
 
 async def _live_runtime_pairs(
     db: AsyncSession,
-    pool: list[IdentityBindingModel],
+    bindings: list[IdentityBindingModel],
 ) -> set[tuple[str, str]]:
-    """Return the live ``(daemon_id, provider)`` pairs covering ``pool``.
+    """Return the live ``(daemon_id, provider)`` pairs covering ``bindings``.
 
     A pair is live when the daemon has a runtime row for that provider
     whose ``last_seen`` is within the liveness TTL. Daemons with no rows
     (never registered / pruned) are not live.
     """
-    daemon_ids = {b.daemon_id for b in pool}
+    daemon_ids = {b.daemon_id for b in bindings}
     if not daemon_ids:
         return set()
     rows = (
@@ -96,6 +100,40 @@ async def _live_runtime_pairs(
     return {
         (row.daemon_id, row.provider) for row in rows if not is_stale(row.last_seen)
     }
+
+
+async def _registry_runtime(
+    db: AsyncSession,
+    *,
+    provider: str | None,
+    daemon_id: str | None,
+) -> tuple[str, str] | None:
+    """Pick a runtime directly from the registry.
+
+    This is the zero-binding fallback and also the escape hatch when an
+    identity has bindings, but none match the caller's explicit target.
+    Live runtimes win. When the caller supplied a hard daemon/provider
+    target, a stale row may still be returned: submit-time validation
+    owns the liveness rejection and should report the concrete target.
+    """
+    stmt = select(RuntimeModel)
+    if provider is not None:
+        stmt = stmt.where(RuntimeModel.provider == provider)
+    if daemon_id is not None:
+        stmt = stmt.where(RuntimeModel.daemon_id == daemon_id)
+    rows = (await db.execute(stmt)).scalars().all()
+    if not rows:
+        return None
+
+    live = [row for row in rows if not is_stale(row.last_seen)]
+    explicit = provider is not None or daemon_id is not None
+    pool = live or (rows if explicit else [])
+    if not pool:
+        return None
+
+    # Stable fallback when bindings provide no ordering signal.
+    best = min(pool, key=lambda row: (row.daemon_id, row.provider, row.id))
+    return best.daemon_id, best.provider
 
 
 def _pick_binding(
@@ -130,25 +168,28 @@ def _pick_binding(
 async def select_runtime(
     identity_did: str,
     runtime_hint: str | None,
-    daemon_id: str,
+    target_daemon_id: str | None,
     db: AsyncSession,
 ) -> SelectionResult:
     """Resolve ``(identity_did, runtime_hint)`` to a concrete runtime.
+
+    Explicit daemon/provider values are hard constraints. Bindings narrow
+    and rank the candidates when they match, but never gate identity use:
+    the runtime registry remains a fallback.
 
     Args:
         identity_did: The user-specified identity (required — callers
             handle the None case before reaching here).
         runtime_hint: Optional provider name the user explicitly named.
-        daemon_id: The requesting daemon (accepted for interface
-            compatibility; bindings are daemon-scoped already).
+        target_daemon_id: Optional daemon the caller explicitly selected.
         db: Database session.
 
     Returns:
         SelectionResult with the chosen daemon_id / provider / identity_did.
 
     Raises:
-        SelectionError: one of identity_not_found / identity_not_active /
-            no_bindings / no_binding_for_runtime.
+        SelectionError: identity_not_found / identity_not_active, or
+            no_live_runtime when no matching binding/runtime exists.
     """
     # Step 1: identity must exist and be active.
     identity = await db.get(IdentityModel, identity_did)
@@ -166,36 +207,38 @@ async def select_runtime(
             status=identity.status,
         )
 
-    # Step 2: load bindings (id order keeps every later choice stable).
+    # Step 2: load bindings as preferences (id order keeps choices stable).
     result = await db.execute(
         select(IdentityBindingModel)
         .where(IdentityBindingModel.identity_did == identity_did)
         .order_by(IdentityBindingModel.id.asc())
     )
     bindings = list(result.scalars().all())
-    if not bindings:
-        raise SelectionError(
-            "no_bindings",
-            f"identity '{identity_did}' has no bindings. "
-            f"Use 'agt identity bind' first",
-            did=identity_did,
-        )
-
-    # Step 3: an explicit runtime hint is a filter, not a preference.
-    if runtime_hint is not None:
-        matching = [b for b in bindings if b.provider == runtime_hint]
-        if not matching:
-            available = sorted({b.provider for b in bindings})
-            raise SelectionError(
-                "no_binding_for_runtime",
-                f"identity '{identity_did}' has no binding for "
-                f"'{runtime_hint}'. Available: {', '.join(available)}",
-                did=identity_did,
-                runtime=runtime_hint,
-                available=available,
+    matching = [
+        binding
+        for binding in bindings
+        if (
+            (runtime_hint is None or binding.provider == runtime_hint)
+            and (
+                target_daemon_id is None
+                or binding.daemon_id == target_daemon_id
             )
+        )
+    ]
+
+    # Step 3: if any matching bindings are live, their default/priority
+    # ordering is the intended routing preference.
+    live_pairs = await _live_runtime_pairs(db, bindings)
+    live_matching = [
+        binding
+        for binding in matching
+        if (binding.daemon_id, binding.provider) in live_pairs
+    ]
+    if live_matching:
         best = _pick_binding(
-            matching, await _live_runtime_pairs(db, matching), provider=runtime_hint,
+            live_matching,
+            live_pairs,
+            provider=runtime_hint,
         )
         return SelectionResult(
             daemon_id=best.daemon_id,
@@ -203,15 +246,48 @@ async def select_runtime(
             identity_did=identity_did,
         )
 
-    # Step 4: no hint — live first, then default flag, then priority,
-    # then id order.
-    best = _pick_binding(
-        bindings, await _live_runtime_pairs(db, bindings), provider=None,
+    # Step 4: no live matching binding. A live unbound runtime is valid:
+    # this is what makes bindings optional and prevents a stale binding
+    # from blocking an otherwise healthy provider.
+    registry = await _registry_runtime(
+        db,
+        provider=runtime_hint,
+        daemon_id=target_daemon_id,
     )
-    return SelectionResult(
-        daemon_id=best.daemon_id,
-        provider=best.provider,
-        identity_did=identity_did,
+    if registry is not None:
+        daemon_id, provider = registry
+        return SelectionResult(
+            daemon_id=daemon_id,
+            provider=provider,
+            identity_did=identity_did,
+        )
+
+    # Step 5: preserve the old dry-run behavior for configured bindings
+    # whose runtime is offline. Submit callers still reject them via the
+    # live-runtime check with a concrete daemon/provider error.
+    if matching:
+        best = _pick_binding(
+            matching,
+            live_pairs,
+            provider=runtime_hint,
+        )
+        return SelectionResult(
+            daemon_id=best.daemon_id,
+            provider=best.provider,
+            identity_did=identity_did,
+        )
+
+    raise SelectionError(
+        "no_live_runtime",
+        (
+            f"no runtime matches identity '{identity_did}'"
+            + (f" for provider '{runtime_hint}'" if runtime_hint else "")
+            + (f" on daemon '{target_daemon_id}'" if target_daemon_id else "")
+        ),
+        did=identity_did,
+        runtime=runtime_hint,
+        daemon_id=target_daemon_id,
+        available=sorted({b.provider for b in bindings}),
     )
 
 

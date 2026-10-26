@@ -118,7 +118,7 @@ async def create_job_route(
             result = await select_runtime(
                 payload.identity_did,
                 payload.provider,
-                "local",
+                payload.target_daemon_id,
                 db,
             )
         except SelectionError as exc:
