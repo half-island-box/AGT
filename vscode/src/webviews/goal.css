@@ -97,21 +97,37 @@ body {
 /* Three-pane shell. */
 .agd-goal-body {
   display: grid;
-  grid-template-columns: 302px minmax(320px, 1fr);
+  grid-template-columns:
+    var(--agd-goal-sidebar-width, 302px)
+    6px
+    minmax(320px, 1fr);
   min-height: 0;
+  transition: grid-template-columns 0.18s ease;
 }
 
 .agd-goal-body.has-inspector {
-  grid-template-columns: 302px minmax(320px, 1fr) 6px minmax(
-    300px,
-    var(--agd-goal-inspector-width, 360px)
-  );
+  grid-template-columns:
+    var(--agd-goal-sidebar-width, 302px)
+    6px
+    minmax(320px, 1fr)
+    6px
+    minmax(300px, var(--agd-goal-inspector-width, 360px));
+}
+.agd-goal-body.is-sidebar-collapsed {
+  grid-template-columns: minmax(320px, 1fr);
+}
+.agd-goal-body.is-sidebar-collapsed.has-inspector {
+  grid-template-columns:
+    minmax(320px, 1fr)
+    6px
+    minmax(300px, var(--agd-goal-inspector-width, 360px));
 }
 .agd-goal-body.is-resizing {
   cursor: col-resize;
   user-select: none;
   -webkit-user-select: none;
   touch-action: none;
+  transition: none;
 }
 .agd-sop-splitter {
   cursor: col-resize;
@@ -121,6 +137,9 @@ body {
 .agd-sop-splitter:hover,
 .agd-goal-body.is-resizing .agd-sop-splitter {
   background: var(--vscode-focusBorder, #3794ff);
+}
+.agd-goal-sidebar-resizer {
+  min-width: 6px;
 }
 .agd-sop-side,
 .agd-sop-inspector {
@@ -349,6 +368,18 @@ body {
   background: linear-gradient(135deg, color-mix(in srgb, var(--vscode-button-background, #3794ff) 9%, transparent), transparent 54%), var(--vscode-sideBar-background, #202020);
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.09);
 }
+.agd-goal-hero.is-actionable {
+  cursor: default;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease;
+}
+.agd-goal-hero.is-actionable:hover {
+  border-color: color-mix(in srgb, var(--vscode-focusBorder, #3794ff) 42%, transparent);
+  box-shadow: 0 7px 22px rgba(0, 0, 0, 0.13);
+}
+.agd-goal-hero.is-actionable:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder, #3794ff);
+  outline-offset: -1px;
+}
 .agd-goal-hero-main { min-width: 0; flex: 1; }
 .agd-goal-hero-top {
   display: flex;
@@ -369,6 +400,12 @@ body {
   display: flex;
   flex-wrap: wrap;
   gap: 5px;
+}
+.agd-goal-overview-hint {
+  margin-left: auto;
+  color: var(--vscode-descriptionForeground, #8b8b8b);
+  font-size: 10px;
+  white-space: nowrap;
 }
 .agd-goal-hero-actions {
   display: flex;
@@ -669,6 +706,9 @@ body {
   border: 1px solid var(--vscode-panel-border, #2e2e2e);
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
 }
+.agd-goal-run-meta-modal {
+  width: min(780px, 100%);
+}
 .agd-goal-modal-head {
   display: flex;
   align-items: center;
@@ -687,6 +727,33 @@ body {
 .agd-goal-modal-body {
   padding: 14px;
   overflow: auto;
+}
+.agd-goal-run-meta-modal .agd-sop-card:last-child {
+  margin-bottom: 0;
+}
+.agd-goal-meta.agd-goal-run-meta div {
+  grid-template-columns: 112px minmax(0, 1fr);
+}
+.agd-goal-meta.agd-goal-run-meta dd {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  word-break: break-word;
+}
+.agd-goal-prompt {
+  margin: 0;
+  max-height: 240px;
+  overflow: auto;
+  padding: 10px;
+  border: 1px solid var(--vscode-input-border, #3a3a3a);
+  border-radius: 7px;
+  background: var(--vscode-textCodeBlock-background, #1b1b1b);
+  color: var(--vscode-foreground, #cccccc);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--vscode-font-family, -apple-system, "Segoe UI", "PingFang SC", sans-serif);
+  font-size: 11.5px;
+  line-height: 1.55;
 }
 
 @media (max-width: 1080px) {

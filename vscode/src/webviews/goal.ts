@@ -29,6 +29,8 @@ interface GoalBoot {
   daemons: DaemonInfo[];
   workspaceFolder: string | null;
   inspectorWidth: number | null;
+  sidebarWidth: number | null;
+  sidebarCollapsed: boolean;
 }
 
 type BusyKind = 'submit' | 'answer' | 'cancel' | 'export' | null;
@@ -57,9 +59,15 @@ let draft = {
 };
 
 const INSPECTOR_THRESHOLD = 1080;
+const DEFAULT_SIDEBAR_WIDTH = 302;
+const MIN_SIDEBAR_WIDTH = 220;
+const MAX_SIDEBAR_WIDTH = 520;
 let viewportWidth = window.innerWidth;
 let showInspector = viewportWidth >= INSPECTOR_THRESHOLD;
 let modalNodeId: string | null = null;
+let runMetaModalOpen = false;
+let sidebarWidth = DEFAULT_SIDEBAR_WIDTH;
+let sidebarCollapsed = false;
 let viewportListenerWired = false;
 
 function tr(key: MessageKey, vars?: Record<string, string | number>): string {
@@ -87,6 +95,71 @@ function applyInspectorWidth(width: number | null): void {
   const root = document.querySelector<HTMLElement>('.agd-sop');
   if (root && width !== null) {
     root.style.setProperty('--agd-goal-inspector-width', `${Math.round(width)}px`);
+  }
+}
+
+function clampSidebarWidth(width: number, containerWidth: number): number {
+  const reserved = showInspector ? 300 + 6 + 360 : 360;
+  const max = Math.max(
+    MIN_SIDEBAR_WIDTH,
+    Math.min(MAX_SIDEBAR_WIDTH, containerWidth - reserved),
+  );
+  return Math.max(MIN_SIDEBAR_WIDTH, Math.min(max, width));
+}
+
+function applySidebarWidth(width: number): void {
+  const root = document.querySelector<HTMLElement>('.agd-sop');
+  root?.style.setProperty(
+    '--agd-goal-sidebar-width',
+    `${Math.round(width)}px`,
+  );
+}
+
+function wireSidebarResizer(): void {
+  const handle = document.getElementById('agd-goal-sidebar-resizer');
+  const container = document.querySelector<HTMLElement>('.agd-goal-body');
+  if (!handle || !container || sidebarCollapsed) return;
+
+  handle.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    container.classList.add('is-resizing');
+
+    const move = (moveEvent: PointerEvent): void => {
+      const rect = container.getBoundingClientRect();
+      sidebarWidth = clampSidebarWidth(
+        moveEvent.clientX - rect.left,
+        rect.width,
+      );
+      if (boot) boot.sidebarWidth = sidebarWidth;
+      applySidebarWidth(sidebarWidth);
+    };
+
+    const finish = (): void => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', finish);
+      window.removeEventListener('pointercancel', finish);
+      container.classList.remove('is-resizing');
+      void bridge.call('goal.setSidebarWidth', { width: sidebarWidth });
+    };
+
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', finish);
+    window.addEventListener('pointercancel', finish);
+  });
+}
+
+async function toggleSidebar(): Promise<void> {
+  sidebarCollapsed = !sidebarCollapsed;
+  if (boot) boot.sidebarCollapsed = sidebarCollapsed;
+  render();
+  try {
+    await bridge.call('goal.setSidebarCollapsed', {
+      collapsed: sidebarCollapsed,
+    });
+  } catch (err) {
+    notice = err instanceof Error ? err.message : String(err);
+    render();
   }
 }
 
@@ -158,6 +231,17 @@ function closeNodeModal(): void {
   render();
 }
 
+function openRunMetaModal(): void {
+  if (!selectedRun()) return;
+  runMetaModalOpen = true;
+  render();
+}
+
+function closeRunMetaModal(): void {
+  runMetaModalOpen = false;
+  render();
+}
+
 function formatDate(value: string | null | undefined): string {
   if (!value) return '—';
   const date = new Date(value.replace(' ', 'T') + 'Z');
@@ -184,6 +268,46 @@ function selectedNode(): GoalJobTreeNode | null {
   return boot?.tree?.node ? find(boot.tree.node) : null;
 }
 
+function selectedRun(): GoalRunInfo | null {
+  if (!boot?.selectedRunId) return null;
+  const run = boot.runs.find((item) => item.root_job_id === boot?.selectedRunId);
+  if (run) return run;
+  if (!boot.tree || boot.tree.root_job_id !== boot.selectedRunId) return null;
+  const root = boot.tree.node;
+  return {
+    root_job_id: boot.tree.root_job_id,
+    goal: boot.tree.goal?.goal ?? root.label,
+    status: root.status,
+    provider: root.provider,
+    identity_did: root.identity_did,
+    daemon_id: root.daemon_id,
+    cwd: null,
+    created_at: '',
+    updated_at: '',
+    total_nodes: flatten(root).length,
+    status_counts: {},
+    meta: boot.tree.goal ?? {
+      goal: root.label,
+      template: null,
+      budget: null,
+      goal_sha256: null,
+    },
+  };
+}
+
+function identityLabel(did: string | null | undefined): string {
+  if (!did) return tr('sop.field.none');
+  const identity = boot?.identities.find((item) => item.did === did);
+  return identity ? `${identity.name} · ${did}` : did;
+}
+
+function daemonLabel(daemonId: string | null | undefined): string {
+  if (!daemonId) return tr('sop.field.none');
+  const daemon = boot?.daemons.find((item) => item.daemon_id === daemonId);
+  if (!daemon) return daemonId;
+  return `${daemon.daemon_name || daemon.device_name || daemon.daemon_id} · ${daemonId}`;
+}
+
 function runRunning(): boolean {
   const status = boot?.tree?.node.status;
   return status !== 'done' && status !== 'failed' && status !== 'cancelled';
@@ -198,6 +322,8 @@ function flatten(node: GoalJobTreeNode, out: GoalJobTreeNode[] = []): GoalJobTre
 function applyBoot(next: GoalBoot): void {
   boot = next;
   lang = next.language;
+  sidebarWidth = next.sidebarWidth ?? sidebarWidth ?? DEFAULT_SIDEBAR_WIDTH;
+  sidebarCollapsed = next.sidebarCollapsed;
   selectedNodeId = next.selectedNodeId ?? selectedNodeId;
   if (selectedNodeId && next.tree && !flatten(next.tree.node).some((node) => node.job_id === selectedNodeId)) {
     selectedNodeId = null;
@@ -374,6 +500,11 @@ function renderHeader(): string {
   return `
   <header class="agd-sop-head">
     <div class="agd-sop-brand"><span>AGT</span><small>${tr('goal.title')}</small></div>
+    <button type="button" class="agd-icon-btn agd-goal-sidebar-toggle" id="agd-goal-sidebar-toggle"
+      aria-expanded="${sidebarCollapsed ? 'false' : 'true'}"
+      title="${sidebarCollapsed ? tr('goal.sidebarExpand') : tr('goal.sidebarCollapse')}">
+      ${sidebarCollapsed ? '»' : '«'}
+    </button>
     <nav class="agd-modes" aria-label="AGT modes">
       <button type="button" class="agd-mode" data-mode="chat">${tr('mode.chat')}</button>
       <button type="button" class="agd-mode" data-mode="sop">${tr('mode.sop')}</button>
@@ -486,11 +617,13 @@ function renderTree(): string {
   }
   return `
   <section class="agd-sop-main">
-    <div class="agd-goal-hero">
+    <div class="agd-goal-hero is-actionable" id="agd-goal-overview" role="button" tabindex="0"
+      title="${tr('goal.overviewHint')}" aria-label="${tr('goal.overviewHint')}">
       <div class="agd-goal-hero-main">
         <div class="agd-goal-hero-top">
           ${statusPill(boot.tree.node.status)}
           <span class="agd-mono">${esc(boot.tree.root_job_id.slice(0, 8))}</span>
+          <small class="agd-goal-overview-hint">${tr('goal.overviewHint')}</small>
         </div>
         <strong title="${esc(boot.tree.goal?.goal || '')}">${esc(boot.tree.goal?.goal || boot.tree.node.label || boot.tree.root_job_id)}</strong>
         <div class="agd-goal-stats">
@@ -593,6 +726,49 @@ function renderDetails(): string {
   return `<aside class="agd-sop-inspector">${renderNodeInspector(node)}</aside>`;
 }
 
+function renderRunMetaModal(): string {
+  if (!runMetaModalOpen) return '';
+  const run = selectedRun();
+  if (!run) return '';
+  const budget = run.meta.budget;
+  const nodeCount =
+    boot?.tree && boot.tree.root_job_id === run.root_job_id
+      ? flatten(boot.tree.node).length
+      : run.total_nodes;
+  return `
+  <div class="agd-goal-modal-backdrop" id="agd-goal-run-meta-backdrop" role="presentation">
+    <div class="agd-goal-modal agd-goal-run-meta-modal" role="dialog" aria-modal="true" aria-labelledby="agd-goal-run-meta-title">
+      <div class="agd-goal-modal-head">
+        <span id="agd-goal-run-meta-title">${tr('goal.runMeta')}</span>
+        <button type="button" class="agd-mini-btn" id="agd-goal-run-meta-close" title="${tr('goal.close')}">✕</button>
+      </div>
+      <div class="agd-goal-modal-body">
+        <section class="agd-sop-card">
+          <div class="agd-sop-card-head"><span>${tr('goal.prompt')}</span><em class="agd-sop-run-status is-${esc(run.status)}">${esc(statusText(run.status))}</em></div>
+          <pre class="agd-goal-prompt">${esc(run.meta.goal || run.goal)}</pre>
+        </section>
+        <section class="agd-sop-card">
+          <div class="agd-sop-card-head"><span>${tr('goal.overview')}</span></div>
+          <dl class="agd-goal-meta agd-goal-run-meta">
+            <div><dt>${tr('goal.rootJob')}</dt><dd class="agd-mono">${esc(run.root_job_id)}</dd></div>
+            <div><dt>${tr('goal.provider')}</dt><dd class="agd-goal-provider-line">${providerLogo(run.provider)} ${esc(run.provider)}</dd></div>
+            <div><dt>${tr('goal.daemon')}</dt><dd>${esc(daemonLabel(run.daemon_id))}</dd></div>
+            <div><dt>${tr('goal.identity')}</dt><dd>${esc(identityLabel(run.identity_did))}</dd></div>
+            <div><dt>${tr('goal.dir')}</dt><dd class="agd-mono">${esc(run.cwd || tr('sop.field.none'))}</dd></div>
+            <div><dt>${tr('goal.createdAt')}</dt><dd>${esc(formatDate(run.created_at))}</dd></div>
+            <div><dt>${tr('goal.updatedAt')}</dt><dd>${esc(formatDate(run.updated_at))}</dd></div>
+            <div><dt>${tr('goal.maxDepth')}</dt><dd>${budget ? esc(budget.max_depth) : '—'}</dd></div>
+            <div><dt>${tr('goal.maxDescendants')}</dt><dd>${budget ? esc(budget.max_descendants) : '—'}</dd></div>
+            <div><dt>${tr('goal.nodes')}</dt><dd>${esc(nodeCount || '—')}</dd></div>
+            <div><dt>${tr('goal.template')}</dt><dd class="agd-mono">${esc(run.meta.template || tr('sop.field.none'))}</dd></div>
+            <div><dt>${tr('goal.goalSha')}</dt><dd class="agd-mono">${esc(run.meta.goal_sha256 || '—')}</dd></div>
+          </dl>
+        </section>
+      </div>
+    </div>
+  </div>`;
+}
+
 function renderNodeModal(): string {
   if (!modalNodeId || !boot?.tree) return '';
   const node = flatten(boot.tree.node).find((n) => n.job_id === modalNodeId) ?? null;
@@ -622,24 +798,29 @@ function render(): void {
     ? `<div class="agd-sop-splitter" id="agd-goal-inspector-resizer" role="separator" aria-orientation="vertical" title="${tr('sop.resizeInspector')}"></div>${renderDetails()}`
     : '';
   root.innerHTML = `
-  <div class="agd-sop is-goal ${showInspector ? 'has-inspector' : ''}" style="--agd-goal-inspector-width:${boot.inspectorWidth ? `${Math.round(boot.inspectorWidth)}px` : '360px'}">
+  <div class="agd-sop is-goal" style="--agd-goal-inspector-width:${boot.inspectorWidth ? `${Math.round(boot.inspectorWidth)}px` : '360px'};--agd-goal-sidebar-width:${Math.round(sidebarWidth)}px">
     ${renderHeader()}
     ${notice ? `<div class="agd-goal-error">${esc(notice)}</div>` : ''}
-    <div class="agd-goal-body ${showInspector ? 'has-inspector' : ''}">
-      ${renderSidebar()}
+    <div class="agd-goal-body ${showInspector ? 'has-inspector' : ''} ${sidebarCollapsed ? 'is-sidebar-collapsed' : ''}">
+      ${sidebarCollapsed ? '' : renderSidebar()}
+      ${sidebarCollapsed ? '' : '<div class="agd-sop-splitter agd-goal-sidebar-resizer" id="agd-goal-sidebar-resizer" role="separator" aria-orientation="vertical"></div>'}
       ${renderTree()}
       ${inspectorPart}
     </div>
+    ${renderRunMetaModal()}
     ${renderNodeModal()}
   </div>`;
   wireEvents();
+  if (!sidebarCollapsed) {
+    wireSidebarResizer();
+  }
   if (showInspector) {
     wireInspectorResizer();
   }
 }
 
 function renderMainOnly(): void {
-  if (modalNodeId) {
+  if (modalNodeId || runMetaModalOpen) {
     // When the details modal is open, a partial update would leave it stale.
     render();
     return;
@@ -662,11 +843,18 @@ function wireEvents(): void {
     viewportListenerWired = true;
     window.addEventListener('resize', () => updateViewport());
     document.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape' && modalNodeId) {
-        closeNodeModal();
+      if (event.key === 'Escape') {
+        if (runMetaModalOpen) {
+          closeRunMetaModal();
+        } else if (modalNodeId) {
+          closeNodeModal();
+        }
       }
     });
   }
+  document.getElementById('agd-goal-sidebar-toggle')?.addEventListener('click', () => {
+    void toggleSidebar();
+  });
   document.querySelector('[data-mode="chat"]')?.addEventListener('click', () => void bridge.call('openChat'));
   document.querySelector('[data-mode="sop"]')?.addEventListener('click', () => void bridge.call('openSop'));
   document.getElementById('agd-goal-lang')?.addEventListener('click', async () => {
@@ -676,6 +864,17 @@ function wireEvents(): void {
   });
   document.getElementById('agd-goal-settings')?.addEventListener('click', () => void bridge.call('openSettings'));
   document.getElementById('agd-goal-refresh')?.addEventListener('click', () => void refreshRuns());
+  document.getElementById('agd-goal-overview')?.addEventListener('dblclick', (event) => {
+    if ((event.target as HTMLElement).closest('button')) return;
+    openRunMetaModal();
+  });
+  document.getElementById('agd-goal-overview')?.addEventListener('keydown', (event) => {
+    const key = (event as KeyboardEvent).key;
+    if (key !== 'Enter' && key !== ' ') return;
+    if ((event.target as HTMLElement).closest('button')) return;
+    event.preventDefault();
+    openRunMetaModal();
+  });
   document.getElementById('agd-goal-submit')?.addEventListener('click', () => void submitGoal());
   document.getElementById('agd-goal-input')?.addEventListener('input', (event) => {
     draft.goal = (event.target as HTMLTextAreaElement).value;
@@ -724,6 +923,10 @@ function wireEvents(): void {
     if (event.target === event.currentTarget) closeNodeModal();
   });
   document.getElementById('agd-goal-modal-close')?.addEventListener('click', () => closeNodeModal());
+  document.getElementById('agd-goal-run-meta-backdrop')?.addEventListener('click', (event) => {
+    if (event.target === event.currentTarget) closeRunMetaModal();
+  });
+  document.getElementById('agd-goal-run-meta-close')?.addEventListener('click', () => closeRunMetaModal());
   document.getElementById('agd-goal-answer-send')?.addEventListener('click', () => {
     if (selectedNodeId) void answerQuestion(selectedNodeId);
   });

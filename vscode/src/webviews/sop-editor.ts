@@ -43,6 +43,7 @@ interface SopBoot {
   parseError: string | null;
   workspaceFolder: string | null;
   localDaemonId: string | null;
+  sidebarWidth: number | null;
   inspectorWidth: number | null;
   trackedRun: SopRunSummary | null;
   runs: SopRunSummary[];
@@ -100,6 +101,9 @@ let nodeLog: SopNodeLog | null = null;
 let nodeLogFor: string | null = null;
 let pollTimer: number | null = null;
 let editorMode: 'edit' | 'inspect' = 'edit';
+const DEFAULT_SIDEBAR_WIDTH = 248;
+const MIN_SIDEBAR_WIDTH = 200;
+const MAX_SIDEBAR_WIDTH = 520;
 
 function runActive(): boolean {
   return boot?.trackedRun !== null && boot?.trackedRun !== undefined;
@@ -436,8 +440,61 @@ function stopPolling(): void {
   }
 }
 
+function clampSidebarWidth(width: number, containerWidth: number): number {
+  const max = Math.max(
+    MIN_SIDEBAR_WIDTH,
+    Math.min(MAX_SIDEBAR_WIDTH, containerWidth - 240 - 288 - 12),
+  );
+  return Math.max(MIN_SIDEBAR_WIDTH, Math.min(max, width));
+}
+
+function applySidebarWidth(width: number | null): void {
+  const root = document.querySelector<HTMLElement>('.agd-sop');
+  if (root && width !== null) {
+    root.style.setProperty('--agd-sop-sidebar-width', `${Math.round(width)}px`);
+  }
+}
+
+function wireSidebarResizer(): void {
+  const handle = document.getElementById('agd-sop-sidebar-resizer');
+  const container = document.querySelector<HTMLElement>('.agd-sop-body');
+  if (!handle || !container) return;
+
+  handle.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    container.classList.add('is-resizing');
+    handle.setPointerCapture(event.pointerId);
+
+    const move = (moveEvent: PointerEvent): void => {
+      const rect = container.getBoundingClientRect();
+      const width = clampSidebarWidth(
+        moveEvent.clientX - rect.left,
+        rect.width,
+      );
+      if (boot) boot.sidebarWidth = width;
+      applySidebarWidth(width);
+    };
+
+    const finish = (): void => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', finish);
+      window.removeEventListener('pointercancel', finish);
+      container.classList.remove('is-resizing');
+      if (boot?.sidebarWidth !== null && boot?.sidebarWidth !== undefined) {
+        void bridge.call('sop.setSidebarWidth', { width: boot.sidebarWidth });
+      }
+    };
+
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', finish);
+    window.addEventListener('pointercancel', finish);
+  });
+}
+
 function clampInspectorWidth(width: number, containerWidth: number): number {
-  const max = Math.max(280, containerWidth - 248 - 320);
+  const sidebar = boot?.sidebarWidth ?? DEFAULT_SIDEBAR_WIDTH;
+  const max = Math.max(280, containerWidth - sidebar - 320 - 12);
   return Math.max(260, Math.min(max, width));
 }
 
@@ -747,12 +804,13 @@ function render(): void {
     return;
   }
   applyInspectorWidth(boot.inspectorWidth);
+  applySidebarWidth(boot.sidebarWidth);
   const doc = model();
   if (!doc) {
     // No template bound yet: guide instead of showing dead chrome. The
     // toolbar stays rendered but disabled (see renderToolbar).
     root.innerHTML = `
-    <div class="agd-sop is-empty">
+    <div class="agd-sop is-empty" style="--agd-sop-sidebar-width:${boot.sidebarWidth ? `${Math.round(boot.sidebarWidth)}px` : `${DEFAULT_SIDEBAR_WIDTH}px`}">
       <header class="agd-sop-head">
         <div class="agd-sop-brand"><span>AGT</span><small>${tr('sop.title')}</small></div>
         <nav class="agd-modes" aria-label="AGT modes">
@@ -767,6 +825,7 @@ function render(): void {
       </header>
       <div class="agd-sop-body">
         <aside class="agd-sop-side">${renderTemplates()}</aside>
+        <div class="agd-sop-splitter agd-sop-sidebar-resizer" id="agd-sop-sidebar-resizer" role="separator" aria-orientation="vertical" title="${tr('sop.resizeSidebar')}"></div>
         <section class="agd-sop-main">
           <div class="agd-sop-empty-state">
             <h2>${tr('sop.emptyTitle')}</h2>
@@ -779,10 +838,11 @@ function render(): void {
       ${toast ? `<div class="agd-sop-toast ${toast.kind === 'error' ? 'is-error' : ''}">${esc(toast.text)}</div>` : ''}
     </div>`;
     wireEvents();
+    wireSidebarResizer();
     return;
   }
   root.innerHTML = `
-    <div class="agd-sop ${editorMode === 'inspect' ? 'is-inspect' : ''}" style="--agd-sop-inspector-width:${boot.inspectorWidth ? `${Math.round(boot.inspectorWidth)}px` : '288px'}">
+    <div class="agd-sop ${editorMode === 'inspect' ? 'is-inspect' : ''}" style="--agd-sop-sidebar-width:${boot.sidebarWidth ? `${Math.round(boot.sidebarWidth)}px` : `${DEFAULT_SIDEBAR_WIDTH}px`};--agd-sop-inspector-width:${boot.inspectorWidth ? `${Math.round(boot.inspectorWidth)}px` : '288px'}">
     <header class="agd-sop-head">
       <div class="agd-sop-brand"><span>AGT</span><small>${tr('sop.title')}</small></div>
       <nav class="agd-modes" aria-label="AGT modes">
@@ -802,6 +862,7 @@ function render(): void {
         ${renderTemplates()}
         ${renderIdentities(doc)}
       </aside>
+      <div class="agd-sop-splitter agd-sop-sidebar-resizer" id="agd-sop-sidebar-resizer" role="separator" aria-orientation="vertical" title="${tr('sop.resizeSidebar')}"></div>
       <section class="agd-sop-main">
         ${renderToolbar()}
         <div class="agd-sop-canvas" id="agd-sop-canvas"></div>
@@ -822,6 +883,7 @@ function render(): void {
   mountCanvas();
   wireEvents();
   wireInspector();
+  wireSidebarResizer();
   wireInspectorResizer();
   wireRunBanner();
 }

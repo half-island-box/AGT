@@ -31,6 +31,9 @@ interface BridgeRequest {
 
 const SELECTED_RUN_KEY = 'agt.goal.selectedRun';
 const INSPECTOR_WIDTH_KEY = 'agt.goal.inspectorWidth';
+const SIDEBAR_WIDTH_KEY = 'agt.goal.sidebarWidth';
+const SIDEBAR_COLLAPSED_KEY = 'agt.goal.sidebarCollapsed';
+const DEFAULT_SIDEBAR_WIDTH = 302;
 
 function toGoalRunInfo(run: RunInfo): GoalRunInfo {
   return {
@@ -83,10 +86,17 @@ export class GoalPanel {
   private selectedRunId: string | null;
   private selectedNodeId: string | null = null;
   private inspectorWidth: number | null = null;
+  private sidebarWidth: number;
+  private sidebarCollapsed: boolean;
 
   constructor(ctx: GoalBridgeContext) {
     this.ctx = ctx;
     this.selectedRunId = ctx.context.workspaceState.get<string | null>(SELECTED_RUN_KEY) ?? null;
+    this.sidebarWidth =
+      ctx.context.workspaceState.get<number>(SIDEBAR_WIDTH_KEY) ??
+      DEFAULT_SIDEBAR_WIDTH;
+    this.sidebarCollapsed =
+      ctx.context.workspaceState.get<boolean>(SIDEBAR_COLLAPSED_KEY) ?? false;
   }
 
   async present(view: vscode.WebviewView): Promise<void> {
@@ -228,6 +238,8 @@ export class GoalPanel {
         this.inspectorWidth ??
         this.ctx.context.workspaceState.get<number>(INSPECTOR_WIDTH_KEY) ??
         null,
+      sidebarWidth: this.sidebarWidth,
+      sidebarCollapsed: this.sidebarCollapsed,
     };
   }
 
@@ -389,6 +401,29 @@ export class GoalPanel {
             );
           }
           result = { ok: true, width: this.inspectorWidth };
+          break;
+        }
+
+        case 'goal.setSidebarWidth': {
+          const width = Number(msg.params?.width);
+          if (Number.isFinite(width)) {
+            this.sidebarWidth = Math.max(220, Math.min(520, Math.round(width)));
+            await this.ctx.context.workspaceState.update(
+              SIDEBAR_WIDTH_KEY,
+              this.sidebarWidth,
+            );
+          }
+          result = { ok: true, width: this.sidebarWidth };
+          break;
+        }
+
+        case 'goal.setSidebarCollapsed': {
+          this.sidebarCollapsed = msg.params?.collapsed === true;
+          await this.ctx.context.workspaceState.update(
+            SIDEBAR_COLLAPSED_KEY,
+            this.sidebarCollapsed,
+          );
+          result = { ok: true, collapsed: this.sidebarCollapsed };
           break;
         }
 

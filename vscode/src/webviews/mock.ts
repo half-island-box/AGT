@@ -365,6 +365,8 @@ function sopBoot(): Record<string, unknown> {
     parseError: null,
     workspaceFolder: '/home/you/project',
     localDaemonId: 'dev-box-1',
+    sidebarWidth: null,
+    inspectorWidth: null,
     trackedRun: currentRun,
     runs,
     run: currentRun,
@@ -511,6 +513,9 @@ function goalBoot(): Record<string, unknown> {
     identities: state === 'online' ? identities : [],
     daemons: state === 'online' ? daemons : [],
     workspaceFolder: '/home/you/project',
+    inspectorWidth: null,
+    sidebarWidth: 302,
+    sidebarCollapsed: false,
   };
 }
 
@@ -549,6 +554,10 @@ export async function mockCall<T>(_method: string, params?: Record<string, unkno
       return { cancelled: true } as T;
     case 'goal.export':
       return { canceled: false, path: '/home/you/project/goal-root.sop.yaml', warnings: [] } as T;
+    case 'goal.setSidebarWidth':
+      return { ok: true, width: params?.width } as T;
+    case 'goal.setSidebarCollapsed':
+      return { ok: true, collapsed: params?.collapsed } as T;
     case 'openGoal':
       return { ok: true } as T;
     case 'sop.boot':
@@ -698,6 +707,8 @@ export async function mockCall<T>(_method: string, params?: Record<string, unkno
       sopPositions = (params?.positions as Record<string, SopPoint>) ?? {};
       return { ok: true } as T;
     }
+    case 'sop.setSidebarWidth':
+      return { ok: true, width: params?.width } as T;
     case 'openChat':
     case 'openSop':
       return { ok: true } as T;

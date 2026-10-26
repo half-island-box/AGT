@@ -65,6 +65,7 @@ interface RunSummary {
 }
 
 const INSPECTOR_WIDTH_KEY = 'agt.sop.inspectorWidth';
+const SIDEBAR_WIDTH_KEY = 'agt.sop.sidebarWidth';
 
 const STARTER_YAML = `# SOP template — edit here or on the canvas; both stay in sync.
 name: new-pipeline
@@ -99,6 +100,7 @@ export class SopEditorPanel {
   private trackedRunId: string | null = null;
   private selectedRunId: string | null = null;
   private inspectorWidth: number | null = null;
+  private sidebarWidth: number | null = null;
 
   constructor(ctx: SopBridgeContext) {
     this.ctx = ctx;
@@ -314,6 +316,10 @@ export class SopEditorPanel {
       parseError: this.parsed?.parseError ?? null,
       workspaceFolder: this.workspaceFolder(),
       localDaemonId: this.localDaemon(),
+      sidebarWidth:
+        this.sidebarWidth ??
+        this.ctx.context.workspaceState.get<number>(SIDEBAR_WIDTH_KEY) ??
+        null,
       inspectorWidth:
         this.inspectorWidth ??
         this.ctx.context.workspaceState.get<number>(INSPECTOR_WIDTH_KEY) ??
@@ -455,6 +461,14 @@ export class SopEditorPanel {
     await this.ctx.context.workspaceState.update(
       INSPECTOR_WIDTH_KEY,
       this.inspectorWidth,
+    );
+  }
+
+  private async setSidebarWidth(width: number): Promise<void> {
+    this.sidebarWidth = Math.max(200, Math.min(520, Math.round(width)));
+    await this.ctx.context.workspaceState.update(
+      SIDEBAR_WIDTH_KEY,
+      this.sidebarWidth,
     );
   }
 
@@ -730,6 +744,15 @@ export class SopEditorPanel {
             await this.setInspectorWidth(width);
           }
           result = { ok: true, width: this.inspectorWidth };
+          break;
+        }
+
+        case 'sop.setSidebarWidth': {
+          const width = Number(msg.params?.width);
+          if (Number.isFinite(width)) {
+            await this.setSidebarWidth(width);
+          }
+          result = { ok: true, width: this.sidebarWidth };
           break;
         }
 
