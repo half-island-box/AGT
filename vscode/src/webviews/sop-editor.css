@@ -111,7 +111,8 @@ body {
 .agd-sop-identity:first-of-type { border-top: none; padding-top: 0; margin-top: 0; }
 .agd-sop-identity-head { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
 .agd-sop-identity label { display: block; font-size: 10.5px; color: var(--vscode-descriptionForeground, #8b8b8b); margin-bottom: 6px; }
-.agd-sop-identity input { width: 100%; box-sizing: border-box; margin-top: 2px; }
+.agd-sop-identity input,
+.agd-sop-identity select { width: 100%; box-sizing: border-box; margin-top: 2px; }
 .agd-sop-identity.is-new { border-top: none; margin-top: 6px; padding-top: 0; }
 .agd-sop-loop { border-top: 1px solid var(--vscode-panel-border, #2e2e2e); padding-top: 8px; margin-top: 8px; }
 .agd-sop-loop:first-of-type { border-top: none; padding-top: 0; margin-top: 0; }

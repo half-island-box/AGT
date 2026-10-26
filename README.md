@@ -117,16 +117,15 @@ Remote daemons connect via HTTP or **reverse-dial WebSocket** (server dials out,
 
 ## VS Code extension (early)
 
-The `vscode/` directory holds a TypeScript UI client for the server. The current milestone includes server lifecycle, daemon tree, status bar, settings, and Chat mode. Chat supports daemon/agent/identity selection with provider logos, daemon session history, live SSE output, multi-turn continuation, resumable turn stopping, confirmed session deletion, and zh/en static text; SOP and Goal modes are planned in later milestones.
+The `vscode/` directory holds a TypeScript UI client for the server. It includes server/daemon lifecycle controls, the daemon tree and status bar, Settings, Chat, the visual SOP editor, and Goal orchestration. Settings now includes Identity management: users can create, inspect, and edit identities, then manage optional daemon/provider routing preferences. Chat and Goal select an identity directly; SOP identity aliases choose from the same managed identity catalog. Bindings remain optional routing hints, so an identity can run on any live provider.
 
 ```bash
 cd vscode
 npm install
 npm run build       # bundle extension + webview
+npm run typecheck   # strict TypeScript check
 npm run dev:web     # browser preview of webviews with mock data (no VS Code needed)
-npm run test:core   # core SOP editor tests (round-trip, graph, layout)
-npm run test:inspector   # inspector regressions (selects, identity clearing, roots)
-npm run test:run         # run-tracking helpers (local daemon detection, fingerprint)
+npm run test:loop   # SOP loop/YAML round-trip regressions
 npm run check:sop   # apply an editing session and validate the result with the Python DSL
 npm run check:run   # submit the sample SOP to a running server and read status + node log
 ```

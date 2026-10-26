@@ -5,7 +5,11 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { ServerLifecycle } from '../core/lifecycle';
 import { localDaemonId } from '../core/sop/run';
-import type { DaemonInfo, UiLanguage } from '../core/types';
+import type {
+  DaemonInfo,
+  IdentityWithBindings,
+  UiLanguage,
+} from '../core/types';
 
 export interface BridgeContext {
   extensionUri: vscode.Uri;
@@ -99,6 +103,14 @@ export class SettingsPanel {
     const cfg = this.config();
     const lifecycle = this.ctx.lifecycle;
     const daemons = lifecycle.state === 'online' ? await this.ctx.getDaemons() : [];
+    let identities: IdentityWithBindings[] = [];
+    if (lifecycle.state === 'online') {
+      try {
+        identities = await lifecycle.api.identitiesWithBindings();
+      } catch {
+        identities = [];
+      }
+    }
     return {
       serverUrl: cfg.get<string>('serverUrl'),
       autoStart: cfg.get<boolean>('autoStart'),
@@ -112,6 +124,7 @@ export class SettingsPanel {
       state: lifecycle.state,
       latencyMs: lifecycle.latencyMs,
       daemons,
+      identities,
       localDaemonId: localDaemonId(
         daemons.map((daemon) => ({
           daemon_id: daemon.daemon_id,
@@ -144,10 +157,19 @@ export class SettingsPanel {
           const online = await this.ctx.lifecycle.probe();
           this.ctx.onConfigOrStateChange();
           const daemons = online ? await this.ctx.getDaemons() : [];
+          let identities: IdentityWithBindings[] = [];
+          if (online) {
+            try {
+              identities = await this.ctx.lifecycle.api.identitiesWithBindings();
+            } catch {
+              identities = [];
+            }
+          }
           result = {
             state: this.ctx.lifecycle.state,
             latencyMs: this.ctx.lifecycle.latencyMs,
             daemons,
+            identities,
             localDaemonId: localDaemonId(
               daemons.map((daemon) => ({
                 daemon_id: daemon.daemon_id,
@@ -293,6 +315,112 @@ export class SettingsPanel {
               ? p.agentCwdAllowlist.filter((item): item is string => typeof item === 'string')
               : undefined,
           });
+          break;
+        }
+        case 'identityCreate': {
+          const p = msg.params ?? {};
+          const name = String(p.name ?? '').trim();
+          if (!name) throw new Error('identity-name-required');
+          const capabilities = Array.isArray(p.capabilities)
+            ? p.capabilities
+                .map((value) => String(value).trim())
+                .filter(Boolean)
+            : [];
+          const created = await this.ctx.lifecycle.api.createIdentity({
+            daemon_id: (await this.currentLocalDaemonId()) ?? 'local',
+            name,
+            slug: p.slug ? String(p.slug).trim() : null,
+            description: String(p.description ?? '').trim(),
+            capabilities: [...new Set(capabilities)],
+          });
+          result = {
+            created,
+            identities: await this.ctx.lifecycle.api.identitiesWithBindings(),
+          };
+          break;
+        }
+        case 'identityUpdate': {
+          const p = msg.params ?? {};
+          const did = String(p.did ?? '');
+          if (!did) throw new Error('identity-did-required');
+          const current = (await this.ctx.lifecycle.api.identitiesWithBindings())
+            .find((identity) => identity.did === did);
+          if (!current) throw new Error('identity-not-found');
+          const capabilities = Array.isArray(p.capabilities)
+            ? [...new Set(
+                p.capabilities
+                  .map((value) => String(value).trim())
+                  .filter(Boolean),
+              )]
+            : current.capabilities;
+          const updated = await this.ctx.lifecycle.api.updateIdentity(did, {
+            name: String(p.name ?? current.name).trim(),
+            description: String(p.description ?? current.description).trim(),
+            add_capabilities: capabilities.filter(
+              (capability) => !current.capabilities.includes(capability),
+            ),
+            remove_capabilities: current.capabilities.filter(
+              (capability) => !capabilities.includes(capability),
+            ),
+          });
+          result = {
+            updated,
+            identities: await this.ctx.lifecycle.api.identitiesWithBindings(),
+          };
+          break;
+        }
+        case 'identityBindingCreate': {
+          const p = msg.params ?? {};
+          const did = String(p.did ?? '');
+          const daemonId = String(p.daemonId ?? '');
+          const provider = String(p.provider ?? '');
+          if (!did || !daemonId || !provider) {
+            throw new Error('identity-binding-required');
+          }
+          await this.ctx.lifecycle.api.createIdentityBinding(did, {
+            daemonId,
+            provider,
+            priority: Number.isFinite(Number(p.priority))
+              ? Math.trunc(Number(p.priority))
+              : 0,
+            isDefault: p.isDefault === true,
+          });
+          result = {
+            identities: await this.ctx.lifecycle.api.identitiesWithBindings(),
+          };
+          break;
+        }
+        case 'identityBindingUpdate': {
+          const p = msg.params ?? {};
+          const did = String(p.did ?? '');
+          const bindingId = Number(p.bindingId);
+          if (!did || !Number.isInteger(bindingId)) {
+            throw new Error('identity-binding-required');
+          }
+          await this.ctx.lifecycle.api.updateIdentityBinding(did, bindingId, {
+            priority: p.priority === undefined
+              ? undefined
+              : Math.trunc(Number(p.priority)),
+            isDefault: typeof p.isDefault === 'boolean'
+              ? p.isDefault
+              : undefined,
+          });
+          result = {
+            identities: await this.ctx.lifecycle.api.identitiesWithBindings(),
+          };
+          break;
+        }
+        case 'identityBindingDelete': {
+          const p = msg.params ?? {};
+          const did = String(p.did ?? '');
+          const bindingId = Number(p.bindingId);
+          if (!did || !Number.isInteger(bindingId)) {
+            throw new Error('identity-binding-required');
+          }
+          await this.ctx.lifecycle.api.deleteIdentityBinding(did, bindingId);
+          result = {
+            identities: await this.ctx.lifecycle.api.identitiesWithBindings(),
+          };
           break;
         }
         default:

@@ -9,7 +9,7 @@ import type {
   GoalJobTreeNode,
   GoalRunInfo,
   GoalTreeInfo,
-  IdentityInfo,
+  IdentityWithBindings,
   DaemonInfo,
   JobLogInfo,
   TaskStatusInfo,
@@ -25,7 +25,7 @@ interface GoalBoot {
   selectedRunId: string | null;
   tree: GoalTreeInfo | null;
   selectedNodeId: string | null;
-  identities: IdentityInfo[];
+  identities: IdentityWithBindings[];
   daemons: DaemonInfo[];
   workspaceFolder: string | null;
   inspectorWidth: number | null;
@@ -520,8 +520,10 @@ function renderHeader(): string {
 }
 
 function renderSubmitForm(): string {
+  const identities = (boot?.identities ?? [])
+    .filter((identity) => identity.status === 'active');
   const identityOptions = [`<option value="">${tr('chat.identityNone')}</option>`]
-    .concat((boot?.identities ?? []).map((identity) => `<option value="${esc(identity.did)}" ${draft.identityDid === identity.did ? 'selected' : ''}>${esc(identity.name)}</option>`))
+    .concat(identities.map((identity) => `<option value="${esc(identity.did)}" ${draft.identityDid === identity.did ? 'selected' : ''}>${esc(identity.name)} · ${esc(identity.did)}</option>`))
     .join('');
   const daemons = boot?.daemons ?? [];
   const providers = [...new Set(daemons.flatMap((daemon) => daemon.providers.map((provider) => provider.provider)))].sort();
@@ -883,6 +885,14 @@ function wireEvents(): void {
   });
   document.getElementById('agd-goal-identity')?.addEventListener('change', (event) => {
     draft.identityDid = (event.target as HTMLSelectElement).value;
+    const identity = boot?.identities.find((item) => item.did === draft.identityDid);
+    const preferred = identity?.bindings.find((binding) => binding.is_default)
+      ?? identity?.bindings[0];
+    if (preferred) {
+      if (!draft.provider) draft.provider = preferred.provider;
+      if (!draft.daemonId) draft.daemonId = preferred.daemon_id;
+    }
+    render();
   });
   document.getElementById('agd-goal-provider')?.addEventListener('change', (event) => {
     draft.provider = (event.target as HTMLSelectElement).value;

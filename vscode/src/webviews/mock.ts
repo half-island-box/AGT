@@ -112,7 +112,7 @@ const runtimes: RuntimeInfo[] = [
   { name: 'Kimi CLI', type: 'kimi', version: '1.2.3', status: 'online', device_name: '192.168.1.24', daemon_id: 'dev-box-2', daemon_name: null },
 ];
 
-const identities: IdentityWithBindings[] = [
+let identities: IdentityWithBindings[] = [
   {
     did: 'did:agt:code-reviewer',
     daemon_id: 'dev-box-1',
@@ -125,9 +125,22 @@ const identities: IdentityWithBindings[] = [
     created_at: '2026-09-01 10:00:00',
     updated_at: '2026-09-01 10:00:00',
     bindings: [
-      { id: 1, identity_did: 'did:agt:code-reviewer', daemon_id: 'dev-box-1', provider: 'claude', priority: 0, is_default: true, created_at: '2026-09-01 10:00:00' },
-      { id: 2, identity_did: 'did:agt:code-reviewer', daemon_id: 'dev-box-1', provider: 'codex', priority: 0, is_default: false, created_at: '2026-09-01 10:00:00' },
+      { id: 1, identity_did: 'did:agt:code-reviewer', daemon_id: 'dev-box-1', provider: 'claude', priority: 0, is_default: true, created_at: '2026-09-01 10:00:00', runtime_online: true, last_seen: '2026-09-15 10:00:01' },
+      { id: 2, identity_did: 'did:agt:code-reviewer', daemon_id: 'dev-box-1', provider: 'codex', priority: 10, is_default: false, created_at: '2026-09-01 10:00:00', runtime_online: true, last_seen: '2026-09-15 10:00:01' },
     ],
+  },
+  {
+    did: 'did:agt:release-manager',
+    daemon_id: 'dev-box-2',
+    name: 'Release Manager',
+    description: 'Coordinates release checks and changelog preparation.',
+    capabilities: ['release', 'verification'],
+    status: 'active',
+    visibility: 'private',
+    created_by: 'user',
+    created_at: '2026-09-02 10:00:00',
+    updated_at: '2026-09-02 10:00:00',
+    bindings: [],
   },
 ];
 
@@ -359,6 +372,14 @@ function sopBoot(): Record<string, unknown> {
       providers: [...new Set(daemon.providers.map((p) => p.provider))].sort(),
     })),
     model: doc,
+    identities: identities
+      .filter((identity) => identity.status === 'active')
+      .map((identity) => ({
+        did: identity.did,
+        name: identity.name,
+        status: identity.status,
+        bindings: identity.bindings,
+      })),
     text: doc ? renderSopYaml(doc) : '',
     dirty: sopDirty,
     positions: sopPath ? { ...sopPositions } : {},
@@ -756,6 +777,144 @@ export async function mockCall<T>(_method: string, params?: Record<string, unkno
       return { ok: true } as T;
     case 'openSettings':
       return { ok: true } as T;
+    case 'identityCreate': {
+      const p = params ?? {};
+      const name = String(p.name ?? '').trim();
+      const slug = String(
+        p.slug
+          || name
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '-')
+            .replace(/^-+|-+$/g, ''),
+      );
+      const did = `did:agt:${slug}`;
+      if (identities.some((identity) => identity.did === did)) {
+        throw new Error('HTTP 409: Identity with this slug already exists');
+      }
+      const now = new Date().toISOString();
+      const created: IdentityWithBindings = {
+        did,
+        daemon_id: 'dev-box-1',
+        name,
+        description: String(p.description ?? ''),
+        capabilities: Array.isArray(p.capabilities)
+          ? p.capabilities.map(String).filter(Boolean)
+          : [],
+        status: 'active',
+        visibility: 'private',
+        created_by: 'user',
+        created_at: now,
+        updated_at: now,
+        bindings: [],
+      };
+      identities = [created, ...identities];
+      return { created, identities } as T;
+    }
+    case 'identityUpdate': {
+      const p = params ?? {};
+      const did = String(p.did ?? '');
+      const index = identities.findIndex((identity) => identity.did === did);
+      if (index < 0) throw new Error('HTTP 404: identity not found');
+      const current = identities[index];
+      const updated: IdentityWithBindings = {
+        ...current,
+        name: String(p.name ?? current.name),
+        description: String(p.description ?? current.description),
+        capabilities: Array.isArray(p.capabilities)
+          ? p.capabilities.map(String).filter(Boolean)
+          : current.capabilities,
+        updated_at: new Date().toISOString(),
+      };
+      identities = identities.map((identity) =>
+        identity.did === did ? updated : identity,
+      );
+      return { updated, identities } as T;
+    }
+    case 'identityBindingCreate': {
+      const p = params ?? {};
+      const did = String(p.did ?? '');
+      const index = identities.findIndex((identity) => identity.did === did);
+      if (index < 0) throw new Error('HTTP 404: identity not found');
+      const daemonId = String(p.daemonId ?? '');
+      const provider = String(p.provider ?? '');
+      if (identities[index].bindings.some(
+        (binding) => binding.daemon_id === daemonId && binding.provider === provider,
+      )) {
+        throw new Error('HTTP 409: binding already exists');
+      }
+      const daemon = daemons.find((item) => item.daemon_id === daemonId);
+      const runtime = daemon?.providers.find((item) => item.provider === provider);
+      const bindingId = Math.max(
+        0,
+        ...identities.flatMap((identity) =>
+          identity.bindings.map((binding) => binding.id)
+        ),
+      ) + 1;
+      const identity = identities[index];
+      const bindings = identity.bindings.map((binding) =>
+        p.isDefault === true
+          ? { ...binding, is_default: false }
+          : binding,
+      );
+      bindings.push({
+        id: bindingId,
+        identity_did: did,
+        daemon_id: daemonId,
+        provider,
+        priority: Number(p.priority ?? 0),
+        is_default: p.isDefault === true,
+        created_at: new Date().toISOString(),
+        runtime_online: !!runtime,
+        last_seen: runtime?.last_seen ?? null,
+      });
+      identities = identities.map((item, itemIndex) =>
+        itemIndex === index ? { ...item, bindings } : item,
+      );
+      return { identities } as T;
+    }
+    case 'identityBindingUpdate': {
+      const p = params ?? {};
+      const did = String(p.did ?? '');
+      const bindingId = Number(p.bindingId);
+      const index = identities.findIndex((identity) => identity.did === did);
+      if (index < 0) throw new Error('HTTP 404: identity not found');
+      const identity = identities[index];
+      const bindings = identity.bindings.map((binding) => {
+        if (p.isDefault === true) {
+          return binding.id === bindingId
+            ? {
+                ...binding,
+                priority: p.priority === undefined ? binding.priority : Number(p.priority),
+                is_default: true,
+              }
+            : { ...binding, is_default: false };
+        }
+        return binding.id === bindingId
+          ? {
+              ...binding,
+              priority: p.priority === undefined ? binding.priority : Number(p.priority),
+              is_default: p.isDefault === false ? false : binding.is_default,
+            }
+          : binding;
+      });
+      identities = identities.map((item, itemIndex) =>
+        itemIndex === index ? { ...item, bindings } : item,
+      );
+      return { identities } as T;
+    }
+    case 'identityBindingDelete': {
+      const did = String(params?.did ?? '');
+      const bindingId = Number(params?.bindingId);
+      identities = identities.map((identity) =>
+        identity.did === did
+          ? {
+              ...identity,
+              bindings: identity.bindings.filter((binding) => binding.id !== bindingId),
+            }
+          : identity,
+      );
+      return { identities } as T;
+    }
     case 'daemonConfigShow': {
       const daemonId = String(params?.daemonId ?? '');
       if (daemonId !== 'dev-box-1') {

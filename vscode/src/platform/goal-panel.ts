@@ -210,11 +210,13 @@ export class GoalPanel {
       this.selectedNodeId = null;
       await this.ctx.context.workspaceState.update(SELECTED_RUN_KEY, null);
     }
-    let identities: Awaited<ReturnType<typeof this.ctx.lifecycle.api.identities>> = [];
+    let identities: Awaited<
+      ReturnType<typeof this.ctx.lifecycle.api.identitiesWithBindings>
+    > = [];
     let daemons: Awaited<ReturnType<typeof this.ctx.lifecycle.api.daemons>> = [];
     if (online) {
       try {
-        identities = await this.ctx.lifecycle.api.identities();
+        identities = await this.ctx.lifecycle.api.identitiesWithBindings();
       } catch {
         identities = [];
       }

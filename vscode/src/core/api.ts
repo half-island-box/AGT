@@ -4,7 +4,9 @@ import type {
   ArtifactInfo,
   DaemonInfo,
   IdentityBindingInfo,
+  IdentityCreateInput,
   IdentityInfo,
+  IdentityUpdateInput,
   IdentityWithBindings,
   GoalJobTreeNode,
   GoalRunListInfo,
@@ -87,6 +89,47 @@ export class AgtApi {
     );
   }
 
+  private put<T>(path: string, body: unknown, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<T> {
+    return this.request<T>(
+      path,
+      {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+      timeoutMs,
+    );
+  }
+
+  private patch<T>(path: string, body: unknown, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<T> {
+    return this.request<T>(
+      path,
+      {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+      timeoutMs,
+    );
+  }
+
+  private async delete(path: string, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<void> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(`${this.baseUrl}${path}`, {
+        method: 'DELETE',
+        signal: controller.signal,
+        headers: { accept: 'application/json' },
+      });
+      if (!res.ok) {
+        throw new Error(await errorMessage(res));
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async health(): Promise<{ status: string }> {
     return this.request<{ status: string }>('/api/health', {}, 2500);
   }
@@ -137,12 +180,64 @@ export class AgtApi {
   }
 
   async identitiesWithBindings(): Promise<IdentityWithBindings[]> {
-    const identities = await this.identities();
-    return Promise.all(
-      identities.map(async (identity) => ({
-        ...identity,
-        bindings: await this.identityBindings(identity.did),
-      })),
+    const res = await this.request<{ identities: IdentityWithBindings[] }>(
+      '/api/identities/overview',
+    );
+    return res.identities;
+  }
+
+  async createIdentity(input: IdentityCreateInput): Promise<IdentityInfo> {
+    return this.post<IdentityInfo>('/api/identities', input, 10_000);
+  }
+
+  async updateIdentity(did: string, input: IdentityUpdateInput): Promise<IdentityInfo> {
+    return this.put<IdentityInfo>(
+      `/api/identities/${encodeURIComponent(did)}`,
+      input,
+      10_000,
+    );
+  }
+
+  async createIdentityBinding(
+    did: string,
+    input: {
+      daemonId: string;
+      provider: string;
+      priority?: number;
+      isDefault?: boolean;
+    },
+  ): Promise<IdentityBindingInfo> {
+    return this.post<IdentityBindingInfo>(
+      `/api/identities/${encodeURIComponent(did)}/bindings`,
+      {
+        daemon_id: input.daemonId,
+        provider: input.provider,
+        priority: input.priority ?? 0,
+        is_default: input.isDefault ?? false,
+      },
+      10_000,
+    );
+  }
+
+  async updateIdentityBinding(
+    did: string,
+    bindingId: number,
+    input: { priority?: number; isDefault?: boolean },
+  ): Promise<IdentityBindingInfo> {
+    return this.patch<IdentityBindingInfo>(
+      `/api/identities/${encodeURIComponent(did)}/bindings/${bindingId}`,
+      {
+        priority: input.priority,
+        is_default: input.isDefault,
+      },
+      10_000,
+    );
+  }
+
+  async deleteIdentityBinding(did: string, bindingId: number): Promise<void> {
+    return this.delete(
+      `/api/identities/${encodeURIComponent(did)}/bindings/${bindingId}`,
+      10_000,
     );
   }
 

@@ -71,10 +71,28 @@ export interface IdentityBindingInfo {
   priority: number;
   is_default: boolean;
   created_at: string;
+  runtime_online?: boolean;
+  last_seen?: string | null;
 }
 
 export interface IdentityWithBindings extends IdentityInfo {
   bindings: IdentityBindingInfo[];
+}
+
+export interface IdentityCreateInput {
+  daemon_id: string;
+  name: string;
+  slug?: string | null;
+  description: string;
+  capabilities: string[];
+  visibility?: 'private' | 'public';
+}
+
+export interface IdentityUpdateInput {
+  name?: string;
+  description?: string;
+  add_capabilities?: string[];
+  remove_capabilities?: string[];
 }
 
 export interface ChatSessionInfo {
@@ -209,6 +227,8 @@ export interface SopNodeStatus {
   artifacts: string[];
   artifact_details?: SopArtifactSummary[];
   provider: string | null;
+  identity_did?: string | null;
+  daemon_id?: string | null;
   session_id: string | null;
 }
 

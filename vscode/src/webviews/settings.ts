@@ -2,7 +2,12 @@ import './mode-switcher.css';
 import './styles.css';
 import { t, type MessageKey } from '../core/i18n';
 import { providerLogo } from '../core/icons';
-import type { DaemonConfigInfo, DaemonInfo, UiLanguage } from '../core/types';
+import type {
+  DaemonConfigInfo,
+  DaemonInfo,
+  IdentityWithBindings,
+  UiLanguage,
+} from '../core/types';
 import { bridge, type BootInfo } from './bridge';
 
 function esc(value: unknown): string {
@@ -50,6 +55,40 @@ let daemonConfig: {
   saved: false,
   info: null,
   draft: null,
+};
+
+type IdentityModalMode = 'create' | 'view' | 'edit';
+
+interface IdentityDraft {
+  name: string;
+  slug: string;
+  description: string;
+  capabilities: string;
+}
+
+interface IdentityBindingDraft {
+  daemonId: string;
+  provider: string;
+  priority: string;
+  isDefault: boolean;
+}
+
+let identityModal: {
+  open: boolean;
+  mode: IdentityModalMode;
+  did: string | null;
+  busy: boolean;
+  error: string | null;
+  draft: IdentityDraft;
+  binding: IdentityBindingDraft;
+} = {
+  open: false,
+  mode: 'view',
+  did: null,
+  busy: false,
+  error: null,
+  draft: { name: '', slug: '', description: '', capabilities: '' },
+  binding: { daemonId: '', provider: '', priority: '0', isDefault: false },
 };
 
 function tr(key: MessageKey, vars?: Record<string, string | number>): string {
@@ -216,6 +255,289 @@ function providerChips(daemon: DaemonInfo): string {
     .join('');
 }
 
+function identityStatusPill(status: string): string {
+  const cls = status === 'active'
+    ? 'agd-pill-ok'
+    : status === 'revoked'
+      ? 'agd-pill-err'
+      : 'agd-pill-warn';
+  return `<span class="agd-pill ${cls}">${esc(status)}</span>`;
+}
+
+function identityByDid(did: string | null): IdentityWithBindings | undefined {
+  return did ? boot?.identities.find((identity) => identity.did === did) : undefined;
+}
+
+function firstBindingDaemon(): DaemonInfo | undefined {
+  return (
+    boot?.daemons.find((daemon) => daemon.daemon_id === boot?.localDaemonId)
+    ?? boot?.daemons.find((daemon) => daemon.online)
+    ?? boot?.daemons[0]
+  );
+}
+
+function resetBindingDraft(): void {
+  const daemon = firstBindingDaemon();
+  identityModal.binding = {
+    daemonId: daemon?.daemon_id ?? '',
+    provider: daemon?.providers[0]?.provider ?? '',
+    priority: '0',
+    isDefault: false,
+  };
+}
+
+function openIdentityModal(
+  mode: IdentityModalMode,
+  identity?: IdentityWithBindings,
+): void {
+  identityModal = {
+    open: true,
+    mode,
+    did: identity?.did ?? null,
+    busy: false,
+    error: null,
+    draft: identity
+      ? {
+          name: identity.name,
+          slug: identity.did.replace(/^did:agt:/, ''),
+          description: identity.description,
+          capabilities: identity.capabilities.join(', '),
+        }
+      : { name: '', slug: '', description: '', capabilities: '' },
+    binding: identityModal.binding,
+  };
+  resetBindingDraft();
+  render();
+}
+
+function parseCapabilities(value: string): string[] {
+  return [...new Set(
+    value
+      .split(/[,\n，]/)
+      .map((item) => item.trim())
+      .filter(Boolean),
+  )];
+}
+
+function renderIdentityForm(): string {
+  return `
+    <div class="agd-identity-form">
+      <label class="agd-field">
+        ${tr('settings.identityName')}
+        <input id="agd-identity-name" class="agd-input" value="${esc(identityModal.draft.name)}" autocomplete="off">
+      </label>
+      <label class="agd-field">
+        ${tr('settings.identitySlug')}
+        <input id="agd-identity-slug" class="agd-input agd-mono" value="${esc(identityModal.draft.slug)}" placeholder="${tr('settings.identitySlugPh')}" ${identityModal.mode === 'edit' ? 'disabled' : ''}>
+      </label>
+      <label class="agd-field">
+        ${tr('settings.identityDescription')}
+        <textarea id="agd-identity-description" class="agd-input agd-identity-textarea" rows="3" placeholder="${tr('settings.identityDescriptionPh')}">${esc(identityModal.draft.description)}</textarea>
+      </label>
+      <label class="agd-field">
+        ${tr('settings.identityCapabilities')}
+        <input id="agd-identity-capabilities" class="agd-input" value="${esc(identityModal.draft.capabilities)}" placeholder="${tr('settings.identityCapabilitiesPh')}">
+      </label>
+      ${identityModal.error ? `<p class="agd-form-err">${esc(identityModal.error)}</p>` : ''}
+    </div>`;
+}
+
+function renderIdentityBindings(identity: IdentityWithBindings): string {
+  const bindings = [...identity.bindings].sort(
+    (a, b) =>
+      Number(b.is_default) - Number(a.is_default)
+      || b.priority - a.priority
+      || a.id - b.id,
+  );
+  const rows = bindings
+    .map((binding) => {
+      const runtime = binding.runtime_online === true
+        ? `<span class="agd-pill agd-pill-ok">${tr('settings.identityRuntimeOnline')}</span>`
+        : binding.runtime_online === false
+          ? `<span class="agd-pill agd-pill-err">${tr('settings.identityRuntimeOffline')}</span>`
+          : `<span class="agd-pill">${tr('settings.identityRuntimeUnknown')}</span>`;
+      return `
+        <div class="agd-identity-binding" data-binding-id="${binding.id}">
+          <div class="agd-identity-binding-main">
+            <span class="agd-identity-runtime">${providerLogo(binding.provider)}<span class="agd-mono">${esc(binding.daemon_id)}</span><strong>${esc(binding.provider)}</strong></span>
+            <span class="agd-identity-binding-badges">
+              ${binding.is_default ? `<span class="agd-pill agd-pill-ok">${tr('settings.identityDefault')}</span>` : ''}
+              ${runtime}
+            </span>
+          </div>
+          <div class="agd-identity-binding-controls">
+            <label>${tr('settings.identityPriority')}<input class="agd-input agd-mono" type="number" step="1" data-binding-priority="${binding.id}" value="${binding.priority}"></label>
+            ${binding.is_default ? '' : `<button type="button" class="agd-btn" data-binding-default="${binding.id}">${tr('settings.identitySetDefault')}</button>`}
+            <button type="button" class="agd-btn agd-btn-danger" data-binding-remove="${binding.id}">${tr('settings.identityRemoveBinding')}</button>
+          </div>
+        </div>`;
+    })
+    .join('');
+
+  const daemons = boot?.daemons ?? [];
+  const selectedDaemon = daemons.find(
+    (daemon) => daemon.daemon_id === identityModal.binding.daemonId,
+  );
+  const providers = selectedDaemon?.providers.map((provider) => provider.provider) ?? [];
+  const daemonOptions = daemons
+    .map(
+      (daemon) => `
+        <option value="${esc(daemon.daemon_id)}" ${daemon.daemon_id === identityModal.binding.daemonId ? 'selected' : ''}>
+          ${esc(daemon.daemon_name || daemon.device_name || daemon.daemon_id)}
+        </option>`,
+    )
+    .join('');
+  const providerOptions = providers
+    .map(
+      (provider) => `
+        <option value="${esc(provider)}" ${provider === identityModal.binding.provider ? 'selected' : ''}>${esc(provider)}</option>`,
+    )
+    .join('');
+
+  return `
+    <section class="agd-identity-section">
+      <div class="agd-identity-section-head">
+        <span>${tr('settings.identityBindings')}</span>
+        <span class="agd-flex"></span>
+        <small class="agd-dim">${tr('settings.identityBindingOptionalHint')}</small>
+      </div>
+      ${rows || `<p class="agd-identity-empty">${tr('settings.identityNoBindings')}</p>`}
+      ${
+        daemons.length === 0
+          ? `<p class="agd-identity-empty">${tr('settings.identityNoDaemons')}</p>`
+          : `
+          <div class="agd-identity-binding-form">
+            <label class="agd-field">${tr('settings.identityBindingDaemon')}<select id="agd-identity-binding-daemon" class="agd-input">${daemonOptions}</select></label>
+            <label class="agd-field">${tr('settings.identityBindingProvider')}<select id="agd-identity-binding-provider" class="agd-input" ${providers.length === 0 ? 'disabled' : ''}>${providerOptions}</select></label>
+            <label class="agd-field">${tr('settings.identityPriority')}<input id="agd-identity-binding-priority" class="agd-input agd-mono" type="number" step="1" value="${esc(identityModal.binding.priority)}"></label>
+            <label class="agd-switch-row agd-identity-default-switch">
+              <span class="agd-switch"><input id="agd-identity-binding-default" type="checkbox" ${identityModal.binding.isDefault ? 'checked' : ''}><i></i></span>
+              <span>${tr('settings.identityDefault')}</span>
+            </label>
+            <button type="button" class="agd-btn agd-btn-primary" id="agd-identity-binding-add" ${providers.length === 0 ? 'disabled' : ''}>${tr('settings.identityAddBinding')}</button>
+          </div>
+          ${providers.length === 0 ? `<p class="agd-form-err">${tr('settings.identityNoProvider')}</p>` : ''}`
+      }
+      ${identityModal.error ? `<p class="agd-form-err">${esc(identityModal.error)}</p>` : ''}
+    </section>`;
+}
+
+function renderIdentityModal(): string {
+  if (!identityModal.open) return '';
+  const identity = identityByDid(identityModal.did);
+  const isCreate = identityModal.mode === 'create';
+  const isView = identityModal.mode === 'view';
+  const title = isCreate
+    ? tr('settings.identityCreateTitle')
+    : identityModal.mode === 'edit'
+      ? tr('settings.identityEditTitle')
+      : identity?.name ?? tr('settings.identityDetails');
+  const subtitle = isCreate
+    ? tr('settings.identityCreateHint')
+    : identity?.did ?? '';
+
+  let body = '';
+  if (!isCreate && !identity) {
+    body = `<p class="agd-form-err">${tr('settings.identityNotFound')}</p>`;
+  } else if (isView && identity) {
+    body = `
+      <div class="agd-identity-summary">
+        <div class="agd-identity-summary-head">
+          <strong>${esc(identity.name)}</strong>
+          ${identityStatusPill(identity.status)}
+        </div>
+        <p>${esc(identity.description || tr('settings.identityNoDescription'))}</p>
+        <div class="agd-chips">
+          ${
+            identity.capabilities.length > 0
+              ? identity.capabilities.map((capability) => `<span class="agd-chip">${esc(capability)}</span>`).join('')
+              : `<span class="agd-dim">${tr('settings.identityNoCapabilities')}</span>`
+          }
+        </div>
+        <dl class="agd-identity-meta">
+          <div><dt>${tr('settings.identityOwner')}</dt><dd class="agd-mono">${esc(identity.daemon_id)}</dd></div>
+          <div><dt>${tr('settings.identityVisibility')}</dt><dd>${esc(identity.visibility)}</dd></div>
+          <div><dt>${tr('settings.identityUpdated')}</dt><dd>${esc(identity.updated_at)}</dd></div>
+        </dl>
+      </div>
+      ${renderIdentityBindings(identity)}`;
+  } else {
+    body = renderIdentityForm();
+  }
+
+  const footer = isView
+    ? `
+      <button type="button" class="agd-btn" id="agd-identity-close" ${identityModal.busy ? 'disabled' : ''}>${tr('settings.identityClose')}</button>
+      <span class="agd-flex"></span>
+      ${identity ? `<button type="button" class="agd-btn agd-btn-primary" id="agd-identity-edit">${tr('settings.identityEdit')}</button>` : ''}`
+    : `
+      <button type="button" class="agd-btn" id="agd-identity-cancel" ${identityModal.busy ? 'disabled' : ''}>${tr('settings.cancel')}</button>
+      <span class="agd-flex"></span>
+      <button type="button" class="agd-btn agd-btn-primary" id="agd-identity-save" ${identityModal.busy ? 'disabled' : ''}>
+        ${identityModal.busy ? spinner() : ''}${isCreate ? tr('settings.identityCreate') : tr('settings.identitySave')}
+      </button>`;
+
+  return `
+  <div class="agd-modal-backdrop" id="agd-identity-backdrop">
+    <section class="agd-modal agd-identity-modal" role="dialog" aria-modal="true" aria-labelledby="agd-identity-modal-title">
+      <header class="agd-modal-head">
+        <div>
+          <h3 id="agd-identity-modal-title">${esc(title)}</h3>
+          <p class="agd-dim agd-mono">${esc(subtitle)}</p>
+        </div>
+        ${isView ? '' : `<button type="button" class="agd-btn" id="agd-identity-form-close" ${identityModal.busy ? 'disabled' : ''}>×</button>`}
+      </header>
+      ${body}
+      <div class="agd-actions agd-modal-actions">${footer}</div>
+    </section>
+  </div>`;
+}
+
+function renderIdentitiesCard(): string {
+  const identities = boot?.identities ?? [];
+  const rows = identities
+    .map(
+      (identity) => `
+      <tr class="is-clickable" data-identity-open="${esc(identity.did)}">
+        <td data-label="${tr('settings.identity')}">
+          <strong>${esc(identity.name)}</strong>
+          <div class="agd-identity-did agd-mono">${esc(identity.did)}</div>
+        </td>
+        <td data-label="${tr('settings.status')}">${identityStatusPill(identity.status)}</td>
+        <td data-label="${tr('settings.identityCapabilities')}"><span class="agd-chips">${
+          identity.capabilities.length > 0
+            ? identity.capabilities.slice(0, 4).map((capability) => `<span class="agd-chip">${esc(capability)}</span>`).join('')
+            : `<span class="agd-dim">—</span>`
+        }</span></td>
+        <td data-label="${tr('settings.identityBindings')}">
+          <span class="agd-identity-binding-count">${identity.bindings.length}</span>
+          ${
+            identity.bindings.length > 0
+              ? `<span class="agd-dim"> ${tr('settings.identityBindingCount')}</span>`
+              : `<span class="agd-dim"> ${tr('settings.identityNoBindingsShort')}</span>`
+          }
+        </td>
+        <td class="agd-table-action"><button type="button" class="agd-btn agd-identity-view" data-identity-open="${esc(identity.did)}">${tr('settings.identityView')}</button></td>
+      </tr>`,
+    )
+    .join('');
+
+  return `
+    <section class="agd-card">
+      <div class="agd-card-head">
+        <span>${tr('settings.identities')}</span>
+        <span class="agd-flex"></span>
+        <button type="button" class="agd-btn" id="agd-add-identity" ${boot?.state !== 'online' ? 'disabled' : ''}>${tr('settings.addIdentity')}</button>
+      </div>
+      <table class="agd-table agd-identity-table">
+        <thead>
+          <tr><th>${tr('settings.identity')}</th><th>${tr('settings.status')}</th><th>${tr('settings.identityCapabilities')}</th><th>${tr('settings.identityBindings')}</th><th></th></tr>
+        </thead>
+        <tbody>${rows || `<tr><td colspan="5"><div class="agd-empty-state agd-identity-empty-state"><div class="agd-empty-state-icon">◎</div><h3>${tr('settings.identityEmpty')}</h3><p>${tr('settings.identityEmptyHint')}</p></div></td></tr>`}</tbody>
+      </table>
+    </section>`;
+}
+
 function render(): void {
   const root = document.getElementById('agt-root');
   if (!root) return;
@@ -293,6 +615,8 @@ function render(): void {
       </div>
     </section>
 
+    ${renderIdentitiesCard()}
+
     <section class="agd-card">
       <div class="agd-card-head">
         <span>${tr('settings.daemons')}</span>
@@ -312,7 +636,8 @@ function render(): void {
 
     ${bridge.isMock ? `<p class="agd-mock-note">browser preview · mock data</p>` : ''}
   </div>
-  ${renderDaemonConfigModal()}`;
+  ${renderDaemonConfigModal()}
+  ${renderIdentityModal()}`;
 
   wireEvents();
 }
@@ -452,6 +777,182 @@ async function saveDaemonConfig(): Promise<void> {
   }
 }
 
+function applyIdentityResult(result: {
+  identities?: IdentityWithBindings[];
+  created?: IdentityWithBindings;
+  updated?: IdentityWithBindings;
+}): void {
+  if (boot && Array.isArray(result.identities)) {
+    boot = { ...boot, identities: result.identities };
+  }
+}
+
+function identityError(err: unknown): string {
+  return String(err instanceof Error ? err.message : err)
+    .replace(/^Error:\s*/, '')
+    .replace(/^HTTP \d+:\s*/, '');
+}
+
+async function saveIdentity(): Promise<void> {
+  if (!identityModal.open || identityModal.busy) return;
+  if (!identityModal.draft.name.trim()) {
+    identityModal.error = tr('settings.identityNameRequired');
+    render();
+    return;
+  }
+
+  identityModal.busy = true;
+  identityModal.error = null;
+  render();
+  try {
+    const capabilities = parseCapabilities(identityModal.draft.capabilities);
+    if (identityModal.mode === 'create') {
+      const result = await bridge.call<{
+        identities: IdentityWithBindings[];
+        created: IdentityWithBindings;
+      }>('identityCreate', {
+        name: identityModal.draft.name.trim(),
+        slug: identityModal.draft.slug.trim() || null,
+        description: identityModal.draft.description.trim(),
+        capabilities,
+      });
+      applyIdentityResult(result);
+      identityModal = {
+        ...identityModal,
+        mode: 'view',
+        did: result.created.did,
+        draft: {
+          name: result.created.name,
+          slug: result.created.did.replace(/^did:agt:/, ''),
+          description: result.created.description,
+          capabilities: result.created.capabilities.join(', '),
+        },
+      };
+    } else if (identityModal.did) {
+      const result = await bridge.call<{
+        identities: IdentityWithBindings[];
+        updated: IdentityWithBindings;
+      }>('identityUpdate', {
+        did: identityModal.did,
+        name: identityModal.draft.name.trim(),
+        description: identityModal.draft.description.trim(),
+        capabilities,
+      });
+      applyIdentityResult(result);
+      identityModal = {
+        ...identityModal,
+        mode: 'view',
+        draft: {
+          name: result.updated.name,
+          slug: result.updated.did.replace(/^did:agt:/, ''),
+          description: result.updated.description,
+          capabilities: result.updated.capabilities.join(', '),
+        },
+      };
+    }
+  } catch (err) {
+    identityModal.error = identityError(err);
+  } finally {
+    identityModal.busy = false;
+    render();
+  }
+}
+
+async function addIdentityBinding(): Promise<void> {
+  const identity = identityByDid(identityModal.did);
+  if (!identity || identityModal.busy) return;
+  if (!identityModal.binding.daemonId || !identityModal.binding.provider) {
+    identityModal.error = tr('settings.identityBindingRequired');
+    render();
+    return;
+  }
+  const priority = Number(identityModal.binding.priority);
+  if (!Number.isInteger(priority)) {
+    identityModal.error = tr('settings.identityPriorityInteger');
+    render();
+    return;
+  }
+
+  identityModal.busy = true;
+  identityModal.error = null;
+  render();
+  try {
+    const result = await bridge.call<{ identities: IdentityWithBindings[] }>(
+      'identityBindingCreate',
+      {
+        did: identity.did,
+        daemonId: identityModal.binding.daemonId,
+        provider: identityModal.binding.provider,
+        priority,
+        isDefault: identityModal.binding.isDefault,
+      },
+    );
+    applyIdentityResult(result);
+    identityModal.binding = {
+      ...identityModal.binding,
+      priority: '0',
+      isDefault: false,
+    };
+  } catch (err) {
+    identityModal.error = identityError(err);
+  } finally {
+    identityModal.busy = false;
+    render();
+  }
+}
+
+async function updateIdentityBinding(
+  bindingId: number,
+  input: { priority?: number; isDefault?: boolean },
+): Promise<void> {
+  const identity = identityByDid(identityModal.did);
+  if (!identity || identityModal.busy) return;
+  if (input.priority !== undefined && !Number.isInteger(input.priority)) {
+    identityModal.error = tr('settings.identityPriorityInteger');
+    render();
+    return;
+  }
+  identityModal.busy = true;
+  identityModal.error = null;
+  render();
+  try {
+    const result = await bridge.call<{ identities: IdentityWithBindings[] }>(
+      'identityBindingUpdate',
+      {
+        did: identity.did,
+        bindingId,
+        ...input,
+      },
+    );
+    applyIdentityResult(result);
+  } catch (err) {
+    identityModal.error = identityError(err);
+  } finally {
+    identityModal.busy = false;
+    render();
+  }
+}
+
+async function removeIdentityBinding(bindingId: number): Promise<void> {
+  const identity = identityByDid(identityModal.did);
+  if (!identity || identityModal.busy) return;
+  identityModal.busy = true;
+  identityModal.error = null;
+  render();
+  try {
+    const result = await bridge.call<{ identities: IdentityWithBindings[] }>(
+      'identityBindingDelete',
+      { did: identity.did, bindingId },
+    );
+    applyIdentityResult(result);
+  } catch (err) {
+    identityModal.error = identityError(err);
+  } finally {
+    identityModal.busy = false;
+    render();
+  }
+}
+
 function applyBoot(next: BootInfo): void {
   boot = next;
   lang = next.language;
@@ -519,6 +1020,120 @@ function wireEvents(): void {
   }
   document.getElementById('agd-daemon-config-save')?.addEventListener('click', () => {
     void saveDaemonConfig();
+  });
+  document.getElementById('agd-add-identity')?.addEventListener('click', () => {
+    if (boot?.state === 'online') openIdentityModal('create');
+  });
+  document.querySelectorAll<HTMLElement>('tr[data-identity-open]').forEach((row) => {
+    row.addEventListener('click', (event) => {
+      if ((event.target as Element).closest('button')) return;
+      const identity = identityByDid(row.dataset.identityOpen ?? null);
+      if (identity) openIdentityModal('view', identity);
+    });
+  });
+  document.querySelectorAll<HTMLElement>('[data-identity-open] button').forEach((button) => {
+    button.addEventListener('click', () => {
+      const row = button.closest<HTMLElement>('[data-identity-open]');
+      const identity = identityByDid(row?.dataset.identityOpen ?? null);
+      if (identity) openIdentityModal('view', identity);
+    });
+  });
+  document.getElementById('agd-identity-close')?.addEventListener('click', () => {
+    identityModal.open = false;
+    identityModal.error = null;
+    render();
+  });
+  document.getElementById('agd-identity-form-close')?.addEventListener('click', () => {
+    if (identityModal.busy) return;
+    if (identityModal.mode === 'create') {
+      identityModal.open = false;
+    } else {
+      identityModal.mode = 'view';
+    }
+    identityModal.error = null;
+    render();
+  });
+  document.getElementById('agd-identity-cancel')?.addEventListener('click', () => {
+    if (identityModal.busy) return;
+    if (identityModal.mode === 'create') {
+      identityModal.open = false;
+      identityModal.error = null;
+      render();
+      return;
+    }
+    identityModal.mode = 'view';
+    identityModal.error = null;
+    render();
+  });
+  document.getElementById('agd-identity-backdrop')?.addEventListener('mousedown', (event) => {
+    if (event.target === event.currentTarget && !identityModal.busy) {
+      identityModal.open = false;
+      identityModal.error = null;
+      render();
+    }
+  });
+  document.getElementById('agd-identity-edit')?.addEventListener('click', () => {
+    const identity = identityByDid(identityModal.did);
+    if (identity) openIdentityModal('edit', identity);
+  });
+  document.getElementById('agd-identity-save')?.addEventListener('click', () => {
+    void saveIdentity();
+  });
+  for (const [id, key] of [
+    ['agd-identity-name', 'name'],
+    ['agd-identity-slug', 'slug'],
+    ['agd-identity-description', 'description'],
+    ['agd-identity-capabilities', 'capabilities'],
+  ] as const) {
+    document.getElementById(id)?.addEventListener('input', (event) => {
+      identityModal.draft[key] = (event.target as HTMLInputElement | HTMLTextAreaElement).value;
+      identityModal.error = null;
+    });
+  }
+  document.getElementById('agd-identity-binding-daemon')?.addEventListener('change', (event) => {
+    const daemonId = (event.target as HTMLSelectElement).value;
+    const daemon = boot?.daemons.find((item) => item.daemon_id === daemonId);
+    identityModal.binding = {
+      ...identityModal.binding,
+      daemonId,
+      provider: daemon?.providers[0]?.provider ?? '',
+    };
+    identityModal.error = null;
+    render();
+  });
+  document.getElementById('agd-identity-binding-provider')?.addEventListener('change', (event) => {
+    identityModal.binding.provider = (event.target as HTMLSelectElement).value;
+    identityModal.error = null;
+  });
+  document.getElementById('agd-identity-binding-priority')?.addEventListener('input', (event) => {
+    identityModal.binding.priority = (event.target as HTMLInputElement).value;
+    identityModal.error = null;
+  });
+  document.getElementById('agd-identity-binding-default')?.addEventListener('change', (event) => {
+    identityModal.binding.isDefault = (event.target as HTMLInputElement).checked;
+    identityModal.error = null;
+  });
+  document.getElementById('agd-identity-binding-add')?.addEventListener('click', () => {
+    void addIdentityBinding();
+  });
+  document.querySelectorAll<HTMLInputElement>('[data-binding-priority]').forEach((input) => {
+    input.addEventListener('change', () => {
+      void updateIdentityBinding(Number(input.dataset.bindingPriority), {
+        priority: Number(input.value),
+      });
+    });
+  });
+  document.querySelectorAll<HTMLElement>('[data-binding-default]').forEach((button) => {
+    button.addEventListener('click', () => {
+      void updateIdentityBinding(Number(button.dataset.bindingDefault), {
+        isDefault: true,
+      });
+    });
+  });
+  document.querySelectorAll<HTMLElement>('[data-binding-remove]').forEach((button) => {
+    button.addEventListener('click', () => {
+      void removeIdentityBinding(Number(button.dataset.bindingRemove));
+    });
   });
   document.getElementById('agd-add-daemon')?.addEventListener('click', () => {
     daemonForm = { ...daemonForm, open: !daemonForm.open, error: null, result: null };

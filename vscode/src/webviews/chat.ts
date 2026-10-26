@@ -237,12 +237,10 @@ function selectedAgent(): RuntimeInfo | undefined {
 }
 
 function identitiesForSelection(): IdentityWithBindings[] {
-  if (!boot || !selectedDaemonId || !selectedProvider) return [];
-  return boot.identities.filter((identity) =>
-    identity.bindings.some(
-      (binding) => binding.daemon_id === selectedDaemonId && binding.provider === selectedProvider,
-    ),
-  );
+  if (!boot) return [];
+  // Bindings are optional routing preferences. A selected identity may
+  // run on any live daemon/provider the user chooses.
+  return boot.identities.filter((identity) => identity.status === 'active');
 }
 
 function syncWorkspaceRoot(): void {
@@ -293,9 +291,27 @@ function normalizeInitialSelection(): void {
 
   const identities = identitiesForSelection();
   if (!selectedIdentityDid || !identities.some((identity) => identity.did === selectedIdentityDid)) {
-    selectedIdentityDid = identities.find((identity) =>
-      identity.bindings.some((binding) => binding.is_default),
-    )?.did ?? identities[0]?.did ?? '';
+    selectedIdentityDid = (
+      identities.find((identity) =>
+        identity.bindings.some(
+          (binding) =>
+            binding.is_default
+            && binding.daemon_id === selectedDaemonId
+            && binding.provider === selectedProvider,
+        ),
+      )
+      ?? identities.find((identity) =>
+        identity.bindings.some(
+          (binding) =>
+            binding.daemon_id === selectedDaemonId
+            && binding.provider === selectedProvider,
+        ),
+      )
+      ?? identities.find((identity) =>
+        identity.bindings.some((binding) => binding.is_default),
+      )
+      ?? identities[0]
+    )?.did ?? '';
   }
 
   syncWorkspaceRoot();

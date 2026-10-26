@@ -1,5 +1,10 @@
 import { mockCall } from './mock';
-import type { DaemonInfo, ServerState, UiLanguage } from '../core/types';
+import type {
+  DaemonInfo,
+  IdentityWithBindings,
+  ServerState,
+  UiLanguage,
+} from '../core/types';
 
 export interface BootInfo {
   serverUrl: string;
@@ -14,6 +19,7 @@ export interface BootInfo {
   state: ServerState;
   latencyMs: number | null;
   daemons: DaemonInfo[];
+  identities: IdentityWithBindings[];
   localDaemonId: string | null;
 }
 

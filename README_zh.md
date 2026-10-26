@@ -34,6 +34,7 @@
 - **Daemon**：HTTP 长轮询或**反向拨号 WebSocket**（NAT 穿透），信号量并发控制（`AGT_MAX_CONCURRENT`），心跳 + 运行时注册。
 - **MCP 工具**：`/mcp/`（Streamable HTTP）同时暴露 `list_runtimes` 与需要 task token 的 Goal `spawn_subagents`。Claude Code 通过项目 `.mcp.json` 接入；Codex 通过全局 `~/.codex/config.toml` 接入；配置只引用 `AGT_TASK_TOKEN` 环境变量，不落真实 token。
 - **Provider 适配器**：命令构造、会话定位、流式 sink、resume 拒绝检测、MCP 配置注入均按 provider 注册——新增 Agent 只需加一行注册表，无需改执行器。
+- **VS Code 客户端**：包含 Server/Daemon 生命周期、Daemon 树、设置、Chat、可视化 SOP 和 Goal 编排。设置页可新增、查看、编辑 Identity 并管理可选的 `(daemon, provider)` 路由偏好；Chat、SOP、Goal 共用同一套 Identity 目录。
 
 ## 环境要求
 

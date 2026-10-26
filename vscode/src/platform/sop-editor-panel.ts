@@ -15,7 +15,12 @@ import {
   serializeSop,
   type ParsedSop,
 } from '../core/sop/yaml-doc';
-import type { RunInfo, UiLanguage } from '../core/types';
+import type {
+  IdentityBindingInfo,
+  IdentityWithBindings,
+  RunInfo,
+  UiLanguage,
+} from '../core/types';
 
 export interface SopBridgeContext {
   extensionUri: vscode.Uri;
@@ -43,6 +48,16 @@ export interface SopDaemonOption {
   online: boolean;
   providers: string[];
   url: string | null;
+}
+
+export interface SopIdentityOption {
+  did: string;
+  name: string;
+  status: string;
+  bindings: Pick<
+    IdentityBindingInfo,
+    'daemon_id' | 'provider' | 'priority' | 'is_default'
+  >[];
 }
 
 interface RunState {
@@ -96,6 +111,7 @@ export class SopEditorPanel {
   private documentListenersBound = false;
   private templates: { path: string; label: string; nodeCount: number }[] = [];
   private daemonCache: { at: number; list: SopDaemonOption[] } = { at: 0, list: [] };
+  private identityCache: { at: number; list: SopIdentityOption[] } = { at: 0, list: [] };
   private runs: RunState[] = [];
   private trackedRunId: string | null = null;
   private selectedRunId: string | null = null;
@@ -108,6 +124,9 @@ export class SopEditorPanel {
 
   async present(view: vscode.WebviewView): Promise<void> {
     this.view = view;
+    // Identity edits happen in Settings; always refresh the role picker
+    // when returning to SOP rather than reusing a short-lived cache.
+    this.identityCache = { at: 0, list: [] };
     view.webview.options = {
       enableScripts: true,
       localResourceRoots: [vscode.Uri.joinPath(this.ctx.extensionUri, 'dist')],
@@ -309,6 +328,7 @@ export class SopEditorPanel {
       templatePath: this.document?.uri.fsPath ?? null,
       templates: this.templates,
       daemons: await this.daemonOptions(),
+      identities: await this.identityOptions(),
       model: this.parsed ? this.parsed.model : null,
       text,
       dirty: this.document?.isDirty ?? false,
@@ -515,6 +535,36 @@ export class SopEditorPanel {
     return this.daemonCache.list;
   }
 
+  private async identityOptions(): Promise<SopIdentityOption[]> {
+    const now = Date.now();
+    if (now - this.identityCache.at < 15_000) {
+      return this.identityCache.list;
+    }
+    try {
+      const identities: IdentityWithBindings[] =
+        await this.ctx.lifecycle.api.identitiesWithBindings();
+      this.identityCache = {
+        at: now,
+        list: identities
+          .filter((identity) => identity.status === 'active')
+          .map((identity) => ({
+            did: identity.did,
+            name: identity.name,
+            status: identity.status,
+            bindings: identity.bindings.map((binding) => ({
+              daemon_id: binding.daemon_id,
+              provider: binding.provider,
+              priority: binding.priority,
+              is_default: binding.is_default,
+            })),
+          })),
+      };
+    } catch {
+      // Keep the last known identities while the server is offline.
+    }
+    return this.identityCache.list;
+  }
+
   /**
    * Discover SOP documents in the workspace. An explicit ``*.sop.yaml``
    * name wins; otherwise the file must look like a SOP (top-level ``name``
@@ -620,6 +670,7 @@ export class SopEditorPanel {
         case 'sop.restartServer': {
           const ok = await this.ctx.lifecycle.restart();
           this.daemonCache = { at: 0, list: [] };
+          this.identityCache = { at: 0, list: [] };
           result = { ok };
           break;
         }

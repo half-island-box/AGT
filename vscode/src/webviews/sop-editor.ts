@@ -30,12 +30,25 @@ interface SopDaemonOption {
   providers: string[];
 }
 
+interface SopIdentityOption {
+  did: string;
+  name: string;
+  status: string;
+  bindings: {
+    daemon_id: string;
+    provider: string;
+    priority: number;
+    is_default: boolean;
+  }[];
+}
+
 interface SopBoot {
   language: UiLanguage;
   state: ServerState;
   templatePath: string | null;
   templates: SopTemplateInfo[];
   daemons: SopDaemonOption[];
+  identities: SopIdentityOption[];
   model: SopDoc | null;
   text: string;
   dirty: boolean;
@@ -946,18 +959,31 @@ function renderIdentities(doc: SopDoc | null): string {
   if (!doc) {
     return '';
   }
+  const managedIdentities = boot?.identities ?? [];
   const rows = doc.identities
-    .map(
-      (identity) => `
+    .map((identity) => {
+      const currentManaged = managedIdentities.some(
+        (item) => item.did === identity.did,
+      );
+      const didOptions = [
+        `<option value="">${tr('sop.field.none')}</option>`,
+        ...managedIdentities.map(
+          (item) => `<option value="${esc(item.did)}" ${item.did === identity.did ? 'selected' : ''}>${esc(item.name)} · ${esc(item.did)}</option>`,
+        ),
+        ...(identity.did && !currentManaged
+          ? [`<option value="${esc(identity.did)}" selected>${esc(identity.did)}</option>`]
+          : []),
+      ].join('');
+      return `
       <div class="agd-sop-identity" data-alias="${esc(identity.alias)}">
         <div class="agd-sop-identity-head">
           <span class="agd-mono">${esc(identity.alias)}</span>
           <button type="button" class="agd-mini-btn" data-identity-delete="${esc(identity.alias)}">×</button>
         </div>
-        <label>${tr('sop.identityDid')}<input class="agd-input agd-mono" data-identity-field="did" data-alias="${esc(identity.alias)}" value="${esc(identity.did)}"></label>
+        <label>${tr('sop.identityDid')}<select class="agd-input agd-mono" data-identity-field="did" data-alias="${esc(identity.alias)}">${didOptions}</select></label>
         <label>${tr('sop.identityProvider')}<input class="agd-input" data-identity-field="provider" data-alias="${esc(identity.alias)}" value="${esc(identity.provider)}"></label>
-      </div>`,
-    )
+      </div>`;
+    })
     .join('');
   return `
   <div class="agd-sop-card">
@@ -1732,15 +1758,27 @@ function wireEvents(): void {
       commitAlias();
     }
   });
-  document.querySelectorAll<HTMLInputElement>('[data-identity-field]').forEach((element) => {
+  document.querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-identity-field]').forEach((element) => {
     element.addEventListener('change', () => {
       const field = element.dataset.identityField as 'did' | 'provider';
-      void apply({
-        kind: 'setIdentityField',
-        alias: element.dataset.alias ?? '',
-        field,
-        value: element.value,
-      });
+      const alias = element.dataset.alias ?? '';
+      void (async () => {
+        await apply({ kind: 'setIdentityField', alias, field, value: element.value });
+        if (field !== 'did' || !element.value) return;
+        const current = model()?.identities.find((item) => item.alias === alias);
+        if (current?.provider) return;
+        const managed = boot?.identities.find((item) => item.did === element.value);
+        const preferred = managed?.bindings.find((binding) => binding.is_default)
+          ?? managed?.bindings[0];
+        if (preferred) {
+          await apply({
+            kind: 'setIdentityField',
+            alias,
+            field: 'provider',
+            value: preferred.provider,
+          });
+        }
+      })();
     });
   });
   document.getElementById('agd-sop-loop-settings-backdrop')?.addEventListener('mousedown', (event) => {
