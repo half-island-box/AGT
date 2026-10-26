@@ -492,6 +492,9 @@ async def _execute_one(
                     # ``IDENTITY.md`` without fetching from the Server.
                     identity_md=task_payload.get("identity_md"),
                     outputs_subdir=task_payload.get("outputs_subdir"),
+                    # Server-managed chat/SOP/Goal state is authoritative in
+                    # SQLite; never create or read the local sessions.json.
+                    use_cwd_session_store=False,
                     progress_cb=_progress_cb,
                 )
             except Exception as exc:

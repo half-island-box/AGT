@@ -29,7 +29,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from websockets.asyncio.server import ServerConnection, serve
@@ -39,7 +38,6 @@ from ..agent_history import (
     find_provider_session_files,
     load_history,
 )
-from ..task.session import CwdSessionStore
 from ..comm.errors import WSRPCUnavailable
 from ..comm.wsrpc_link import WsRpcLink
 from ..server.services.auth_service import TaskToken
@@ -290,21 +288,19 @@ class DaemonWsServer:
         }
 
     async def _handle_session_delete(self, body: dict) -> dict:
-        """Delete a provider transcript and daemon-side cwd session index."""
+        """Delete a provider transcript for a Server-managed session.
+
+        The local direct-chat ``sessions.json`` is deliberately outside
+        this Server/daemon RPC surface and is never read or modified here.
+        """
         provider = body.get("provider")
         session_id = body.get("session_id")
-        cwd = body.get("cwd")
         if not isinstance(provider, str) or not isinstance(session_id, str):
             raise ValueError({
                 "type": "validation_error",
                 "message": "session.delete requires provider + session_id",
             })
         dry_run = bool(body.get("dry_run", False))
-        if cwd is not None and not isinstance(cwd, str):
-            raise ValueError({
-                "type": "validation_error",
-                "message": "session.delete cwd must be a string",
-            })
 
         if dry_run:
             try:
@@ -320,17 +316,12 @@ class DaemonWsServer:
                     "found_paths": [],
                     "cwd_index_found": False,
                 }
-            cwd_index_found = False
-            if cwd:
-                cwd_index_found = await asyncio.to_thread(
-                    self._cwd_session_index_exists, cwd, session_id
-                )
             return {
                 "ok": True,
                 "supported": True,
                 "dry_run": True,
                 "found_paths": [str(path) for path in found_paths],
-                "cwd_index_found": cwd_index_found,
+                "cwd_index_found": False,
                 "missing": not found_paths,
             }
 
@@ -352,27 +343,12 @@ class DaemonWsServer:
                 "deleted_paths": [str(path) for path in result.deleted_paths],
             })
 
-        cwd_index_deleted = False
-        if cwd:
-            cwd_index_deleted = await asyncio.to_thread(
-                self._delete_cwd_session_index, cwd, session_id, provider
-            )
         return {
             "ok": True,
             "not_implemented": False,
             "deleted_paths": [str(path) for path in result.deleted_paths],
-            "cwd_index_deleted": cwd_index_deleted,
+            "cwd_index_deleted": False,
         }
-
-    @staticmethod
-    def _delete_cwd_session_index(cwd: str, session_id: str, provider: str) -> bool:
-        return CwdSessionStore.load_or_create(
-            Path(cwd), provider=provider
-        ).delete(session_id)
-
-    @staticmethod
-    def _cwd_session_index_exists(cwd: str, session_id: str) -> bool:
-        return CwdSessionStore.load_or_create(Path(cwd)).get(session_id) is not None
 
     def wake_claim_loop(self) -> None:
         """Wake the daemon's claim loop immediately.

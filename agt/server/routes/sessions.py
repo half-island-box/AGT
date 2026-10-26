@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
-from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel
@@ -30,7 +29,6 @@ from ...comm.errors import RPCRejected, WSRPCUnavailable, WSRPCUncertain
 from ...net import host_of_url, is_local_host
 from ..database import get_db
 from ..models import JobModel, SessionModel, StepModel
-from ...task.session import CwdSessionStore
 from ..schemas import SessionHistoryOut, SessionResolveOut
 from ..services.artifact_service import artifact_to_out, artifacts_for_job
 from ..services.job_service import cancel_job
@@ -241,11 +239,11 @@ async def _delete_local_session(
     session_id: str,
     cwd: str | None,
 ) -> dict:
-    """Run provider/cwd deletion in the Server process for a local daemon.
+    """Run provider transcript deletion in the Server process.
 
-    This same-machine fallback exists because HTTP long-poll local daemons
-    do not have a reverse-dial link. It uses the provider files and cwd
-    store owned by the same user/home as the daemon.
+    Local direct chat indexes are intentionally outside the Server's
+    authority; Server-managed sessions live only in SQLite and provider
+    transcript files.
     """
     result = await asyncio.to_thread(delete_provider_session, provider, session_id)
     if not result.supported:
@@ -259,17 +257,12 @@ async def _delete_local_session(
     if result.errors:
         raise RuntimeError("; ".join(result.errors))
 
-    cwd_index_deleted = False
-    if cwd:
-        cwd_index_deleted = await asyncio.to_thread(
-            _delete_local_cwd_index, cwd, session_id, provider
-        )
     return {
         "ok": True,
         "not_implemented": False,
         "deleted_paths": [str(path) for path in result.deleted_paths],
         "missing": result.missing,
-        "cwd_index_deleted": cwd_index_deleted,
+        "cwd_index_deleted": False,
     }
 
 
@@ -292,29 +285,14 @@ async def _probe_local_session(
             "found_paths": [],
             "cwd_index_found": False,
         }
-    cwd_index_found = False
-    if cwd:
-        cwd_index_found = await asyncio.to_thread(
-            _local_cwd_index_exists, cwd, session_id
-        )
     return {
         "ok": True,
         "supported": True,
         "dry_run": True,
         "found_paths": [str(path) for path in found_paths],
-        "cwd_index_found": cwd_index_found,
+        "cwd_index_found": False,
         "missing": not found_paths,
     }
-
-
-def _local_cwd_index_exists(cwd: str, session_id: str) -> bool:
-    return CwdSessionStore.load_or_create(Path(cwd)).get(session_id) is not None
-
-
-def _delete_local_cwd_index(cwd: str, session_id: str, provider: str) -> bool:
-    return CwdSessionStore.load_or_create(
-        Path(cwd), provider=provider
-    ).delete(session_id)
 
 
 async def _probe_remote_session(

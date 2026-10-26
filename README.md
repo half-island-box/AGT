@@ -169,6 +169,8 @@ environment variables, and exit codes.
 - **Server** owns coordination, persistence, routing, MCP, and artifacts.
 - **Daemon** owns local process execution, concurrency, and heartbeats.
 - **Agent CLIs** run as fresh subprocesses; sessions remain provider-native.
+- **SQLite** is the source of truth for all Server-managed runs.
+  `sessions.json` indexes are used only by local direct `agt chat`.
 
 ## Development
 

@@ -1,10 +1,14 @@
-"""CwdSessionStore — cwd-scoped session index for ``agt chat``.
+"""CwdSessionStore — local direct-chat index for bare ``agt chat``.
 
 Phase 4 chat-multisession: instead of one ``sessions.json`` per task
 (PK = task_id), we keep one file **per cwd**. Each chat session inside
 that cwd is its own entry — multiple sessions coexist, none overwrite
 each other, and ``agt chat --list`` / ``--resume <sid>`` can address
 any of them by ``session_id``.
+
+This store is intentionally limited to the local direct-chat path
+(``agt chat`` without ``--daemon``). Server-managed chat, SOP and Goal
+tasks use SQLite as their authoritative run/session store.
 
 File layout:
 
@@ -80,7 +84,7 @@ class SessionEntry:
 
 @dataclass
 class CwdSessionStore:
-    """Append-only session index scoped to one cwd.
+    """Local direct-chat session index scoped to one cwd.
 
     Holds entries in memory and persists to ``<cwd>/.agt/sessions.json``
     on every mutation. Designed for small N (single-user, per-project);

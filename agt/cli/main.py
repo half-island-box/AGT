@@ -553,6 +553,7 @@ def _chat_turn_local(
             resume_session_id=resume_session_id,
             first_prompt=first_prompt,
             turn_index=turn_index,
+            use_cwd_session_store=True,
         )
 
     result = asyncio.run(_run())
@@ -673,11 +674,10 @@ def _chat_turn_remote(
     ``/input``); this function only streams/waits for ``step_id`` to
     finish.
 
-    Remote session state belongs to the daemon, not this cwd — the session
-    index is written on the daemon's machine (``<agent_cwd>/.agt/
-    sessions.json``) and by the Server (``StepModel``); the local cwd store
-    is deliberately left untouched. Use ``agt chat --list --daemon=X`` to
-    read it back from the Server.
+    Remote and local-daemon chat are Server-managed: SQLite is the
+    authoritative session index. Neither the client cwd nor the daemon
+    cwd touches ``sessions.json`` on this path. Use
+    ``agt chat --list --daemon=X`` to read it back from the Server.
     """
     async def _remote() -> dict | None:
         async with ServerClient(base_url=server_url, daemon_id="cli-direct") as client:
@@ -794,19 +794,11 @@ def chat(
     If ``--provider`` is omitted, the first available agent is auto-picked.
 
     The agent's working directory is always the user's cwd at chat start.
-    No per-task meta subdir is created for bare ``agt chat``; the session
-    index lives at ``<cwd>/.agt/sessions.json`` and that's it. ``--work-dir``
-    and ``--no-work-dir`` still create their respective dirs (explicit
-    overrides).
-
-    Sessions are stored per cwd in ``<cwd>/.agt/sessions.json``. Each
-    chat session gets its own entry (no overwrite) tagged with the
-    provider that created it. ``--list`` shows them all (with a
-    ``PROVIDER`` column); ``--list --provider X`` filters to one agent.
-    ``--resume <sid>`` restores one (and spawns the agent with the
-    matching ``--resume`` flag so its own state is recovered).
-    Without either flag, a **new** session is started and recorded on
-    exit.
+    For local direct chat (no ``--daemon``), sessions are stored per cwd
+    in ``<cwd>/.agt/sessions.json``; that file supports ``--list``,
+    ``--resume`` and multi-turn continuity. For Server-managed chat
+    (``--daemon``), SQLite is authoritative and no ``sessions.json`` is
+    read or written.
     """
     identity_did = _coerce_identity_did(identity_did)
     cwd = Path(os.getcwd())

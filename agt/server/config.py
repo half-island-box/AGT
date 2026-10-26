@@ -105,6 +105,8 @@ class ServerConfig:
     host: str = "0.0.0.0"
     port: int = 8420
     db_path: str = field(default_factory=lambda: str(Path.home() / ".agt" / "agt.db"))
+    # Legacy Phase 1 migration input. Retained for CLI/config compatibility,
+    # but the Server no longer reads or writes this file automatically.
     sessions_json_path: str = field(
         default_factory=lambda: str(Path.home() / ".agt" / "sessions.json")
     )

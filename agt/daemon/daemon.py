@@ -80,6 +80,7 @@ class Daemon:
         identity_did: str | None = None,
         identity_md: str | None = None,
         outputs_subdir: str | None = None,
+        use_cwd_session_store: bool = False,
         progress_cb=None,
     ) -> TaskResult:
         """Execute one prompt against the named provider.
@@ -87,9 +88,9 @@ class Daemon:
         ``task_id`` lets callers (e.g. ``agt chat``) keep the same logical task
         across multiple runs so the same Claude Code session is resumed.
 
-        ``resume_session_id`` overrides cwd-store lookup; used by the
-        background daemon when Server provides the session pointer in the
-        task payload. Chat's ``--resume`` flow also passes it explicitly.
+        ``resume_session_id`` is the provider session pointer. Server-managed
+        tasks receive it from SQLite. Local direct chat may also pass it
+        explicitly.
 
         ``interactive=True`` makes the agent inherit the parent's stdio so
         it sees a TTY (some CLIs like ``codex`` refuse to run otherwise).
@@ -98,13 +99,11 @@ class Daemon:
 
         ``agent_cwd`` is the directory the agent subprocess runs in (its
         ``cwd``). Defaults to the user's cwd at submit time; falls back to
-        ``agt_meta_dir`` when ``None`` (legacy single-path mode). Also
-        keys the cwd-scoped ``CwdSessionStore``.
+        ``agt_meta_dir`` when ``None`` (legacy single-path mode).
 
-        ``agt_meta_dir`` is where AGT writes per-task state (claim state,
-        etc.). Defaults to ``work_dir_root / provider / task_id`` when
-        ``None`` (legacy daemon-local layout). The chat session index is
-        separate, at ``<agent_cwd>/.agt/sessions.json``.
+        ``use_cwd_session_store`` is deliberately explicit: only local
+        direct chat enables ``<cwd>/.agt/sessions.json``. Server-managed
+        chat, SOP and Goal tasks use SQLite and never touch that file.
 
         ``first_prompt`` is the original prompt of the chat session (used
         to label the session in ``agt chat --list``). ``turn_index`` is the
@@ -136,8 +135,9 @@ class Daemon:
         elif agent_cwd is not None:
             # Caller supplied the agent's cwd directly (e.g. bare ``agt chat``,
             # which stopped creating ``<cwd>/.agt/tasks/<id>/`` in this
-            # iteration). No per-task meta dir — the session index lives at
-            # ``<agent_cwd>/.agt/sessions.json``. We deliberately do NOT fall
+            # iteration). No per-task meta dir. Local direct chat may use
+            # ``<agent_cwd>/.agt/sessions.json`` when explicitly enabled.
+            # We deliberately do NOT fall
             # back to ``work_dir_root`` here: that would silently re-create
             # the dead subdir under the daemon's home on a different machine.
             meta_dir = None
@@ -174,10 +174,15 @@ class Daemon:
         # ``~/.agt/identities/<slug>/AGENTS.md`` from disk — covers
         # daemons running outside the server path.
 
-        session_store = self._resolve_session_store(effective_agent_cwd, provider)
-        resume_session_id = self._resolve_resume_session_id(
-            session_store, resume_session_id, interactive, turn_index,
+        session_store = (
+            self._resolve_session_store(effective_agent_cwd, provider)
+            if use_cwd_session_store
+            else None
         )
+        if session_store is not None:
+            resume_session_id = self._resolve_resume_session_id(
+                session_store, resume_session_id, interactive, turn_index,
+            )
 
         task = Task(
             prompt=prompt,
@@ -199,7 +204,11 @@ class Daemon:
         # Update the session store based on the outcome (only when caller
         # opted into session continuity by passing a task_id AND we
         # captured a session_id, which requires pipe mode).
-        if task_id is not None and not interactive:
+        if (
+            session_store is not None
+            and task_id is not None
+            and not interactive
+        ):
             self._record_session_outcome(
                 session_store,
                 task_id=effective_task_id,

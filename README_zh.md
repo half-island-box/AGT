@@ -165,6 +165,7 @@ Server 默认监听 `127.0.0.1:8420`，OpenAPI 文档位于
 - **Server** 负责协调、持久化、选路、MCP 和 Artifact。
 - **Daemon** 负责本地进程执行、并发控制和心跳。
 - **Agent CLI** 以独立子进程运行，会话连续性由 Provider 负责。
+- **SQLite** 是所有 Server 管理运行的信息源；`sessions.json` 仅用于本机直连 `agt chat`。
 
 ## 开发
 
