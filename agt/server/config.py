@@ -7,32 +7,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..ids import daemon_id_from_url
+from ..server_secret import (
+    default_server_secret_path as _default_secret_path,
+    load_server_secret as _load_server_secret,
+)
 
 
 class ServerConfigError(RuntimeError):
     """Raised when the server configuration is incomplete or invalid."""
-
-
-def _default_secret_path() -> Path:
-    """Return the canonical server secret file path."""
-    return Path.home() / ".agt" / "server.secret"
-
-
-def _load_server_secret() -> str:
-    """Load the server secret: env var first, then ~/.agt/server.secret.
-
-    Returns the secret string if found, otherwise an empty string.
-    """
-    env_secret = os.environ.get("AGT_SERVER_SECRET", "").strip()
-    if env_secret:
-        return env_secret
-    path = _default_secret_path()
-    if path.exists():
-        try:
-            return path.read_text(encoding="utf-8").strip()
-        except OSError:
-            return ""
-    return ""
 
 
 @dataclass
