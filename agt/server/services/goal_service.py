@@ -52,9 +52,9 @@ async def submit_goal(
     """Create the goal root Job; raises ValueError/SelectionError on bad input.
 
     Prechecks (fail at submit, never silent-pending):
-    - ``identity_did`` → ``select_runtime`` (exists + active + bound,
-      resolves provider/target); the resolved target gets a liveness
-      check like ``POST /api/tasks/submit``.
+    - ``identity_did`` → ``select_runtime`` (exists + active; bindings are
+      optional preferences, resolves provider/target); the resolved
+      target gets a liveness check like ``POST /api/tasks/submit``.
     - explicit ``(provider, daemon)`` pin → live runtime required.
     - no identity AND no daemon pin → at least one live runtime must
       offer the provider (review fix: otherwise the root pends forever).
@@ -68,7 +68,12 @@ async def submit_goal(
     effective_provider = provider or DEFAULT_PROVIDER
     effective_target = daemon_id or None
     if identity_did:
-        result = await select_runtime(identity_did, provider, "local", db)
+        result = await select_runtime(
+            identity_did,
+            provider or DEFAULT_PROVIDER,
+            daemon_id,
+            db,
+        )
         effective_provider = result.provider
         effective_target = result.daemon_id
 

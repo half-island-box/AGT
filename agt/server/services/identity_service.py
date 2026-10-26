@@ -19,7 +19,13 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from agt.server.models import IdentityModel
+from agt.server.models import (
+    IdentityBindingModel,
+    IdentityModel,
+    RuntimeModel,
+)
+
+from .runtime_service import is_stale
 
 log = logging.getLogger(__name__)
 
@@ -338,6 +344,75 @@ async def list_identities(
     return [_identity_to_dict(ident) for ident in identities]
 
 
+async def list_identity_overviews(
+    daemon_id: str | None = None,
+    status: str | None = None,
+    db: AsyncSession | None = None,
+) -> list[dict[str, Any]]:
+    """List identities with their bindings and runtime liveness in one pass.
+
+    The settings UI needs both objects together. Returning a dedicated
+    overview avoids the existing client-side ``1 + N`` binding requests.
+    """
+    if db is None:
+        raise ValueError("Database session required")
+
+    identities = await list_identities(
+        daemon_id=daemon_id,
+        status=status,
+        db=db,
+    )
+    if not identities:
+        return []
+
+    dids = [identity["did"] for identity in identities]
+    bindings = (
+        await db.execute(
+            select(IdentityBindingModel)
+            .where(IdentityBindingModel.identity_did.in_(dids))
+            .order_by(IdentityBindingModel.id.asc())
+        )
+    ).scalars().all()
+    daemon_ids = {binding.daemon_id for binding in bindings}
+    runtimes = []
+    if daemon_ids:
+        runtimes = (
+            await db.execute(
+                select(RuntimeModel).where(
+                    RuntimeModel.daemon_id.in_(daemon_ids)
+                )
+            )
+        ).scalars().all()
+
+    runtime_by_pair = {
+        (runtime.daemon_id, runtime.provider): runtime for runtime in runtimes
+    }
+    bindings_by_did: dict[str, list[dict[str, Any]]] = {}
+    for binding in bindings:
+        runtime = runtime_by_pair.get((binding.daemon_id, binding.provider))
+        bindings_by_did.setdefault(binding.identity_did, []).append({
+            "id": binding.id,
+            "identity_did": binding.identity_did,
+            "daemon_id": binding.daemon_id,
+            "provider": binding.provider,
+            "priority": binding.priority,
+            "is_default": bool(binding.is_default),
+            "created_at": binding.created_at,
+            "runtime_online": (
+                runtime is not None and not is_stale(runtime.last_seen)
+            ),
+            "last_seen": runtime.last_seen if runtime is not None else None,
+        })
+
+    return [
+        {
+            **identity,
+            "bindings": bindings_by_did.get(identity["did"], []),
+        }
+        for identity in identities
+    ]
+
+
 async def update_identity(
     did: str,
     payload: dict[str, Any],
@@ -562,6 +637,7 @@ __all__ = [
     "create_identity",
     "get_identity",
     "list_identities",
+    "list_identity_overviews",
     "normalize_identity_did",
     "update_identity",
     "deprecate_identity",

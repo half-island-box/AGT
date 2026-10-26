@@ -1,8 +1,8 @@
 """Binding service layer — identity ↔ runtime mappings (Phase 4 Step 2).
 
-A binding says "this identity may run on that daemon's provider". Bindings
-are the input to the selection algorithm (selection_service.select_runtime);
-they carry no runtime behavior of their own.
+A binding records a routing preference: "prefer this identity on that
+daemon's provider". It is not an allow-list. Selection falls back to the
+live runtime registry when no matching binding exists.
 
 Key invariant (design D2): at most one binding per identity has
 ``is_default=true``. ``set_default_binding`` and ``create_binding(...,
@@ -212,10 +212,44 @@ async def set_default_binding(
     return _binding_to_dict(binding)
 
 
+async def update_binding(
+    did: str,
+    binding_id: int,
+    payload: dict[str, Any],
+    db: AsyncSession,
+) -> dict[str, Any] | None:
+    """Update priority/default in place; ``None`` means the binding is absent."""
+    result = await db.execute(
+        select(IdentityBindingModel).where(
+            IdentityBindingModel.id == binding_id,
+            IdentityBindingModel.identity_did == did,
+        )
+    )
+    binding = result.scalar_one_or_none()
+    if binding is None:
+        return None
+
+    if payload.get("priority") is not None:
+        binding.priority = int(payload["priority"])
+
+    is_default = payload.get("is_default")
+    if is_default is True:
+        await _unflag_defaults(did, db)
+        binding.is_default = True
+    elif is_default is False:
+        binding.is_default = False
+
+    await db.commit()
+    await db.refresh(binding)
+    log.info("Updated binding %d for identity %s", binding_id, did)
+    return _binding_to_dict(binding)
+
+
 __all__ = [
     "create_binding",
     "list_bindings",
     "list_bindings_by_daemon",
     "delete_binding",
     "set_default_binding",
+    "update_binding",
 ]

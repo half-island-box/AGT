@@ -460,10 +460,10 @@ def _pick_provider(
 )
 @click.option(
     "--identity", "identity_did", default=None,
-    help="Identity for this task. Server-side: select_runtime resolves the "
-         "runtime (using --provider as runtime_hint) and rejects if the "
-         "identity isn't bound to the chosen runtime. Local-only mode "
-         "(no --daemon) is rejected: binding lives on the Server.",
+    help="Identity for this task. Requires --daemon so the Server can "
+         "resolve a live runtime. Bindings are optional routing "
+         "preferences; they do not restrict which provider may use the "
+         "identity.",
 )
 def run(
     prompt: str,
@@ -475,11 +475,11 @@ def run(
     identity_did: str | None,
 ) -> None:
     if identity_did is not None and target_daemon_id is None:
-        # Identity resolution requires the Server's binding DB; refuse
-        # the local fast-path rather than silently doing nothing useful.
+        # Identity resolution requires Server runtime discovery; refuse
+        # the direct local fast-path rather than silently skipping it.
         click.echo(
             "Error: --identity requires --daemon "
-            "(binding records live on the Server; local execution can't validate).",
+            "(identity runtime resolution happens on the Server).",
             err=True,
         )
         sys.exit(2)
@@ -780,7 +780,7 @@ def chat(
     if identity_did is not None and target_daemon_id is None:
         click.echo(
             "Error: --identity requires --daemon "
-            "(binding records live on the Server; local execution can't validate).",
+            "(identity runtime resolution happens on the Server).",
             err=True,
         )
         sys.exit(2)

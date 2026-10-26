@@ -17,10 +17,13 @@ from ..database import get_db
 from ..schemas import (
     IdentityBindingCreate,
     IdentityBindingOut,
+    IdentityBindingUpdate,
     IdentityCreate,
     IdentityOut,
+    IdentityOverviewOut,
     IdentityUpdate,
     ListBindingsResponse,
+    ListIdentitiesOverviewResponse,
     ListIdentitiesResponse,
     ResolveRequest,
     ResolveResponse,
@@ -30,6 +33,7 @@ from ..services.binding_service import (
     delete_binding,
     list_bindings,
     set_default_binding,
+    update_binding,
 )
 from ..services.identity_service import (
     create_identity,
@@ -37,6 +41,7 @@ from ..services.identity_service import (
     deprecate_identity,
     get_identity,
     list_identities,
+    list_identity_overviews,
     revoke_identity,
     sync_agent_md,
     update_identity,
@@ -54,6 +59,23 @@ def _root_dir() -> Path:
 def _to_out(identity: dict) -> IdentityOut:
     """Convert an identity dict to IdentityOut response model."""
     return IdentityOut(**identity)
+
+
+@router.get("/overview", response_model=ListIdentitiesOverviewResponse)
+async def list_identities_overview_route(
+    daemon_id: str | None = None,
+    status_filter: str | None = None,
+    db: AsyncSession = Depends(get_db),
+) -> ListIdentitiesOverviewResponse:
+    """List identities with bindings and runtime liveness embedded."""
+    identities = await list_identity_overviews(
+        daemon_id=daemon_id,
+        status=status_filter,
+        db=db,
+    )
+    return ListIdentitiesOverviewResponse(
+        identities=[IdentityOverviewOut(**identity) for identity in identities]
+    )
 
 
 @router.get("", response_model=ListIdentitiesResponse)
@@ -306,6 +328,31 @@ async def delete_binding_route(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"binding {binding_id} not found for identity {did}",
         )
+
+
+@router.patch(
+    "/{did}/bindings/{binding_id}",
+    response_model=IdentityBindingOut,
+)
+async def update_binding_route(
+    did: str,
+    binding_id: int,
+    payload: IdentityBindingUpdate,
+    db: AsyncSession = Depends(get_db),
+) -> IdentityBindingOut:
+    """Update a binding's priority or default flag in place."""
+    binding = await update_binding(
+        did,
+        binding_id,
+        payload.model_dump(),
+        db,
+    )
+    if binding is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"binding {binding_id} not found for identity {did}",
+        )
+    return IdentityBindingOut(**binding)
 
 
 @router.post("/{did}/bindings/{binding_id}/default", response_model=IdentityBindingOut)

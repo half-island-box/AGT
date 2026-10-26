@@ -60,9 +60,9 @@ class SubmitTaskRequest(BaseModel):
     # Server persists it ONLY for local daemons; remote daemons supply
     # their own fallback path on the receiving side.
     work_dir: str | None = None
-    # Phase 4 Step 4: identity for this task. When set, the server runs
-    # ``select_runtime`` to resolve the actual (provider, daemon_id) and
-    # rejects the submit if the identity isn't bound to that runtime.
+    # Identity for this task. When set, the server resolves the actual
+    # (provider, daemon_id). Bindings are routing preferences only; the
+    # identity may use any matching live runtime.
     identity_did: str | None = None
     # cwd injection (Phase 4 workdir supplement): the agent subprocess's
     # working directory on the daemon machine. Also where IDENTITY.md /
@@ -455,6 +455,13 @@ class IdentityBindingCreate(BaseModel):
     is_default: bool = False
 
 
+class IdentityBindingUpdate(BaseModel):
+    """Partial update for an existing binding."""
+
+    priority: int | None = None
+    is_default: bool | None = None
+
+
 class IdentityBindingOut(BaseModel):
     """Binding response."""
 
@@ -467,10 +474,29 @@ class IdentityBindingOut(BaseModel):
     created_at: str
 
 
+class IdentityBindingOverviewOut(IdentityBindingOut):
+    """Binding plus the current runtime liveness hint for settings UI."""
+
+    runtime_online: bool
+    last_seen: str | None = None
+
+
+class IdentityOverviewOut(IdentityOut):
+    """Identity with all optional runtime routing preferences."""
+
+    bindings: list[IdentityBindingOverviewOut] = []
+
+
 class ListIdentitiesResponse(BaseModel):
     """Response listing identities."""
 
     identities: list[IdentityOut]
+
+
+class ListIdentitiesOverviewResponse(BaseModel):
+    """Identity list with bindings embedded to avoid client-side N+1 reads."""
+
+    identities: list[IdentityOverviewOut]
 
 
 class ListBindingsResponse(BaseModel):
@@ -491,7 +517,7 @@ class ResolveRequest(BaseModel):
 
     identity_did: str | None = None
     runtime_hint: str | None = None
-    daemon_id: str = "local"
+    daemon_id: str | None = None
 
 
 class DaemonProviderOut(BaseModel):
@@ -670,8 +696,12 @@ __all__ = [
     "IdentityOut",
     "IdentityUpdate",
     "IdentityBindingCreate",
+    "IdentityBindingUpdate",
     "IdentityBindingOut",
+    "IdentityBindingOverviewOut",
+    "IdentityOverviewOut",
     "ListIdentitiesResponse",
+    "ListIdentitiesOverviewResponse",
     "ListBindingsResponse",
     "ResolveRequest",
     "ResolveResponse",

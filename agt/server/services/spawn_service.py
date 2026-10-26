@@ -30,7 +30,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...a2a import DataPart, FilePart, Message, TextPart, render_message
 from ..models import (
-    IdentityBindingModel,
     IdentityModel,
     JobModel,
     SpawnBatchModel,
@@ -561,20 +560,10 @@ async def _create_child(
     provider = parent_job.provider
     unknown_identity: str | None = None
     if identity:
-        binding = (
-            await db.execute(
-                select(IdentityBindingModel)
-                .where(IdentityBindingModel.identity_did == identity)
-                .order_by(IdentityBindingModel.priority.desc())
-                .limit(1)
-            )
-        ).scalars().first()
         identity_row = await db.get(IdentityModel, identity)
-        if binding is None or identity_row is None:
+        if identity_row is None or identity_row.status != "active":
             unknown_identity = identity
             identity = None
-        else:
-            provider = binding.provider
 
     req_daemon = envelope.get("daemon_id")
     req_provider = envelope.get("provider")

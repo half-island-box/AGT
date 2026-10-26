@@ -55,6 +55,8 @@ class SopNodeStatus(BaseModel):
     artifacts: list[str] = []
     artifact_details: list[SopArtifactSummary] = []
     provider: str | None = None
+    identity_did: str | None = None
+    daemon_id: str | None = None
     session_id: str | None = None
 
 
@@ -262,6 +264,8 @@ async def sop_status(
                     for a in arts
                 ],
                 provider=provider,
+                identity_did=job.identity_did,
+                daemon_id=job.target_daemon_id or meta.get("explicit_daemon"),
                 session_id=job_to_session.get(job.job_id),
             )
         )
