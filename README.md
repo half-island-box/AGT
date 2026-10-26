@@ -96,7 +96,7 @@ agt daemon stop
 agt server stop
 ```
 
-`agt server init` persists `AGT_SERVER_SECRET` to `~/.agt/server.secret` with `0o600` permissions; `agt server start` auto-discovers it. If you prefer environment variables, set `AGT_SERVER_SECRET` manually and skip the init step.
+`agt server init` persists `AGT_SERVER_SECRET` to `~/.agt/server.secret` with `0o600` permissions; both `agt server start` and `agt daemon start` auto-discover it. `AGT_SERVER_SECRET` still takes precedence when explicitly set.
 
 Default: server on `127.0.0.1:8420`, OpenAPI at [http://127.0.0.1:8420/docs](http://127.0.0.1:8420/docs).
 
@@ -256,7 +256,7 @@ agt/
 | Variable | Default | Purpose |
 |---|---|---|
 | `AGT_SERVER_URL` | `http://127.0.0.1:8420` | Server used by CLI and daemon. |
-| `AGT_SERVER_SECRET` | — | Shared HMAC secret (required by server). |
+| `AGT_SERVER_SECRET` | `~/.agt/server.secret` fallback | Shared HMAC secret used by server and daemon. |
 | `AGT_SERVER_PORT` | `8420` | Server port. |
 | `AGT_DB_PATH` | `~/.agt/agt.db` | SQLite database location. |
 | `AGT_MAX_CONCURRENT` | `1` | Max concurrent agent tasks per daemon; overrides `~/.agt/daemon.json`. |

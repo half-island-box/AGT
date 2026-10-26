@@ -99,6 +99,47 @@ def test_no_token_when_secret_unset() -> None:
     assert "AGT_TASK_ID" not in env
 
 
+def test_daemon_secret_file_injects_verifiable_task_token(
+    tmp_path, monkeypatch,
+) -> None:
+    """Daemon's shared-file secret fallback enables MCP/callback tokens."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.delenv("AGT_SERVER_SECRET", raising=False)
+    secret_path = fake_home / ".agt" / "server.secret"
+    secret_path.parent.mkdir(parents=True)
+    secret_path.write_text(SECRET, encoding="utf-8")
+
+    cfg = DaemonConfig.from_env()
+    task = Task(
+        prompt="noop",
+        provider="claude",
+        task_id="e2e-task-file-secret",
+        work_dir=tmp_path / "workspace",
+    )
+    env = TaskExecutor(  # type: ignore[arg-type]
+        runtime=None, config=cfg,
+    )._build_env(task)
+
+    claims = TaskToken.verify(env["AGT_TASK_TOKEN"], SECRET)
+    assert claims["task_id"] == "e2e-task-file-secret"
+
+
+def test_daemon_secret_env_overrides_file(tmp_path, monkeypatch) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("AGT_SERVER_SECRET", "env-secret")
+    secret_path = fake_home / ".agt" / "server.secret"
+    secret_path.parent.mkdir(parents=True)
+    secret_path.write_text("file-secret", encoding="utf-8")
+
+    cfg = DaemonConfig.from_env()
+
+    assert cfg.server_secret == "env-secret"
+
+
 def test_daemon_session_not_leaked() -> None:
     """Daemon's own runtime/connection info must NOT appear in subprocess env."""
     env = _make_env()

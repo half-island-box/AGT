@@ -23,6 +23,7 @@ from ..comm.wsrpc_link import WsRpcLink
 from ..probe.scanner import AgentProbe
 from ..runtime.models import Runtime
 from ..server.services.auth_service import TaskToken
+from ..server_secret import default_server_secret_path
 from .config import DaemonConfig, DaemonConfigError
 from .daemon import Daemon
 from .local_server import LocalResourceServer
@@ -861,6 +862,12 @@ def cmd_start(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    if not config.server_secret:
+        log.warning(
+            "AGT_SERVER_SECRET is not configured and %s is missing; "
+            "task-token callbacks and MCP spawn will be unavailable",
+            default_server_secret_path(),
+        )
     if args.server_url:
         config.server_url = args.server_url
     try:

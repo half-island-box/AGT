@@ -1580,8 +1580,9 @@ def server_init(force: bool) -> None:
 
     This is the fastest way to get a local Server running: it generates a
     secure random secret, persists it, and makes it auto-discoverable by
-    ``agt server start`` without exporting an environment variable every
-    time. Run it once per machine (or once per ``~/.agt`` directory).
+    both ``agt server start`` and ``agt daemon start`` without exporting
+    an environment variable every time. Run it once per machine (or once
+    per ``~/.agt`` directory).
     """
     import secrets
 
@@ -1601,7 +1602,8 @@ def server_init(force: bool) -> None:
         click.echo(f"Generated server secret at {secret_path}")
 
     click.echo(
-        "\nThe secret is now auto-loaded by `agt server start`. "
+        "\nThe secret is now auto-loaded by `agt server start` and "
+        "`agt daemon start`. "
         "If you prefer environment variables, run:"
     )
     click.echo(

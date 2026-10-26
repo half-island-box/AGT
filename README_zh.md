@@ -83,7 +83,7 @@ agt chat --resume <session-id> --daemon <daemon-id>
 ## Server / Daemon 模式
 
 ```bash
-export AGT_SERVER_SECRET="$(openssl rand -hex 32)"
+agt server init
 
 agt server start --detach
 agt daemon start --detach
@@ -94,6 +94,9 @@ agt task status <task-id>
 agt daemon stop
 agt server stop
 ```
+
+`agt server init` 会把共享 secret 写入 `~/.agt/server.secret`；`agt server start` 和
+`agt daemon start` 都会自动读取。显式设置的 `AGT_SERVER_SECRET` 优先级更高。
 
 默认 Server 监听 `127.0.0.1:8420`，OpenAPI 文档在 [http://127.0.0.1:8420/docs](http://127.0.0.1:8420/docs)。
 
@@ -200,7 +203,7 @@ agt/
 | 变量                    | 默认值                    | 说明                                                  |
 | ----------------------- | ------------------------- | ----------------------------------------------------- |
 | `AGT_SERVER_URL`      | `http://127.0.0.1:8420` | CLI 和 Daemon 使用的 Server 地址。                    |
-| `AGT_SERVER_SECRET`   | —                        | 共享 HMAC 密钥（Server 必需）。                       |
+| `AGT_SERVER_SECRET`   | 回退 `~/.agt/server.secret` | Server 与 Daemon 共用的 HMAC 密钥。                |
 | `AGT_SERVER_PORT`     | `8420`                  | Server 端口。                                         |
 | `AGT_DB_PATH`         | `~/.agt/agt.db`         | SQLite 数据库位置。                                   |
 | `AGT_MAX_CONCURRENT`  | `1`                     | 每个 Daemon 最大并发任务数。                          |

@@ -16,6 +16,7 @@ from typing import Any
 
 from ..ids import AGT_DAEMON_NAMESPACE, daemon_id_from_url
 from ..net import host_of_url as _host_of_url, is_local_host as _is_local_host
+from ..server_secret import load_server_secret
 
 # Re-exported for backward compatibility (CLI and tests import it from
 # here); the canonical definition lives in ``agt.ids``.
@@ -654,7 +655,7 @@ class DaemonConfig:
         resolved = resolve_daemon_settings()
         return cls(
             server_base_url=os.environ.get("AGT_SERVER_URL"),
-            server_secret=os.environ.get("AGT_SERVER_SECRET", ""),
+            server_secret=load_server_secret(),
             daemon_id=daemon_id,
             daemon_name=daemon_name,
             daemon_url=daemon_url or "",
