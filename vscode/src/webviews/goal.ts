@@ -12,6 +12,7 @@ import type {
   IdentityWithBindings,
   DaemonInfo,
   JobLogInfo,
+  SopNodeLogStep,
   TaskStatusInfo,
   ServerState,
   UiLanguage,
@@ -66,9 +67,17 @@ let viewportWidth = window.innerWidth;
 let showInspector = viewportWidth >= INSPECTOR_THRESHOLD;
 let modalNodeId: string | null = null;
 let runMetaModalOpen = false;
+let zoomedLogTaskId: string | null = null;
 let sidebarWidth = DEFAULT_SIDEBAR_WIDTH;
 let sidebarCollapsed = false;
 let viewportListenerWired = false;
+
+type GoalLogScope = 'inspector' | 'modal' | 'zoom';
+
+interface ScrollSnapshot {
+  top: number;
+  left: number;
+}
 
 function tr(key: MessageKey, vars?: Record<string, string | number>): string {
   return t(lang, key, vars);
@@ -80,6 +89,29 @@ function esc(value: unknown): string {
     .replaceAll('<', '&lt;')
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;');
+}
+
+function captureGoalScroll(): Record<string, ScrollSnapshot> {
+  const positions: Record<string, ScrollSnapshot> = {};
+  document.querySelectorAll<HTMLElement>('[data-goal-scroll]').forEach((element) => {
+    const key = element.dataset.goalScroll;
+    if (!key) return;
+    positions[key] = {
+      top: element.scrollTop,
+      left: element.scrollLeft,
+    };
+  });
+  return positions;
+}
+
+function restoreGoalScroll(positions: Record<string, ScrollSnapshot>): void {
+  document.querySelectorAll<HTMLElement>('[data-goal-scroll]').forEach((element) => {
+    const key = element.dataset.goalScroll;
+    const position = key ? positions[key] : undefined;
+    if (!position) return;
+    element.scrollTop = position.top;
+    element.scrollLeft = position.left;
+  });
 }
 
 function statusPill(status: string): string {
@@ -217,6 +249,7 @@ function updateViewport(): void {
 async function openNodeModal(jobId: string): Promise<void> {
   if (!boot?.tree) return;
   modalNodeId = jobId;
+  zoomedLogTaskId = null;
   if (selectedNodeId !== jobId) {
     selectedNodeId = jobId;
     nodeLog = null;
@@ -227,6 +260,7 @@ async function openNodeModal(jobId: string): Promise<void> {
 }
 
 function closeNodeModal(): void {
+  zoomedLogTaskId = null;
   modalNodeId = null;
   render();
 }
@@ -240,6 +274,17 @@ function openRunMetaModal(): void {
 function closeRunMetaModal(): void {
   runMetaModalOpen = false;
   render();
+}
+
+function openLogZoom(jobId: string, taskId: string): void {
+  if (selectedNodeId !== jobId) return;
+  zoomedLogTaskId = taskId;
+  render(true);
+}
+
+function closeLogZoom(): void {
+  zoomedLogTaskId = null;
+  render(true);
 }
 
 function formatDate(value: string | null | undefined): string {
@@ -351,8 +396,8 @@ function startPolling(): void {
       const tree = await bridge.call<GoalTreeInfo>('goal.tree', { rootJobId: rootId });
       if (boot?.selectedRunId !== rootId) return;
       applyBoot({ ...boot, tree, selectedNodeId });
-      renderMainOnly();
-      if (selectedNodeId) void loadNodeLog(selectedNodeId, false);
+      renderMainOnly(true);
+      if (selectedNodeId) void loadNodeLog(selectedNodeId, false, true);
       if (runRunning()) startPolling();
     } catch (err) {
       notice = err instanceof Error ? err.message : String(err);
@@ -361,14 +406,18 @@ function startPolling(): void {
   }, 1600);
 }
 
-async function loadNodeLog(jobId: string, showLoading = true): Promise<void> {
+async function loadNodeLog(
+  jobId: string,
+  showLoading = true,
+  preserveScroll = false,
+): Promise<void> {
   const pending = logRequests.get(jobId);
   if (pending) {
     return pending;
   }
   const request = (async (): Promise<void> => {
     logLoading = true;
-    if (showLoading) renderMainOnly();
+    if (showLoading) renderMainOnly(preserveScroll);
     try {
       const result = await bridge.call<JobLogInfo>('goal.nodeLog', { jobId });
       if (selectedNodeId === jobId) {
@@ -390,7 +439,7 @@ async function loadNodeLog(jobId: string, showLoading = true): Promise<void> {
     } finally {
       logLoading = false;
       logRequests.delete(jobId);
-      renderMainOnly();
+      renderMainOnly(preserveScroll);
     }
   })();
   logRequests.set(jobId, request);
@@ -403,6 +452,7 @@ async function selectRun(rootJobId: string): Promise<void> {
   selectedNodeId = null;
   nodeLog = null;
   nodeLogJobId = null;
+  zoomedLogTaskId = null;
   boot = boot ? { ...boot, selectedRunId: rootJobId, tree: null } : boot;
   render();
   try {
@@ -644,15 +694,13 @@ function renderTree(): string {
   </section>`;
 }
 
-function renderLog(node: GoalJobTreeNode): string {
-  const jobId = node.job_id;
-  if (nodeLogJobId !== jobId) {
-    return `<p class="agd-sop-empty agd-dim">${logLoading ? tr('goal.loading') : tr('sop.nodeLogEmpty')}</p>`;
-  }
-  const live = liveTaskFor === jobId && liveTask && (liveTask.status === 'pending' || liveTask.status === 'running')
+function currentLogSteps(node: GoalJobTreeNode): SopNodeLogStep[] {
+  if (nodeLogJobId !== node.job_id) return [];
+  const live = liveTaskFor === node.job_id && liveTask && (liveTask.status === 'pending' || liveTask.status === 'running')
     ? [{
         task_id: liveTask.task_id,
         status: liveTask.status,
+        iteration: 0,
         session_id: liveTask.session_id,
         exit_code: liveTask.exit_code,
         stdout: liveTask.stdout,
@@ -661,26 +709,54 @@ function renderLog(node: GoalJobTreeNode): string {
     : [];
   // The Job log already contains the current Step. Filter it out when the
   // live status preview is present, otherwise the same task renders twice.
-  const steps = [
+  return [
     ...live,
     ...(nodeLog?.steps ?? []).filter(
       (step) => !live.some((item) => item.task_id === step.task_id),
     ),
   ];
-  if (steps.length === 0) return `<p class="agd-sop-empty agd-dim">${tr('sop.nodeLogEmpty')}</p>`;
-  return steps.map((step) => `
-    <div class="agd-sop-step">
-      <div class="agd-sop-step-head">
-        <span class="agd-mono">${esc(step.task_id.slice(0, 8))}</span>
-        <span class="agd-dim">${esc(step.status)}${step.exit_code === null ? '' : ` · exit ${step.exit_code}`}</span>
-      </div>
-      ${step.stdout ? `<div class="agd-sop-stdout agd-md">${renderMarkdown(step.stdout)}</div>` : ''}
-      ${step.stderr ? `<div class="agd-sop-stderr agd-md">${renderMarkdown(step.stderr)}</div>` : ''}
-    </div>
-  `).join('');
 }
 
-function renderNodeInspector(node: GoalJobTreeNode): string {
+function renderLogStep(
+  step: SopNodeLogStep,
+  scope: GoalLogScope,
+  zoomable: boolean,
+  jobId: string,
+): string {
+  const taskId = step.task_id;
+  const zoomAttrs = zoomable
+    ? ` data-log-job="${esc(jobId)}" data-log-task="${esc(taskId)}" title="${tr('goal.logZoomHint')}"`
+    : '';
+  return `
+    <div class="agd-sop-step ${zoomable ? 'is-zoomable' : ''}" data-step-id="${esc(taskId)}"${zoomAttrs}>
+      <div class="agd-sop-step-head">
+        <span class="agd-mono">${esc(taskId.slice(0, 8))}</span>
+        <span class="agd-dim">${esc(step.status)}${step.exit_code === null ? '' : ` · exit ${step.exit_code}`}</span>
+      </div>
+      ${step.stdout ? `
+        <div class="agd-sop-stdout agd-md"
+          data-goal-scroll="goal-log-${scope}-${esc(taskId)}-stdout">${renderMarkdown(step.stdout)}</div>
+      ` : ''}
+      ${step.stderr ? `
+        <div class="agd-sop-stderr agd-md"
+          data-goal-scroll="goal-log-${scope}-${esc(taskId)}-stderr">${renderMarkdown(step.stderr)}</div>
+      ` : ''}
+    </div>`;
+}
+
+function renderLog(node: GoalJobTreeNode, scope: GoalLogScope): string {
+  if (nodeLogJobId !== node.job_id) {
+    return `<p class="agd-sop-empty agd-dim">${logLoading ? tr('goal.loading') : tr('sop.nodeLogEmpty')}</p>`;
+  }
+  const steps = currentLogSteps(node);
+  if (steps.length === 0) return `<p class="agd-sop-empty agd-dim">${tr('sop.nodeLogEmpty')}</p>`;
+  return steps.map((step) => renderLogStep(step, scope, true, node.job_id)).join('');
+}
+
+function renderNodeInspector(
+  node: GoalJobTreeNode,
+  scope: Exclude<GoalLogScope, 'zoom'>,
+): string {
   const artifacts = node.artifacts.length === 0
     ? `<p class="agd-sop-empty agd-dim">${tr('goal.noArtifacts')}</p>`
     : node.artifacts.map((artifact) => `
@@ -710,8 +786,14 @@ function renderNodeInspector(node: GoalJobTreeNode): string {
       ${ask}
     </div>
     <div class="agd-sop-card">
-      <div class="agd-sop-card-head"><span>${tr('goal.log')}</span><span class="agd-flex"></span><button type="button" class="agd-mini-btn" id="agd-goal-log-refresh">↻</button></div>
-      <div class="agd-sop-steps agd-sop-steps-lg">${renderLog(node)}</div>
+      <div class="agd-sop-card-head">
+        <span>${tr('goal.log')}</span>
+        <small class="agd-goal-log-hint">${tr('goal.logZoomHint')}</small>
+        <span class="agd-flex"></span>
+        <button type="button" class="agd-mini-btn" id="agd-goal-log-refresh">↻</button>
+      </div>
+      <div class="agd-sop-steps agd-sop-steps-lg"
+        data-goal-scroll="goal-${scope}-log-list">${renderLog(node, scope)}</div>
     </div>
     <div class="agd-sop-card">
       <div class="agd-sop-card-head"><span>${tr('goal.artifacts')}</span></div>
@@ -723,9 +805,9 @@ function renderDetails(): string {
   const node = selectedNode();
   if (!boot?.tree) return `<aside class="agd-sop-inspector"></aside>`;
   if (!node) {
-    return `<aside class="agd-sop-inspector"><div class="agd-sop-card"><p class="agd-sop-empty">${tr('goal.noNode')}</p></div></aside>`;
+    return `<aside class="agd-sop-inspector" data-goal-scroll="goal-inspector"><div class="agd-sop-card"><p class="agd-sop-empty">${tr('goal.noNode')}</p></div></aside>`;
   }
-  return `<aside class="agd-sop-inspector">${renderNodeInspector(node)}</aside>`;
+  return `<aside class="agd-sop-inspector" data-goal-scroll="goal-inspector">${renderNodeInspector(node, 'inspector')}</aside>`;
 }
 
 function renderRunMetaModal(): string {
@@ -782,16 +864,44 @@ function renderNodeModal(): string {
         <span id="agd-goal-modal-title">${esc(node.label || node.job_id)}</span>
         <button type="button" class="agd-mini-btn" id="agd-goal-modal-close" title="${tr('chat.cancelDelete')}">✕</button>
       </div>
-      <div class="agd-goal-modal-body">
-        ${renderNodeInspector(node)}
+      <div class="agd-goal-modal-body" data-goal-scroll="goal-node-modal">
+        ${renderNodeInspector(node, 'modal')}
       </div>
     </div>
   </div>`;
 }
 
-function render(): void {
+function renderLogZoom(): string {
+  if (!zoomedLogTaskId) return '';
+  const node = selectedNode();
+  if (!node) return '';
+  const step = currentLogSteps(node).find(
+    (item) => item.task_id === zoomedLogTaskId,
+  );
+  if (!step) {
+    zoomedLogTaskId = null;
+    return '';
+  }
+  return `
+  <div class="agd-goal-modal-backdrop agd-goal-log-zoom-backdrop" id="agd-goal-log-zoom-backdrop" role="presentation">
+    <div class="agd-goal-modal agd-goal-log-zoom" role="dialog" aria-modal="true" aria-labelledby="agd-goal-log-zoom-title">
+      <div class="agd-goal-modal-head">
+        <span id="agd-goal-log-zoom-title">${tr('goal.logZoom')} · ${esc(step.task_id.slice(0, 8))}</span>
+        <button type="button" class="agd-mini-btn" id="agd-goal-log-zoom-close" title="${tr('goal.close')}">✕</button>
+      </div>
+      <div class="agd-goal-modal-body" data-goal-scroll="goal-log-zoom-body">
+        <div class="agd-sop-card agd-goal-log-zoom-card">
+          ${renderLogStep(step, 'zoom', false, node.job_id)}
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
+function render(preserveScroll = false): void {
   const root = document.getElementById('agt-root');
   if (!root) return;
+  const scrollState = preserveScroll ? captureGoalScroll() : null;
   if (!boot) {
     root.innerHTML = `<div class="agd-sop-loading">…</div>`;
     return;
@@ -811,6 +921,7 @@ function render(): void {
     </div>
     ${renderRunMetaModal()}
     ${renderNodeModal()}
+    ${renderLogZoom()}
   </div>`;
   wireEvents();
   if (!sidebarCollapsed) {
@@ -819,14 +930,16 @@ function render(): void {
   if (showInspector) {
     wireInspectorResizer();
   }
+  if (scrollState) restoreGoalScroll(scrollState);
 }
 
-function renderMainOnly(): void {
-  if (modalNodeId || runMetaModalOpen) {
+function renderMainOnly(preserveScroll = false): void {
+  if (modalNodeId || runMetaModalOpen || zoomedLogTaskId) {
     // When the details modal is open, a partial update would leave it stale.
-    render();
+    render(preserveScroll);
     return;
   }
+  const scrollState = preserveScroll ? captureGoalScroll() : null;
   const main = document.querySelector('.agd-sop-main');
   if (!main || !boot) return;
   main.outerHTML = renderTree();
@@ -838,6 +951,7 @@ function renderMainOnly(): void {
   if (showInspector) {
     wireInspectorResizer();
   }
+  if (scrollState) restoreGoalScroll(scrollState);
 }
 
 function wireEvents(): void {
@@ -846,7 +960,9 @@ function wireEvents(): void {
     window.addEventListener('resize', () => updateViewport());
     document.addEventListener('keydown', (event) => {
       if (event.key === 'Escape') {
-        if (runMetaModalOpen) {
+        if (zoomedLogTaskId) {
+          closeLogZoom();
+        } else if (runMetaModalOpen) {
           closeRunMetaModal();
         } else if (modalNodeId) {
           closeNodeModal();
@@ -923,16 +1039,29 @@ function wireEvents(): void {
       selectedNodeId = jobId;
       nodeLog = null;
       nodeLogJobId = null;
+      zoomedLogTaskId = null;
       void loadNodeLog(jobId);
     });
   });
   document.getElementById('agd-goal-log-refresh')?.addEventListener('click', () => {
-    if (selectedNodeId) void loadNodeLog(selectedNodeId);
+    if (selectedNodeId) void loadNodeLog(selectedNodeId, false, true);
+  });
+  document.querySelectorAll<HTMLElement>('[data-log-task]').forEach((element) => {
+    element.addEventListener('dblclick', (event) => {
+      if ((event.target as HTMLElement).closest('a, button')) return;
+      const jobId = element.dataset.logJob ?? '';
+      const taskId = element.dataset.logTask ?? '';
+      if (jobId && taskId) openLogZoom(jobId, taskId);
+    });
   });
   document.getElementById('agd-goal-modal-backdrop')?.addEventListener('click', (event) => {
     if (event.target === event.currentTarget) closeNodeModal();
   });
   document.getElementById('agd-goal-modal-close')?.addEventListener('click', () => closeNodeModal());
+  document.getElementById('agd-goal-log-zoom-backdrop')?.addEventListener('click', (event) => {
+    if (event.target === event.currentTarget) closeLogZoom();
+  });
+  document.getElementById('agd-goal-log-zoom-close')?.addEventListener('click', () => closeLogZoom());
   document.getElementById('agd-goal-run-meta-backdrop')?.addEventListener('click', (event) => {
     if (event.target === event.currentTarget) closeRunMetaModal();
   });

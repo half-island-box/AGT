@@ -605,12 +605,26 @@ body {
   border-radius: 7px;
   padding: 7px 8px;
 }
+.agd-sop-step.is-zoomable {
+  cursor: zoom-in;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+.agd-sop-step.is-zoomable:hover {
+  border-color: var(--vscode-focusBorder, #3794ff);
+  background: color-mix(in srgb, var(--vscode-focusBorder, #3794ff) 4%, transparent);
+}
 .agd-sop-step-head {
   display: flex;
   justify-content: space-between;
   gap: 8px;
   margin-bottom: 5px;
   font-size: 10.5px;
+}
+.agd-goal-log-hint {
+  flex: none;
+  color: var(--vscode-descriptionForeground, #8b8b8b);
+  font-size: 9.5px;
+  font-weight: 400;
 }
 .agd-sop-stdout,
 .agd-sop-stderr {
@@ -708,6 +722,28 @@ body {
 }
 .agd-goal-run-meta-modal {
   width: min(780px, 100%);
+}
+.agd-goal-log-zoom {
+  width: min(1100px, calc(100vw - 48px));
+  height: min(850px, calc(100vh - 48px));
+}
+.agd-goal-log-zoom .agd-goal-modal-body {
+  flex: 1;
+  min-height: 0;
+}
+.agd-goal-log-zoom-card {
+  margin-bottom: 0;
+}
+.agd-goal-log-zoom .agd-sop-step {
+  cursor: default;
+}
+.agd-goal-log-zoom .agd-sop-stdout,
+.agd-goal-log-zoom .agd-sop-stderr {
+  max-height: none;
+  overflow: visible;
+}
+.agd-goal-log-zoom-backdrop {
+  z-index: 140;
 }
 .agd-goal-modal-head {
   display: flex;
