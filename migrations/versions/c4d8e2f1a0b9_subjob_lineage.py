@@ -30,8 +30,8 @@ def upgrade() -> None:
     with op.batch_alter_table('jobs', schema=None) as batch_op:
         batch_op.add_column(sa.Column('parent_job_id', sa.String(length=64), nullable=True))
         batch_op.add_column(sa.Column('root_job_id', sa.String(length=64), nullable=False, server_default=''))
-        batch_op.create_index(op.f('ix_jobs_parent'), 'jobs', ['parent_job_id'], unique=False)
-        batch_op.create_index(op.f('ix_jobs_root'), 'jobs', ['root_job_id'], unique=False)
+        batch_op.create_index('ix_jobs_parent', ['parent_job_id'], unique=False)
+        batch_op.create_index('ix_jobs_root', ['root_job_id'], unique=False)
         batch_op.create_foreign_key(
             'fk_jobs_parent_job_id', 'jobs', ['parent_job_id'], ['job_id'], ondelete='CASCADE'
         )

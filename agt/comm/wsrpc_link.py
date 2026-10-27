@@ -8,31 +8,6 @@ Either side of the connection can:
 - **Respond to inbound requests** via the ``on_request`` callback, which
   is dispatched for every received ``rpc_request`` frame and whose
   return value is sent back as an ``rpc_response``.
-
-This is the single JSON-RPC link used by both ends of the reverse-dial
-topology (Step 3.5 / daemon-reverse-dial): the server dials the daemon
-and responds to ``tasks.claim`` frames, while the daemon issues those
-claims over the same socket.
-frames sent by the daemon over the same socket.
-
-Wire format (unchanged from Step 3.2)::
-
-    request  = {"type":"rpc_request",
-                "payload":{"request_id","method","body","timeout_ms"}}
-    response = {"type":"rpc_response",
-                "payload":{"request_id","result"|"error"}}
-    hello    = {"type":"heartbeat_ack","rpc_v1":true}
-
-Raise semantics (unchanged from Step 3.3)::
-
-    WSRPCUnavailable — frame never left the client. HTTP retry is safe.
-    WSRPCUncertain   — frame may have committed; caller MUST wait the
-                       safety window (``timeout_ms + grace``) before retry.
-    RPCRejected      — peer explicitly rejected with ``error``.
-
-Generation counter (``_generation``) is bumped on every reconnect; stale
-responses from a previous generation are dropped, so a response can't
-resolve a future created after a reconnect.
 """
 
 from __future__ import annotations
@@ -56,9 +31,6 @@ OnRequest = Callable[[str, dict], Union[dict, Awaitable[dict]]]
 
 class WsRpcLink:
     """Bidirectional JSON-RPC-over-WebSocket link.
-
-    Constructed around an already-open ``websockets`` connection. Call
-    ``start()`` to begin the read loop; call ``close()`` to tear down.
     """
 
     def __init__(
@@ -73,7 +45,8 @@ class WsRpcLink:
         self._on_request = on_request
         self._grace = grace
 
-        self._pending: dict[str, asyncio.Future[dict]] = {}
+        self._pending: dict[str, asyncio.Future[dict]] = {} # {rid, Future}
+        # 连接版本号，每次close后 generation+=1
         self._generation = generation
         self._rpc_v1_supported = False
         self._read_task: asyncio.Task | None = None
@@ -140,7 +113,7 @@ class WsRpcLink:
     # ── Call plumbing ─────────────────────────────────────────────
 
     def _register_call(self) -> tuple[str, asyncio.Future[dict]]:
-        rid = str(uuid.uuid4())
+        rid = str(uuid.uuid4()) # 连接id
         loop = asyncio.get_event_loop()
         fut: asyncio.Future[dict] = loop.create_future()
         self._pending[rid] = fut
@@ -272,10 +245,6 @@ class WsRpcLink:
 
     def _dispatch_inbound_request(self, payload: dict, gen: int) -> None:
         """Spawn a task to handle an inbound ``rpc_request`` and reply.
-
-        Running as a separate task means a slow handler doesn't block the
-        read loop. Errors are caught and turned into a structured
-        response so a buggy handler can't take the socket down.
         """
         rid = payload.get("request_id")
         method = payload.get("method")

@@ -2,28 +2,6 @@
 
 The hierarchy encodes **decisions**, not events. Callers branch on the
 exception type to decide whether HTTP fallback is safe.
-
-Raise rules
------------
-- ``WSRPCUnavailable``  - frame NEVER left the client.
-                          RAISE when: socket not connected, send raised,
-                          buffer full. CALLER MAY retry (HTTP fallback safe).
-
-- ``WSRPCUncertain``    - frame MAY have committed before the response was
-                          lost. RAISE when: response timeout, socket dropped
-                          AFTER send returned. CALLER MUST wait the safety
-                          window (``server_timeout + grace``) before retry.
-                          NEVER raise this for read-only operations whose
-                          repeat has no observable side-effect — only for
-                          state-changing RPC (claim, register, report).
-
-- ``RPCRejected``       - server EXPLICITLY rejected with an error payload.
-                          RAISE when: rpc_response frame contained an
-                          ``error`` field. ``status`` / ``body`` carry the
-                          server's verdict. Retry is the caller's choice.
-
-These are mutually exclusive for any single ``call()``: at most one is
-raised, never two.
 """
 
 from __future__ import annotations

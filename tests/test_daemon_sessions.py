@@ -25,11 +25,14 @@ from click.testing import CliRunner
 from starlette.testclient import TestClient
 
 from agt.cli.main import cli
+from agt.agent_history import ProviderSessionDeleteResult
+from agt.daemon.ws_server import DaemonWsServer
 from agt.server.config import ServerConfig
 from agt.server.database import make_engine, make_session_factory
 from agt.server.main import create_app
 from agt.server.migrate_schema import ensure_schema
 from agt.server.models import Base, JobModel, SessionModel, StepModel
+from agt.task.session import CwdSessionStore
 
 
 SECRET = "daemon-sessions-test-secret"
@@ -215,6 +218,72 @@ class TestResolveSessionRoute:
             assert resp.status_code == 404
         finally:
             dispose()
+
+
+def test_server_session_probe_does_not_read_local_chat_index(
+    tmp_path, monkeypatch,
+) -> None:
+    from agt.server.routes import sessions as sessions_route
+
+    cwd = tmp_path / "project"
+    store = CwdSessionStore.load_or_create(cwd)
+    store.record(
+        session_id="local-chat-sid",
+        task_id="local-chat-task",
+        first_prompt="hi",
+        turn_count=1,
+    )
+    expected_path = tmp_path / "transcript.jsonl"
+    monkeypatch.setattr(
+        sessions_route,
+        "find_provider_session_files",
+        lambda provider, session_id: [expected_path],
+    )
+
+    result = asyncio.run(sessions_route._probe_local_session(
+        "claude",
+        "local-chat-sid",
+        str(cwd),
+    ))
+
+    assert result["cwd_index_found"] is False
+    assert store.get("local-chat-sid") is not None
+
+
+def test_daemon_session_delete_does_not_write_local_chat_index(
+    tmp_path, monkeypatch,
+) -> None:
+    cwd = tmp_path / "project"
+    store = CwdSessionStore.load_or_create(cwd)
+    store.record(
+        session_id="server-chat-sid",
+        task_id="server-chat-task",
+        first_prompt="hi",
+        turn_count=1,
+    )
+    server = DaemonWsServer(
+        port=0,
+        secret=SECRET,
+        daemon_id="d1",
+        url="ws://unused",
+    )
+    monkeypatch.setattr(
+        "agt.daemon.ws_server.delete_provider_session",
+        lambda provider, session_id: ProviderSessionDeleteResult(
+            supported=True,
+            deleted_paths=(tmp_path / "transcript.jsonl",),
+        ),
+    )
+
+    result = asyncio.run(server._handle_session_delete({
+        "provider": "claude",
+        "session_id": "server-chat-sid",
+        "cwd": str(cwd),
+    }))
+
+    assert result["ok"] is True
+    assert result["cwd_index_deleted"] is False
+    assert store.get("server-chat-sid") is not None
 
 
 # ── CLI: _resolve_remote_session ───────────────────────────────────

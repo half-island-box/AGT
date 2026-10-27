@@ -1,7 +1,8 @@
-"""One-shot migration of Phase 1 sessions.json into the SQLite sessions table.
+"""Manual migration of legacy Phase 1 sessions.json into SQLite.
 
-Called on server startup. If the SQLite sessions table is empty AND
-``~/.agt/sessions.json`` exists with records, copy them across.
+The Server no longer invokes this automatically. Server-managed
+chat/SOP/Goal sessions live only in SQLite; local direct chat uses the
+per-cwd ``<cwd>/.agt/sessions.json`` store.
 """
 
 from __future__ import annotations

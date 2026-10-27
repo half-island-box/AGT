@@ -85,6 +85,8 @@ class TaskResult:
     outcome: str | None = None
     # Phase 3: outcome sidecar (e.g. {"children": [...]} envelopes).
     outcome_payload: dict | None = None
+    # Shared-context marker operations captured from AGT-CONTEXT lines.
+    context_ops: list[dict] = field(default_factory=list)
 
 
 __all__ = ["Task", "TaskResult"]

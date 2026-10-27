@@ -218,11 +218,10 @@ def test_daemon_run_threads_interactive_to_executor(
     assert store.is_empty(), "session_id should NOT be written in interactive mode"
 
 
-def test_daemon_run_pipe_mode_writes_session(
+def test_daemon_run_pipe_mode_writes_session_for_local_chat(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """``Daemon.run(interactive=False)`` (default) captures session id
-    and writes it to SessionStore — preserves existing behavior."""
+    """Local direct chat explicitly opts into the cwd session store."""
     captured: dict = {}
 
     async def fake_execute(self, task, *, interactive=False, progress_cb=None):
@@ -238,6 +237,7 @@ def test_daemon_run_pipe_mode_writes_session(
     async def _run() -> None:
         await controller.run(
             provider="claude", prompt="hi", task_id="t-pipe",
+            use_cwd_session_store=True,
         )
 
     asyncio.run(_run())
@@ -245,6 +245,34 @@ def test_daemon_run_pipe_mode_writes_session(
     assert captured["interactive"] is False
     store = CwdSessionStore.load_or_create(tmp_path / "claude" / "t-pipe")
     assert store.get("s-xyz") is not None
+
+
+def test_server_managed_run_does_not_touch_cwd_session_store(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """SOP/Goal/server chat must use SQLite only, never sessions.json."""
+    async def fake_execute(self, task, *, interactive=False, progress_cb=None):
+        return _fake_result(task.task_id, task.provider, session_id="s-server")
+
+    monkeypatch.setattr(
+        "agt.task.executor.TaskExecutor.execute", fake_execute,
+    )
+
+    controller = _make_daemon(tmp_path)
+    agent_cwd = tmp_path / "server-project"
+    agent_cwd.mkdir()
+
+    async def _run() -> None:
+        await controller.run(
+            provider="claude",
+            prompt="hi",
+            task_id="step-server",
+            agent_cwd=agent_cwd,
+        )
+
+    asyncio.run(_run())
+
+    assert not (agent_cwd / ".agt" / "sessions.json").exists()
 
 
 def test_bare_chat_does_not_create_tasks_subdir(

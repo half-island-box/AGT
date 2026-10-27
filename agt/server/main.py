@@ -18,7 +18,6 @@ from .database import bind_get_db, make_engine, make_session_factory, session_sc
 from .mcp_server import build_catalog_mcp, catalog_mcp_asgi
 from .middleware.auth import bind_verify_task_token
 from .migrate_schema import ensure_schema, migrate_identities_and_sessions
-from .migrate_sessions import migrate_sessions_json
 from .models import Base
 from .pidfile import (
     DEFAULT_PID_FILE,
@@ -33,6 +32,7 @@ from .routes.heartbeat import router as heartbeat_router
 from .routes.identities import router as identities_router
 from .routes.jobs import router as jobs_router
 from .routes.artifacts import router as artifacts_router
+from .routes.context import router as context_router
 from .routes.sop import router as sop_router
 from .routes.goal import router as goal_router
 from .routes.runtimes import router as runtimes_router
@@ -67,11 +67,6 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             await conn.run_sync(ensure_schema)
         async with engine.begin() as conn:
             await conn.run_sync(migrate_identities_and_sessions, Path(cfg.db_path).parent)
-        # One-shot Phase 1 sessions.json migration. Runs AFTER the schema
-        # migrations so the sessions table already carries the Phase 4
-        # (task_id, identity_did, provider) shape the ORM model expects.
-        async with session_scope(session_factory) as db:
-            await migrate_sessions_json(db, cfg.sessions_json_path)
         # Startup sweep: drop runtime rows whose ``last_seen`` is older than
         # the liveness TTL. These are remnants from daemons that crashed
         # without deregistering, or whose machine / id changed — without
@@ -185,6 +180,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     app.include_router(tasks_router)
     app.include_router(jobs_router)
     app.include_router(artifacts_router)
+    app.include_router(context_router)
     app.include_router(sop_router)
     app.include_router(goal_router)
     app.include_router(runs_router)

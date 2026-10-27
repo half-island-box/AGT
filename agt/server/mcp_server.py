@@ -23,6 +23,13 @@ from .services.catalog_service import (
     CATALOG_TOOL_DESCRIPTION,
     render_runtime_catalog,
 )
+from .services.context_service import (
+    CONTEXT_READ_TOOL_DESCRIPTION,
+    CONTEXT_WRITE_TOOL_DESCRIPTION,
+    context_read_for_caller,
+    context_write_for_token,
+    resolve_context_caller,
+)
 from .services.spawn_service import (
     SPAWN_TOOL_DESCRIPTION,
     SpawnChildInput,
@@ -83,6 +90,51 @@ async def spawn_subagents_impl(
         }
 
 
+async def context_write_impl(
+    session_factory: Any,
+    secret: str,
+    authorization: str | None,
+    op: dict[str, Any],
+) -> dict[str, Any]:
+    """Authenticate and apply one shared-context mutation."""
+    token = bearer_token_from_header(authorization)
+    async with session_scope(session_factory) as db:
+        return await context_write_for_token(
+            db,
+            task_token=token,
+            secret=secret,
+            op=op,
+        )
+
+
+async def context_read_impl(
+    session_factory: Any,
+    secret: str,
+    authorization: str | None,
+    query: dict[str, Any],
+) -> dict[str, Any]:
+    """Authenticate and read context visible to the caller."""
+    token = bearer_token_from_header(authorization)
+    try:
+        async with session_scope(session_factory) as db:
+            caller = await resolve_context_caller(
+                db,
+                task_token=token,
+                secret=secret,
+                require_running=True,
+            )
+            return await context_read_for_caller(db, caller, **query)
+    except ValueError as exc:
+        payload = exc.args[0] if exc.args and isinstance(exc.args[0], dict) else {}
+        return {
+            "ok": False,
+            "error": {
+                "code": payload.get("code", "context_read_failed"),
+                "message": payload.get("message", str(exc)),
+            }
+        }
+
+
 def build_catalog_mcp(
     session_factory: Any,
     daemon_defs: dict[str, Any],
@@ -125,6 +177,84 @@ def build_catalog_mcp(
             idempotency_key,
         )
 
+    @mcp.tool(description=CONTEXT_WRITE_TOOL_DESCRIPTION)
+    async def context_write(
+        ctx: Context,
+        scope: str,
+        key: str,
+        kind: str,
+        content: dict[str, Any],
+        idempotency_key: str,
+        expected_head_entry_id: int | None = None,
+    ) -> dict[str, Any]:
+        request = ctx.request_context.request
+        authorization = (
+            request.headers.get("authorization") if request is not None else None
+        )
+        return await context_write_impl(
+            session_factory,
+            secret,
+            authorization,
+            {
+                "op": "write",
+                "scope": scope,
+                "key": key,
+                "kind": kind,
+                "content": content,
+                "idempotency_key": idempotency_key,
+                "expected_head_entry_id": expected_head_entry_id,
+            },
+        )
+
+    @mcp.tool(description=CONTEXT_WRITE_TOOL_DESCRIPTION)
+    async def context_retract(
+        ctx: Context,
+        key: str,
+        expected_head_entry_id: int,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        request = ctx.request_context.request
+        authorization = (
+            request.headers.get("authorization") if request is not None else None
+        )
+        return await context_write_impl(
+            session_factory,
+            secret,
+            authorization,
+            {
+                "op": "retract",
+                "key": key,
+                "expected_head_entry_id": expected_head_entry_id,
+                "idempotency_key": idempotency_key,
+            },
+        )
+
+    @mcp.tool(description=CONTEXT_READ_TOOL_DESCRIPTION)
+    async def context_read(
+        ctx: Context,
+        keys: list[str] | None = None,
+        scopes: list[str] | None = None,
+        kinds: list[str] | None = None,
+        entry_id_after: int | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        request = ctx.request_context.request
+        authorization = (
+            request.headers.get("authorization") if request is not None else None
+        )
+        return await context_read_impl(
+            session_factory,
+            secret,
+            authorization,
+            {
+                "keys": keys,
+                "scopes": scopes,
+                "kinds": kinds,
+                "entry_id_after": entry_id_after,
+                "limit": limit,
+            },
+        )
+
     return mcp
 
 
@@ -149,6 +279,8 @@ def catalog_mcp_asgi(mcp: FastMCP) -> Any:
 __all__ = [
     "list_runtimes_impl",
     "spawn_subagents_impl",
+    "context_write_impl",
+    "context_read_impl",
     "build_catalog_mcp",
     "catalog_mcp_asgi",
 ]

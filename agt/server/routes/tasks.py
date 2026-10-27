@@ -287,6 +287,7 @@ async def report_task(
             artifacts=payload.artifacts,
             # Phase 3: structured-outcome sidecar (spawn envelopes).
             outcome_payload=payload.outcome_payload,
+            context_ops=payload.context_ops,
         )
         return ReportResponse(**result)
     except ValueError as exc:

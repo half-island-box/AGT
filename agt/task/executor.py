@@ -272,9 +272,12 @@ class TaskExecutor:
         )
         from .spawn_intent import (
             ASK_INSTRUCTION,
+            CONTEXT_INSTRUCTION,
+            MCP_CONTEXT_INSTRUCTION,
             MCP_SPAWN_INSTRUCTION,
             SPAWN_INSTRUCTION,
             derive_marker_outcome,
+            parse_context_markers,
         )
 
         # Phase 3 (D9): server-computed subdir isolates parallel child
@@ -291,7 +294,15 @@ class TaskExecutor:
             if adapter.mcp_profile is not None
             else SPAWN_INSTRUCTION
         )
-        instruction = f"{instruction}\n{spawn_instruction}\n{ASK_INSTRUCTION}"
+        context_instruction = (
+            MCP_CONTEXT_INSTRUCTION
+            if adapter.mcp_profile is not None
+            else CONTEXT_INSTRUCTION
+        )
+        instruction = (
+            f"{instruction}\n{spawn_instruction}\n{context_instruction}\n"
+            f"{ASK_INSTRUCTION}"
+        )
         outputs_snapshot = snapshot_outputs(outputs_dir)
         # Deliver the deliverables (+spawn) contract through the provider's
         # project-instructions file (CLAUDE.md / AGENTS.md) instead of
@@ -385,6 +396,9 @@ class TaskExecutor:
                         result.stdout
                     )
                     result.stdout = cleaned
+                    context = parse_context_markers(cleaned)
+                    result.stdout = context.cleaned_stdout
+                    result.context_ops = context.ops
                     if outcome is not None:
                         result.outcome = outcome
                         result.outcome_payload = outcome_payload

@@ -553,6 +553,7 @@ def _chat_turn_local(
             resume_session_id=resume_session_id,
             first_prompt=first_prompt,
             turn_index=turn_index,
+            use_cwd_session_store=True,
         )
 
     result = asyncio.run(_run())
@@ -673,11 +674,10 @@ def _chat_turn_remote(
     ``/input``); this function only streams/waits for ``step_id`` to
     finish.
 
-    Remote session state belongs to the daemon, not this cwd — the session
-    index is written on the daemon's machine (``<agent_cwd>/.agt/
-    sessions.json``) and by the Server (``StepModel``); the local cwd store
-    is deliberately left untouched. Use ``agt chat --list --daemon=X`` to
-    read it back from the Server.
+    Remote and local-daemon chat are Server-managed: SQLite is the
+    authoritative session index. Neither the client cwd nor the daemon
+    cwd touches ``sessions.json`` on this path. Use
+    ``agt chat --list --daemon=X`` to read it back from the Server.
     """
     async def _remote() -> dict | None:
         async with ServerClient(base_url=server_url, daemon_id="cli-direct") as client:
@@ -794,19 +794,11 @@ def chat(
     If ``--provider`` is omitted, the first available agent is auto-picked.
 
     The agent's working directory is always the user's cwd at chat start.
-    No per-task meta subdir is created for bare ``agt chat``; the session
-    index lives at ``<cwd>/.agt/sessions.json`` and that's it. ``--work-dir``
-    and ``--no-work-dir`` still create their respective dirs (explicit
-    overrides).
-
-    Sessions are stored per cwd in ``<cwd>/.agt/sessions.json``. Each
-    chat session gets its own entry (no overwrite) tagged with the
-    provider that created it. ``--list`` shows them all (with a
-    ``PROVIDER`` column); ``--list --provider X`` filters to one agent.
-    ``--resume <sid>`` restores one (and spawns the agent with the
-    matching ``--resume`` flag so its own state is recovered).
-    Without either flag, a **new** session is started and recorded on
-    exit.
+    For local direct chat (no ``--daemon``), sessions are stored per cwd
+    in ``<cwd>/.agt/sessions.json``; that file supports ``--list``,
+    ``--resume`` and multi-turn continuity. For Server-managed chat
+    (``--daemon``), SQLite is authoritative and no ``sessions.json`` is
+    read or written.
     """
     identity_did = _coerce_identity_did(identity_did)
     cwd = Path(os.getcwd())
@@ -3499,6 +3491,50 @@ cli.add_command(_sop_group)
 from .goal import goal as _goal_group  # noqa: E402
 
 cli.add_command(_goal_group)
+
+
+@cli.group()
+def context() -> None:
+    """Goal shared-context operations."""
+
+
+@context.command("read")
+@click.option("--key", "keys", multiple=True, help="Canonical context key.")
+@click.option("--server-url", envvar="AGT_SERVER_URL", default=None)
+@click.option("--json-output/--no-json", default=True, show_default=True)
+def context_read(keys: tuple[str, ...], server_url: str | None, json_output: bool) -> None:
+    """Read context visible to this Agent task (uses AGT_TASK_TOKEN)."""
+    token = os.environ.get("AGT_TASK_TOKEN")
+    task_id = os.environ.get("AGT_TASK_ID")
+    base_url = server_url or os.environ.get("AGT_SERVER_URL") or "http://127.0.0.1:8420"
+    if not token or not task_id:
+        click.echo("Error: AGT_TASK_TOKEN and AGT_TASK_ID are required", err=True)
+        sys.exit(2)
+
+    async def _run() -> dict:
+        params: list[tuple[str, str]] = []
+        for key in keys:
+            params.append(("keys", key))
+        async with httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=15.0) as client:
+            resp = await client.get(
+                "/api/agent/context",
+                params=params,
+                headers={"X-Task-Token": token, "X-Task-Id": task_id},
+            )
+            if resp.status_code >= 300:
+                raise CLIError(f"context read failed ({resp.status_code}): {resp.text}")
+            return resp.json()
+
+    try:
+        result = asyncio.run(_run())
+    except CLIError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+    if json_output:
+        click.echo(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        for entry in result.get("entries", []):
+            click.echo(f"{entry['entry_id']}  {entry['kind']}  {entry['key']}")
 
 
 __all__ = ["cli"]

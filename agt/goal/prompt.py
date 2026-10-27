@@ -22,6 +22,8 @@ ORCHESTRATOR_TEMPLATE = (
     "1. 先判断：任务是否值得拆解？小任务直接自己完成，不要为拆而拆。\n"
     "2. 拆解时：每个子任务给一段自包含的 goal（背景、边界、验收标准）；\n"
     "   需要上游产物用 agt-artifact:// 引用（inputs）；约定 return（交付物形态）。\n"
+    "   需要固定 shared context 条目时使用 context_refs；持久决策和约束用\n"
+    "   context_write，或输出 AGT-CONTEXT 标记。\n"
     "   用 identity 指定执行者；不指定则由系统按能力路由。\n"
     "3. 子任务尽量一层拆完；确需更深层拆解时，子任务可自行 spawn（有全局预算）。\n"
     "4. 子任务失败不等于任务失败：synthesis 阶段你可以选择重试（再次派生子任务，\n"

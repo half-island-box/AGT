@@ -9,6 +9,7 @@ commands are the entry + observability layer.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 import sys
 from pathlib import Path
@@ -365,6 +366,48 @@ def goal_artifacts(root_job_id: str, out_dir: str, server_url: str) -> None:
             click.echo(f"{path}  ({len(data)} bytes)")
         except Exception as exc:
             click.echo(f"failed {artifact_id}: {exc}", err=True)
+
+
+@goal.command("context")
+@click.argument("root_job_id")
+@click.option("--scope", type=click.Choice(["shared", "job"]), default=None)
+@click.option("--kind", type=click.Choice(["decision", "constraint", "fact", "note"]), default=None)
+@click.option("--status", "status_filter", type=click.Choice(["active", "superseded", "retracted", "all"]), default="active")
+@click.option("--json-output", is_flag=True, help="Print raw JSON.")
+@click.option("--server-url", default="http://127.0.0.1:8420", show_default=True)
+def goal_context(
+    root_job_id: str,
+    scope: str | None,
+    kind: str | None,
+    status_filter: str,
+    json_output: bool,
+    server_url: str,
+) -> None:
+    """List shared context entries for a Goal run."""
+
+    async def _run() -> list[dict]:
+        async with ServerClient(base_url=server_url, daemon_id="cli-goal") as client:
+            return await client.list_goal_context(
+                root_job_id,
+                scope=scope,
+                kind=kind,
+                status_filter="" if status_filter == "all" else status_filter,
+            )
+
+    entries = asyncio.run(_run_or_die(_run()))
+    if json_output:
+        click.echo(json.dumps(entries, indent=2, ensure_ascii=False))
+        return
+    if not entries:
+        click.echo("(no context entries)")
+        return
+    for item in entries:
+        content = item.get("content") or {}
+        text = content.get("summary") or content.get("text") or ""
+        click.echo(
+            f"{item['entry_id']}  {item['status']:<10} {item['kind']:<10} "
+            f"{item['key']}  {_truncate(str(text), 80)}"
+        )
 
 
 @goal.command("export")

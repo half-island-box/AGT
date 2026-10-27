@@ -28,6 +28,10 @@ from ..comm.errors import RPCRejected, WSRPCUnavailable, WSRPCUncertain
 from ..server.services.auth_service import bearer_token_from_header
 from ..server.mcp_server import catalog_mcp_asgi
 from ..server.services.catalog_service import CATALOG_TOOL_DESCRIPTION
+from ..server.services.context_service import (
+    CONTEXT_READ_TOOL_DESCRIPTION,
+    CONTEXT_WRITE_TOOL_DESCRIPTION,
+)
 from ..server.services.spawn_service import (
     SPAWN_TOOL_DESCRIPTION,
     SpawnChildInput,
@@ -123,6 +127,47 @@ async def spawn_subagents_proxy_impl(
         }
 
 
+async def context_proxy_impl(
+    ws_server: Any,
+    authorization: str | None,
+    op: dict[str, Any],
+) -> dict[str, Any]:
+    """Forward one authenticated shared-context call over reverse dial."""
+    token = bearer_token_from_header(authorization)
+    if not token:
+        return {
+            "ok": False,
+            "error": {"code": "unauthenticated", "message": "task token required"},
+        }
+    link = getattr(ws_server, "current_link", None)
+    if link is None or link.closed or not link.supports_rpc_v1:
+        return {
+            "ok": False,
+            "error": {"code": "context_unavailable", "message": "no reverse-dial link"},
+        }
+    try:
+        return await link.call(
+            "context.call",
+            {"task_token": token, "op": op},
+            timeout_ms=10000,
+        )
+    except RPCRejected as exc:
+        payload = exc.body if isinstance(exc.body, dict) else {}
+        code = payload.get("code") or payload.get("type") or "context_failed"
+        return {
+            "ok": False,
+            "error": {"code": code, "message": payload.get("message", str(exc))},
+        }
+    except (WSRPCUnavailable, WSRPCUncertain):
+        return {
+            "ok": False,
+            "error": {
+                "code": "context_unavailable",
+                "message": "context service unavailable",
+            },
+        }
+
+
 def build_proxy_mcp(ws_server: Any) -> FastMCP:
     """Build the daemon's proxy MCP server."""
     mcp = FastMCP("agt-catalog-proxy")
@@ -149,6 +194,82 @@ def build_proxy_mcp(ws_server: Any) -> FastMCP:
             authorization,
             [child.model_dump(exclude_none=True, by_alias=True) for child in children],
             idempotency_key,
+        )
+
+    @mcp.tool(description=CONTEXT_WRITE_TOOL_DESCRIPTION)
+    async def context_write(
+        ctx: Context,
+        scope: str,
+        key: str,
+        kind: str,
+        content: dict[str, Any],
+        idempotency_key: str,
+        expected_head_entry_id: int | None = None,
+    ) -> dict[str, Any]:
+        request = ctx.request_context.request
+        authorization = (
+            request.headers.get("authorization") if request is not None else None
+        )
+        return await context_proxy_impl(
+            ws_server,
+            authorization,
+            {
+                "op": "write",
+                "scope": scope,
+                "key": key,
+                "kind": kind,
+                "content": content,
+                "idempotency_key": idempotency_key,
+                "expected_head_entry_id": expected_head_entry_id,
+            },
+        )
+
+    @mcp.tool(description=CONTEXT_WRITE_TOOL_DESCRIPTION)
+    async def context_retract(
+        ctx: Context,
+        key: str,
+        expected_head_entry_id: int,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        request = ctx.request_context.request
+        authorization = (
+            request.headers.get("authorization") if request is not None else None
+        )
+        return await context_proxy_impl(
+            ws_server,
+            authorization,
+            {
+                "op": "retract",
+                "key": key,
+                "expected_head_entry_id": expected_head_entry_id,
+                "idempotency_key": idempotency_key,
+            },
+        )
+
+    @mcp.tool(description=CONTEXT_READ_TOOL_DESCRIPTION)
+    async def context_read(
+        ctx: Context,
+        keys: list[str] | None = None,
+        scopes: list[str] | None = None,
+        kinds: list[str] | None = None,
+        entry_id_after: int | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        request = ctx.request_context.request
+        authorization = (
+            request.headers.get("authorization") if request is not None else None
+        )
+        return await context_proxy_impl(
+            ws_server,
+            authorization,
+            {
+                "op": "read",
+                "keys": keys,
+                "scopes": scopes,
+                "kinds": kinds,
+                "entry_id_after": entry_id_after,
+                "limit": limit,
+            },
         )
 
     return mcp
@@ -205,5 +326,6 @@ __all__ = [
     "build_proxy_mcp",
     "list_runtimes_proxy_impl",
     "spawn_subagents_proxy_impl",
+    "context_proxy_impl",
     "DEFAULT_PROXY_MCP_PORT",
 ]
