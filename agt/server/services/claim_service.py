@@ -16,8 +16,10 @@ from datetime import datetime, timezone
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ...a2a import DataPart, Message, message_from_prompt
 from ..models import JobModel, SessionModel, StepModel
 from ..schemas import TaskPayload
+from .context_service import build_context_brief
 from .identity_service import _render_agent_md, get_identity
 
 log = logging.getLogger(__name__)
@@ -270,13 +272,28 @@ async def _build_step_message(
     Large cross-daemon references carry only the URI — the daemon
     resolves them on demand via ``artifacts.get``.
     """
-    from ...a2a import Message, parse_artifact_uri, render_message
+    from ...a2a import parse_artifact_uri, render_message
     from ..models import ArtifactModel
 
-    if not candidate.input_message:
+    job = await db.get(JobModel, candidate.job_id) if candidate.job_id else None
+    if candidate.input_message:
+        message = Message.model_validate_json(candidate.input_message)
+    elif job is not None and job.job_type == "goal":
+        message = message_from_prompt(candidate.prompt)
+    else:
         return None, candidate.prompt
 
-    message = Message.model_validate_json(candidate.input_message)
+    # Shared context is a claim-time projection. Keep the submitted
+    # input_message immutable and audit the exact Brief on the Step.
+    if job is not None and job.job_type == "goal":
+        projected = await build_context_brief(db, step=candidate, job=job)
+        if projected is not None:
+            brief, context_file_parts = projected
+            message.parts.append(DataPart(data={"context_brief": brief}))
+            message.parts.extend(context_file_parts)
+            candidate.context_brief_json = _canonical_context_json(brief)
+            candidate.context_snapshot_id = str(brief["snapshot_id"])
+            candidate.context_watermark = int(brief["watermark"])
     # Work on raw dicts so server-injected hint keys survive.
     raw = message.model_dump(mode="json")
     for part in raw.get("parts", []):
@@ -298,6 +315,17 @@ async def _build_step_message(
             part.setdefault("mime_type", artifact.mime_type)
 
     return raw, render_message(message)
+
+
+def _canonical_context_json(value: dict) -> str:
+    import json
+
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 async def _render_identity_md(

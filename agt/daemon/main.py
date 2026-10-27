@@ -457,8 +457,9 @@ async def _execute_one(
                 # never leak through live SSE frames; removal would shrink
                 # the cumulative prefix and trip the server's shrink guard.
                 from ..task.spawn_intent import mask_spawn_lines
+                from ..task.spawn_intent import mask_context_lines
 
-                stdout_prefix = mask_spawn_lines(stdout_prefix)
+                stdout_prefix = mask_context_lines(mask_spawn_lines(stdout_prefix))
                 cur_ws = (
                     _resolve_ws_source(ws_server) if ws_server is not None else None
                 )
@@ -565,6 +566,7 @@ async def _execute_one(
                 artifacts=artifacts,
                 outcome=getattr(result, "outcome", None),
                 outcome_payload=getattr(result, "outcome_payload", None),
+                context_ops=getattr(result, "context_ops", None),
             )
 
         finally:
@@ -586,6 +588,7 @@ async def _safe_report(
     artifacts: list | None = None,
     outcome: str | None = None,
     outcome_payload: dict | None = None,
+    context_ops: list[dict] | None = None,
 ) -> None:
     """Best-effort result write. WS-first in reverse-dial mode; HTTP otherwise.
 
@@ -611,6 +614,7 @@ async def _safe_report(
                 artifacts=artifacts,
                 outcome=outcome,
                 outcome_payload=outcome_payload,
+                context_ops=context_ops,
             )
         else:
             await client.report_task(
@@ -625,6 +629,7 @@ async def _safe_report(
                 artifacts=artifacts,
                 outcome=outcome,
                 outcome_payload=outcome_payload,
+                context_ops=context_ops,
             )
     except Exception as exc:
         log.warning("report failed for task %s: %s", task_id, exc)

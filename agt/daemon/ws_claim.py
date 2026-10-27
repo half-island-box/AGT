@@ -142,6 +142,7 @@ async def report_task_ws_first(
     artifacts: list | None = None,
     outcome: str | None = None,
     outcome_payload: dict | None = None,
+    context_ops: list[dict] | None = None,
 ) -> bool:
     """Write a task result via WS first; HTTP fallback when not safe.
 
@@ -184,6 +185,8 @@ async def report_task_ws_first(
         body["outcome"] = outcome
     if outcome_payload is not None:
         body["outcome_payload"] = outcome_payload
+    if context_ops:
+        body["context_ops"] = context_ops
 
     if wsrpc is not None and wsrpc.supports_rpc_v1 and not state.blocked:
         try:
@@ -230,6 +233,7 @@ async def report_task_ws_first(
             artifacts=artifacts,
             outcome=outcome,
             outcome_payload=outcome_payload,
+            context_ops=context_ops,
         )
         return True
     except Exception as exc:

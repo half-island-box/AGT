@@ -18,6 +18,8 @@ Goal 驱动的子 Agent 编排、静态 DAG 工作流和统一产物注册表。
   续接和流式输出。
 - **Goal 编排**：root Agent 拆解目标，在全局预算内派生子 Agent，并综合各
   节点的交付物。
+- **共享上下文**：Goal Agent 通过有版本、有预算、可审计的 ContextBrief
+  交换决策、约束、事实和 Artifact 引用。
 - **静态工作流**：使用 YAML 定义可复用的多 Agent DAG，支持 `depends_on`
   和 `${node.output}` 数据引用。
 - **Artifact 交接**：把声明的交付物注册为稳定的 `agt-artifact://<id>`，
@@ -133,6 +135,7 @@ Server 默认监听 `127.0.0.1:8420`，OpenAPI 文档位于
 | `agt run` | 执行一次 Prompt |
 | `agt chat` | 开始、列出、恢复或继续对话 |
 | `agt goal` | 运行和观测 Goal Agent 树 |
+| `agt context` | 读取当前 Agent 任务可见的共享上下文 |
 | `agt sop` | 校验并运行静态 DAG 工作流 |
 | `agt artifact` | 查看或下载声明的交付产物 |
 | `agt session` | 删除已记录的 Chat 会话 |
@@ -188,6 +191,7 @@ Provider 特定逻辑放在运行时适配器中，保持 Python-first 的小型
 - [接入新 Provider](<docs/guide%20docs/provider-registration.md>)
 - [编排架构](docs/impl/agent-orchestration-design.md)
 - [Goal 模式设计](docs/impl/goal-mode-design.md)
+- [共享上下文设计](docs/impl/goal-shared-context-design.md)
 - [本地运行时流程](docs/spec/local-agent-runtime-flow.md)
 
 ## 许可证

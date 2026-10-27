@@ -64,6 +64,7 @@ class SpawnChildInput(BaseModel):
     goal: str = Field(min_length=1)
     identity: str | None = None
     inputs: list[str] = Field(default_factory=list)
+    context_refs: list[str] = Field(default_factory=list)
     return_: str | None = Field(default=None, alias="return")
     daemon_id: str | None = None
     provider: str | None = None
@@ -320,9 +321,17 @@ def _normalize_envelope(envelope: Any) -> dict[str, Any] | None:
     ):
         return None
 
+    context_refs = envelope.get("context_refs", [])
+    if not isinstance(context_refs, list) or any(
+        not isinstance(item, str) for item in context_refs
+    ):
+        return None
+    context_refs = [item for item in context_refs if item][:16]
+
     normalized: dict[str, Any] = {
         "goal": goal.strip(),
         "inputs": [item for item in inputs if item],
+        "context_refs": context_refs,
     }
     if isinstance(identity, str) and identity:
         normalized["identity"] = identity
@@ -632,6 +641,8 @@ def _child_message(envelope: dict) -> Message:
         data["identity"] = envelope["identity"]
     if envelope.get("inputs"):
         data["inputs"] = list(envelope["inputs"])
+    if envelope.get("context_refs"):
+        data["context_refs"] = list(envelope["context_refs"])
     if envelope.get("return"):
         data["return"] = envelope["return"]
     if data:

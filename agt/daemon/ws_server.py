@@ -1,27 +1,7 @@
 """DaemonWsServer — daemon-side WebSocket server for reverse-dial (Step 3.5).
 
 In the reverse-dial topology, the **Server** dials the daemon instead of
-the other way around. The daemon needs to:
-
-1. Bind a public WebSocket endpoint on ``0.0.0.0:<port>`` (default 8422).
-2. Authenticate the caller — anyone on the network could connect, and we
-   only want to accept connections from a Server that holds the shared
-   secret and targets this daemon's identity.
-3. Authenticate itself back to the Server with a ``daemon_token`` embedded
-   in the ``heartbeat_ack`` frame.
-4. Expose the resulting :class:`WsRpcLink` so the daemon's claim loop
-   (``_claim_loop``) can issue ``tasks.claim`` over it.
-
-Authentication uses :class:`TaskToken.verify` on an ``X-Server-Token``
-header. The token MUST carry an ``aud`` claim matching this daemon's
-``daemon_id`` and an ``iss`` claim of ``agt-server``. A failed token closes
-the connection with code 1008 before any frames are read.
-
-The daemon answers two inbound RPC requests: ``tasks.available`` (wakes the
-claim loop) and ``session.history`` (reads a session transcript from this
-machine's provider store, backing the CLI's remote ``--resume`` history
-echo). Any other inbound ``rpc_request`` is answered with an
-``unknown_method`` error so the caller doesn't hang on its pending future.
+the other way around. 
 """
 
 from __future__ import annotations
@@ -45,10 +25,7 @@ from ..server.services.auth_service import TaskToken
 log = logging.getLogger("agt.daemon.ws")
 
 # Hook called once per inbound server connection, after the link is
-# exposed as ``current_link`` and ready to issue RPC. Used by the daemon
-# to push its runtime snapshot immediately so the Server's registry is
-# refreshed without waiting for the first 30s heartbeat. Failures are
-# logged and swallowed — they must not abort the link.
+# exposed as ``current_link`` and ready to issue RPC. 
 OnConnectHook = Callable[[WsRpcLink], Awaitable[None]]
 
 
@@ -73,8 +50,6 @@ class DaemonWsServer:
         self._link_lock = asyncio.Lock()
         self._on_connect = on_connect
         # Woken by an inbound ``tasks.available`` notify from the Server.
-        # The claim loop sleeps on this event with a timeout so idle
-        # polling is interrupted as soon as new work arrives.
         self.claim_wakeup = asyncio.Event()
 
     async def start(self) -> None:
@@ -137,9 +112,7 @@ class DaemonWsServer:
             )
         )
 
-        # 3. Build the bidirectional link and start its read loop. The
-        #    read loop runs until the socket drops; we then clear
-        #    ``current_link`` so the claim loop falls back to HTTP.
+        # 3. Build the bidirectional link and start its read loop. 
         link = WsRpcLink(ws, on_request=self._handle_inbound_request)
         await link.start()
         async with self._link_lock:
@@ -177,13 +150,6 @@ class DaemonWsServer:
 
     async def _handle_inbound_request(self, method: str, body: dict) -> dict:
         """Daemon-side inbound RPC handler.
-
-        Handles ``tasks.available`` — a latency hint from the Server that
-        task(s) may be claimable — and ``session.history``, which reads a
-        session's transcript from this machine's provider store (the CLI's
-        remote ``--resume`` history echo) — and ``artifacts.fetch`` (Phase
-        2), the lazy pull of a declared deliverable's bytes. Other methods
-        are unsupported.
         """
         if method == "tasks.available":
             self.wake_claim_loop()
@@ -259,12 +225,6 @@ class DaemonWsServer:
 
     async def _handle_session_history(self, body: dict) -> dict:
         """Read a session transcript from this daemon's local provider store.
-
-        ``load_history`` walks ``~/.claude`` / ``~/.codex`` — the home of
-        the daemon process, which is where the agent's transcripts live. It
-        is read-only and best-effort: a missing file yields an empty list,
-        and a provider with no reader yields ``not_implemented=True`` so the
-        CLI can show the same hint it does for local resumes.
         """
         provider = body.get("provider")
         session_id = body.get("session_id")

@@ -20,6 +20,8 @@ workflows, and a shared artifact registry.
   provider-native sessions and output streaming.
 - **Goal orchestration** — a root agent decomposes an objective, spawns child
   agents within a global budget, and synthesizes their deliverables.
+- **Shared context** — Goal agents exchange versioned decisions, constraints,
+  facts, and Artifact references through a bounded, auditable ContextBrief.
 - **Static workflows** — define reusable multi-agent DAGs in YAML with
   `depends_on` and `${node.output}` dataflow.
 - **Artifact handoff** — register declared outputs as stable
@@ -137,6 +139,7 @@ topologies and configuration.
 | `agt run` | Execute one prompt |
 | `agt chat` | Start, list, resume, or continue a conversation |
 | `agt goal` | Run and inspect goal-driven agent trees |
+| `agt context` | Read shared context visible to the current Agent task |
 | `agt sop` | Validate and run static DAG workflows |
 | `agt artifact` | List or download declared deliverables |
 | `agt session` | Delete recorded chat sessions |
@@ -193,6 +196,7 @@ small Python-first architecture, and run the relevant tests before submitting.
 - [Adding a provider](<docs/guide%20docs/provider-registration.md>)
 - [Orchestration architecture](docs/impl/agent-orchestration-design.md)
 - [Goal mode design](docs/impl/goal-mode-design.md)
+- [Shared context design](docs/impl/goal-shared-context-design.md)
 - [Local runtime flow](docs/spec/local-agent-runtime-flow.md)
 
 ## License

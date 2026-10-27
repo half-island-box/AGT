@@ -30,6 +30,11 @@ from ..comm.wsrpc_link import WsRpcLink
 from .database import session_scope
 from .services.auth_service import TaskToken
 from .services.claim_service import claim_steps_for_daemon
+from .services.context_service import (
+    context_read_for_caller,
+    context_write_for_token,
+    resolve_context_caller,
+)
 from .services.report_service import (
     record_step_progress_for_daemon,
     record_step_result_for_daemon,
@@ -350,6 +355,8 @@ class DaemonLink:
             return await self._handle_catalog_list(body)
         if method == "spawn.create":
             return await self._handle_spawn_create(body)
+        if method == "context.call":
+            return await self._handle_context_call(body)
         raise ValueError({"type": "unknown_method", "message": method})
 
     async def _handle_catalog_list(self, body: dict) -> dict:
@@ -384,9 +391,43 @@ class DaemonLink:
         async with session_scope(self._session_factory) as db:
             return await render_runtime_catalog(
                 db,
-                daemon_defs=self._daemon_defs,
+                daemon_defs=self._daemon_defs or {},
                 capability=capability,
                 provider=provider,
+            )
+
+    async def _handle_context_call(self, body: dict) -> dict:
+        """Apply or read shared context for a task-scoped remote agent."""
+        token = body.get("task_token")
+        op = body.get("op")
+        if not isinstance(op, dict):
+            raise ValueError({
+                "type": "validation_error",
+                "message": "op must be an object",
+            })
+        async with session_scope(self._session_factory) as db:
+            if op.get("op") == "read":
+                caller = await resolve_context_caller(
+                    db,
+                    task_token=token,
+                    secret=self._secret,
+                    trusted_daemon_id=self.daemon_id,
+                    require_running=True,
+                )
+                return await context_read_for_caller(
+                    db,
+                    caller,
+                    keys=op.get("keys"),
+                    scopes=op.get("scopes"),
+                    kinds=op.get("kinds"),
+                    entry_id_after=op.get("entry_id_after"),
+                    limit=op.get("limit"),
+                )
+            return await context_write_for_token(
+                db,
+                task_token=token,
+                secret=self._secret,
+                op=op,
             )
 
     async def _handle_spawn_create(self, body: dict) -> dict:
@@ -610,6 +651,7 @@ class DaemonLink:
                     # goes through (best-effort by design).
                     artifacts=_parse_artifact_items(body.get("artifacts")),
                     outcome_payload=body.get("outcome_payload"),
+                    context_ops=body.get("context_ops") or [],
                 )
         except ValueError as exc:
             payload = (

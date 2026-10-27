@@ -153,6 +153,8 @@ class ReportRequest(BaseModel):
     # Phase 3: structured-outcome sidecar (e.g. spawn intent envelopes
     # ``{"children": [...]}``). Absent for legacy daemons — pure addition.
     outcome_payload: dict | None = None
+    # Shared-context marker operations captured during the subprocess run.
+    context_ops: list[dict] = []
 
 
 class ReportResponse(BaseModel):

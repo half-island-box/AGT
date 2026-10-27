@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..models import JobModel, SessionModel, StepModel
 from ..stream_hub import default_hub
 from .artifact_service import artifact_to_out, artifacts_for_steps, register_step_artifacts
+from .context_service import apply_context_ops
 from .spawn_service import children_for_step, spawn_batches_for_step
 
 log = logging.getLogger(__name__)
@@ -54,6 +55,7 @@ async def record_step_result_for_daemon(
     outcome: str | None = None,
     artifacts: list | None = None,
     outcome_payload: dict | None = None,
+    context_ops: list[dict] | None = None,
 ) -> dict:
     """Record execution results on a claimed Step.
 
@@ -114,6 +116,19 @@ async def record_step_result_for_daemon(
             "reason": "already_terminal",
             "artifacts": [],
         }
+
+    context_results = await apply_context_ops(
+        db,
+        step=step,
+        daemon_id=daemon_id,
+        ops=context_ops or [],
+        report_status=status,
+    )
+    for result in context_results:
+        if result.get("ok"):
+            continue
+        message = result.get("error", "context operation failed")
+        stderr = f"{stderr}\n[agt] context: {message}".strip()
 
     step.exit_code = exit_code
     step.stdout = stdout

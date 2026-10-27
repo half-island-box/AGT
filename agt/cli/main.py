@@ -3493,4 +3493,48 @@ from .goal import goal as _goal_group  # noqa: E402
 cli.add_command(_goal_group)
 
 
+@cli.group()
+def context() -> None:
+    """Goal shared-context operations."""
+
+
+@context.command("read")
+@click.option("--key", "keys", multiple=True, help="Canonical context key.")
+@click.option("--server-url", envvar="AGT_SERVER_URL", default=None)
+@click.option("--json-output/--no-json", default=True, show_default=True)
+def context_read(keys: tuple[str, ...], server_url: str | None, json_output: bool) -> None:
+    """Read context visible to this Agent task (uses AGT_TASK_TOKEN)."""
+    token = os.environ.get("AGT_TASK_TOKEN")
+    task_id = os.environ.get("AGT_TASK_ID")
+    base_url = server_url or os.environ.get("AGT_SERVER_URL") or "http://127.0.0.1:8420"
+    if not token or not task_id:
+        click.echo("Error: AGT_TASK_TOKEN and AGT_TASK_ID are required", err=True)
+        sys.exit(2)
+
+    async def _run() -> dict:
+        params: list[tuple[str, str]] = []
+        for key in keys:
+            params.append(("keys", key))
+        async with httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=15.0) as client:
+            resp = await client.get(
+                "/api/agent/context",
+                params=params,
+                headers={"X-Task-Token": token, "X-Task-Id": task_id},
+            )
+            if resp.status_code >= 300:
+                raise CLIError(f"context read failed ({resp.status_code}): {resp.text}")
+            return resp.json()
+
+    try:
+        result = asyncio.run(_run())
+    except CLIError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+    if json_output:
+        click.echo(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        for entry in result.get("entries", []):
+            click.echo(f"{entry['entry_id']}  {entry['kind']}  {entry['key']}")
+
+
 __all__ = ["cli"]

@@ -296,6 +296,7 @@ class ServerClient:
         outcome: str | None = None,
         artifacts: list[dict[str, Any]] | None = None,
         outcome_payload: dict | None = None,
+        context_ops: list[dict[str, Any]] | None = None,
     ) -> bool:
         payload = {
             "daemon_id": self._daemon_id,
@@ -317,6 +318,8 @@ class ServerClient:
             payload["outcome"] = outcome
         if outcome_payload is not None:
             payload["outcome_payload"] = outcome_payload
+        if context_ops:
+            payload["context_ops"] = context_ops
         resp = await self._post(f"/api/tasks/{task_id}/report", payload)
         return bool(resp.get("recorded", False))
 
@@ -433,6 +436,22 @@ class ServerClient:
             "keep_planning": "true" if keep_planning else "false",
         }
         return await self._get(f"/api/goal/{root_job_id}/export", params=params)
+
+    async def list_goal_context(
+        self,
+        root_job_id: str,
+        *,
+        scope: str | None = None,
+        kind: str | None = None,
+        status_filter: str = "active",
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"status": status_filter}
+        if scope is not None:
+            params["scope"] = scope
+        if kind is not None:
+            params["kind"] = kind
+        resp = await self._get(f"/api/goal/{root_job_id}/context", params=params)
+        return resp.get("entries", [])
 
     async def get_artifact_content(self, artifact_id: str) -> bytes:
         """Fetch an artifact's bytes over HTTP (input-side resolution)."""

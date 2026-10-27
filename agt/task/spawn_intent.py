@@ -32,7 +32,8 @@ MAX_BATCH = 8  # mirrors server MAX_SPAWN_BATCH (payload bounding only)
 SPAWN_INSTRUCTION = (
     "[agt] To delegate parallel sub-tasks, output one line per child, "
     'exactly: AGT-SPAWN {"identity": "<did or empty>", "goal": "...", '
-    '"inputs": ["agt-artifact://..."], "return": "...", '
+    '"inputs": ["agt-artifact://..."], "context_refs": ["shared/..."], '
+    '"return": "...", '
     '"daemon_id": "<optional>", "provider": "<optional>"} — single-line '
     "JSON, no code fences. Omit daemon_id/provider to route dynamically; "
     "if you name one and it cannot run the requested provider, the child "
@@ -43,13 +44,31 @@ MCP_SPAWN_INSTRUCTION = (
     "[agt] When you need to delegate parallel sub-tasks, prefer the "
     "`spawn_subagents` MCP tool. Pass one object per child with `goal`, "
     "optional `identity`, `inputs`, `return`, `daemon_id`, and `provider`. "
+    "Use `context_refs` to pin visible shared-context keys when needed. "
     "The tool response is authoritative: do not claim success unless it "
     "returns ok=true. If the tool is unavailable, fall back to the existing "
     'AGT-SPAWN protocol and output one line per child exactly as '
     'AGT-SPAWN {"identity":"<did or empty>","goal":"...","inputs":[],'
-    '"return":"...","daemon_id":"<optional>","provider":"<optional>"} — '
+    '"context_refs":[],"return":"...","daemon_id":"<optional>",'
+    '"provider":"<optional>"} — '
     "single-line JSON, no code fences. spawn_unavailable or unauthenticated "
     "errors also allow fallback. Do not use both for the same child batch."
+)
+
+MCP_CONTEXT_INSTRUCTION = (
+    "[agt] Use `context_read` to inspect shared Goal context and "
+    "`context_write` / `context_retract` to publish durable decisions, "
+    "constraints, facts, notes, or Artifact references. Updates to an "
+    "existing key require `expected_head_entry_id`. Do not store secrets."
+)
+
+CONTEXT_INSTRUCTION = (
+    "[agt] To share durable context without MCP, output single-line JSON "
+    'markers exactly as AGT-CONTEXT {"op":"write","scope":"shared",'
+    '"key":"slug","kind":"note","idempotency_key":"...",'
+    '"content":{"summary":"..."}}. Use scope=job for lineage-local context; '
+    'retract with AGT-CONTEXT {"op":"retract","key":"...",'
+    '"expected_head_entry_id":N,"idempotency_key":"..."}. Do not store secrets.'
 )
 
 # ── AGT-ASK: explicit "ask the user" marker (goal mode G2b) ─────────
@@ -154,6 +173,15 @@ class AskParseResult:
     question: str | None = None
 
 
+@dataclass
+class ContextParseResult:
+    """Outcome of scanning AGT-CONTEXT marker lines."""
+
+    cleaned_stdout: str
+    ops: list[dict]
+    marker_count: int = 0
+
+
 def parse_ask_markers(stdout: str) -> AskParseResult:
     """Extract the AGT-ASK question and strip marker lines from stdout.
 
@@ -199,6 +227,54 @@ def parse_ask_markers(stdout: str) -> AskParseResult:
     return AskParseResult(cleaned_stdout=cleaned, asked=asked, question=question)
 
 
+def parse_context_markers(stdout: str) -> ContextParseResult:
+    """Extract shared-context operations and strip marker lines."""
+    prefix = "AGT-CONTEXT "
+    kept: list[str] = []
+    ops: list[dict] = []
+    marker_count = 0
+
+    for line in stdout.splitlines():
+        if not line.startswith(prefix):
+            kept.append(line)
+            continue
+        marker_count += 1
+        try:
+            envelope = json.loads(line[len(prefix):])
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(envelope, dict):
+            continue
+        if envelope.get("op") not in {"write", "retract"}:
+            continue
+        if len(ops) >= 8:
+            continue
+        ops.append(envelope)
+
+    cleaned = "\n".join(kept)
+    if stdout.endswith("\n") and cleaned:
+        cleaned += "\n"
+    if marker_count:
+        summary = f"[agt] captured {len(ops)} shared-context operation(s)"
+        base = cleaned.rstrip("\n")
+        cleaned = (base + "\n" + summary + "\n") if base else summary + "\n"
+    return ContextParseResult(
+        cleaned_stdout=cleaned,
+        ops=ops,
+        marker_count=marker_count,
+    )
+
+
+def mask_context_lines(text: str) -> str:
+    """Length-preserving mask for live progress frames."""
+    if "AGT-CONTEXT " not in text:
+        return text
+    return "\n".join(
+        "*" * len(line) if line.startswith("AGT-CONTEXT ") else line
+        for line in text.splitlines()
+    )
+
+
 def derive_marker_outcome(stdout: str) -> tuple[str, str | None, dict | None]:
     """Terminal-outcome decision over a Step's raw captured stdout.
 
@@ -242,5 +318,10 @@ __all__ = [
     "parse_ask_markers",
     "derive_marker_outcome",
     "mask_spawn_lines",
+    "MCP_CONTEXT_INSTRUCTION",
+    "CONTEXT_INSTRUCTION",
+    "ContextParseResult",
+    "parse_context_markers",
+    "mask_context_lines",
     "MAX_BATCH",
 ]

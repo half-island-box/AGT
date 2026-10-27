@@ -161,6 +161,40 @@ def ensure_schema(conn: Connection) -> None:
         )
         log.info("Migrated tasks table: added input_message column")
 
+    # Goal shared context: audit fields for the claim-time ContextBrief.
+    # The table itself is created by Base.metadata.create_all; these ALTERs
+    # cover databases whose tasks table already existed before this phase.
+    for column, ddl in (
+        ("context_brief_json", "TEXT"),
+        ("context_snapshot_id", "VARCHAR(64)"),
+        ("context_watermark", "INTEGER"),
+    ):
+        if _table_exists(conn, "tasks") and column not in _column_names(conn, "tasks"):
+            conn.exec_driver_sql(f"ALTER TABLE tasks ADD COLUMN {column} {ddl}")
+            log.info("Migrated tasks table: added %s column", column)
+
+    if _table_exists(conn, "context_entries"):
+        conn.exec_driver_sql("""
+            CREATE INDEX IF NOT EXISTS ix_context_entries_root_id
+            ON context_entries(root_job_id, entry_id)
+        """)
+        conn.exec_driver_sql("""
+            CREATE INDEX IF NOT EXISTS ix_context_entries_root_key
+            ON context_entries(root_job_id, key, status)
+        """)
+        conn.exec_driver_sql("""
+            CREATE INDEX IF NOT EXISTS ix_context_entries_root_author
+            ON context_entries(root_job_id, author_job_id)
+        """)
+        conn.exec_driver_sql("""
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_context_entries_step_idempotency
+            ON context_entries(author_step_id, idempotency_key)
+        """)
+        conn.exec_driver_sql("""
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_context_entries_active_key
+            ON context_entries(root_job_id, key) WHERE status = 'active'
+        """)
+
     # Phase 3: Job-tree lineage + spawn payload sidecar. ``root_job_id``
     # needs NOT NULL + backfill for existing depth-1 rows (a root's root
     # is itself). ``outcome_payload`` carries spawn intent envelopes.

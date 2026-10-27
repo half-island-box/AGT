@@ -26,6 +26,35 @@ def upgrade() -> None:
     - Backfill a Job for every legacy Task (one-to-one).
     - Rebuild ``sessions`` with a ``job_id``-based composite PK.
     """
+    # The original migration chain predates several columns that later
+    # Job/Step backfills read. Ensure them first so a fresh database can
+    # reach later revisions, not only databases initialized via
+    # Base.metadata.create_all().
+    bind = op.get_bind()
+    task_columns = {
+        row[1] for row in bind.exec_driver_sql("PRAGMA table_info(tasks)")
+    }
+    with op.batch_alter_table('tasks', schema=None) as batch_op:
+        if "identity_did" not in task_columns:
+            batch_op.add_column(sa.Column('identity_did', sa.String(length=256), nullable=True))
+        if "target_daemon_id" not in task_columns:
+            batch_op.add_column(sa.Column('target_daemon_id', sa.String(length=64), nullable=True))
+        if "work_dir" not in task_columns:
+            batch_op.add_column(sa.Column('work_dir', sa.String(length=512), nullable=True))
+        if "agent_cwd" not in task_columns:
+            batch_op.add_column(sa.Column('agent_cwd', sa.String(length=1024), nullable=True))
+
+    session_columns = {
+        row[1] for row in bind.exec_driver_sql("PRAGMA table_info(sessions)")
+    }
+    with op.batch_alter_table('sessions', schema=None) as batch_op:
+        if "identity_did" not in session_columns:
+            batch_op.add_column(sa.Column(
+                'identity_did', sa.String(length=256), nullable=False, server_default=''
+            ))
+        if "updated_at" not in session_columns:
+            batch_op.add_column(sa.Column('updated_at', sa.String(length=32), nullable=True))
+
     # 1. Create jobs table.
     op.create_table(
         'jobs',
