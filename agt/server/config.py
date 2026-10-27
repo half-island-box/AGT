@@ -124,6 +124,12 @@ class ServerConfig:
         default_factory=lambda: str(Path.home() / ".agt" / "daemons")
     )
     daemons: list[DaemonTarget] = field(default_factory=list)
+    # Browser-console project APIs. Like the future console shell, these
+    # endpoints expose local directory names and must stay loopback-only by
+    # default until console authentication exists.
+    console_enabled: bool = True
+    console_allow_remote: bool = False
+    console_workspace_roots: list[str] = field(default_factory=list)
 
     @classmethod
     def from_env(cls) -> "ServerConfig":
@@ -137,6 +143,14 @@ class ServerConfig:
         daemons_path = os.environ.get(
             "AGT_DAEMONS_FILE", str(Path.home() / ".agt" / "daemons")
         )
+        workspace_roots = [
+            str(Path(item).expanduser().resolve())
+            for item in os.environ.get(
+                "AGT_CONSOLE_WORKSPACE_ROOTS",
+                str(Path.home()),
+            ).split(os.pathsep)
+            if item.strip()
+        ]
         return cls(
             host=os.environ.get("AGT_SERVER_HOST", "0.0.0.0"),
             port=int(os.environ.get("AGT_SERVER_PORT", "8420")),
@@ -150,6 +164,13 @@ class ServerConfig:
             secret=secret,
             daemons_path=daemons_path,
             daemons=_parse_daemons_file(daemons_path),
+            console_enabled=os.environ.get(
+                "AGT_CONSOLE_ENABLED", "1"
+            ).strip().lower() not in {"0", "false", "no", "off"},
+            console_allow_remote=os.environ.get(
+                "AGT_CONSOLE_ALLOW_REMOTE", "0"
+            ).strip().lower() in {"1", "true", "yes", "on"},
+            console_workspace_roots=workspace_roots,
         )
 
 

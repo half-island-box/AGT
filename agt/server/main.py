@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -31,6 +32,7 @@ from .routes.daemons import router as daemons_router
 from .routes.heartbeat import router as heartbeat_router
 from .routes.identities import router as identities_router
 from .routes.jobs import router as jobs_router
+from .routes.projects import router as projects_router
 from .routes.artifacts import router as artifacts_router
 from .routes.context import router as context_router
 from .routes.sop import router as sop_router
@@ -44,9 +46,21 @@ from .services.runtime_service import prune_stale_runtimes
 log = logging.getLogger(__name__)
 
 
+def _is_loopback_bind(host: str) -> bool:
+    """Whether a server bind address can only receive local connections."""
+    value = host.strip("[]")
+    try:
+        return ipaddress.ip_address(value).is_loopback
+    except ValueError:
+        return value == "localhost"
+
+
 def create_app(config: ServerConfig | None = None) -> FastAPI:
     """Build the FastAPI app, configured against the given ServerConfig."""
     cfg = config or ServerConfig.from_env()
+    console_enabled = cfg.console_enabled and (
+        cfg.console_allow_remote or _is_loopback_bind(cfg.host)
+    )
     engine = make_engine(cfg)
     session_factory = make_session_factory(engine)
     # Phase B: ``daemon_id → DaemonTarget`` lookup, built once here and
@@ -187,6 +201,8 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     app.include_router(sessions_router)
     app.include_router(heartbeat_router)
     app.include_router(identities_router)
+    if console_enabled:
+        app.include_router(projects_router)
 
     return app
 

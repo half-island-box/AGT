@@ -409,6 +409,51 @@ class HealthResponse(BaseModel):
     status: str = "ok"
 
 
+# ── Console projects ────────────────────────────────────────────────
+
+
+class ConsoleProjectCreate(BaseModel):
+    path: str
+    name: str | None = None
+
+
+class ConsoleProjectUpdate(BaseModel):
+    name: str
+
+
+class ConsoleProjectRunCounts(BaseModel):
+    chat: int = 0
+    sop: int = 0
+    goal: int = 0
+
+
+class ConsoleProjectOut(BaseModel):
+    id: str
+    name: str
+    path: str
+    available: bool
+    created_at: str
+    updated_at: str
+    last_opened_at: str | None = None
+    run_counts: ConsoleProjectRunCounts = Field(default_factory=ConsoleProjectRunCounts)
+
+
+class ConsoleProjectListResponse(BaseModel):
+    projects: list[ConsoleProjectOut]
+
+
+class ConsoleDirectoryOut(BaseModel):
+    name: str
+    path: str
+
+
+class ConsoleDirectoryListResponse(BaseModel):
+    roots: list[str]
+    parent: str | None
+    current: str
+    directories: list[ConsoleDirectoryOut]
+
+
 # ── Identity (Phase 4 Step 1) ───────────────────────────────────────
 
 
@@ -694,6 +739,13 @@ __all__ = [
     "HeartbeatRequest",
     "HeartbeatResponse",
     "HealthResponse",
+    "ConsoleProjectCreate",
+    "ConsoleProjectUpdate",
+    "ConsoleProjectRunCounts",
+    "ConsoleProjectOut",
+    "ConsoleProjectListResponse",
+    "ConsoleDirectoryOut",
+    "ConsoleDirectoryListResponse",
     "IdentityCreate",
     "IdentityOut",
     "IdentityUpdate",

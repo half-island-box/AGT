@@ -495,6 +495,29 @@ class ContextEntryModel(Base):
     )
 
 
+class ConsoleProjectModel(Base):
+    """A user-selected directory project for the browser console.
+
+    The project is a stable name/path pointer, not a workspace copy. Run
+    history remains scoped by ``jobs.cwd``; this table gives the console a
+    persistent picker and last-opened ordering without rewriting run rows.
+    """
+
+    __tablename__ = "console_projects"
+    __table_args__ = (
+        UniqueConstraint("path", name="ux_console_projects_path"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    path: Mapped[str] = mapped_column(String(1024), nullable=False, unique=True)
+    created_at: Mapped[str] = mapped_column(String(32), nullable=False)
+    updated_at: Mapped[str] = mapped_column(String(32), nullable=False)
+    last_opened_at: Mapped[str | None] = mapped_column(
+        String(32), nullable=True, index=True
+    )
+
+
 # Compatibility alias: the ORM was originally exposed as ``TaskModel`` before
 # the Job/Step split made its actual Step semantics explicit.
 TaskModel = StepModel
@@ -513,4 +536,5 @@ __all__ = [
     "JobParentModel",
     "SpawnBatchModel",
     "ContextEntryModel",
+    "ConsoleProjectModel",
 ]

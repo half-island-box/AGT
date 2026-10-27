@@ -30,6 +30,8 @@ workflows, and a shared artifact registry.
   machines via HTTP or reverse-dial WebSocket.
 - **Identity routing** — assign roles such as reviewer or tester and route them
   by provider, daemon affinity, and runtime availability.
+- **Console projects** — persist user-selected directory projects and browse
+  allowed directories through loopback-only server APIs.
 - **MCP and editor integration** — expose sub-agent spawning to MCP-capable
   agents and use the early VS Code extension for chat, Goals, and SOP editing.
 
@@ -127,7 +129,10 @@ agt task submit --prompt "Say hello in three words"
 ```
 
 The server listens on `127.0.0.1:8420` by default. OpenAPI documentation is at
-`http://127.0.0.1:8420/docs`. See the
+`http://127.0.0.1:8420/docs`. The server also provides loopback-only console
+project APIs for creating, renaming, opening, and listing directory-backed
+projects; directory browsing is constrained by
+`AGT_CONSOLE_WORKSPACE_ROOTS`. See the
 [quick-start guide](<docs/guide%20docs/quick_start.md>) for deployment
 topologies and configuration.
 
@@ -170,6 +175,8 @@ environment variables, and exit codes.
 
 - **CLI** submits work and provides human-readable views of runs.
 - **Server** owns coordination, persistence, routing, MCP, and artifacts.
+- **Console projects** are persistent directory pointers; run history remains
+  scoped by the project path in `jobs.cwd`.
 - **Daemon** owns local process execution, concurrency, and heartbeats.
 - **Agent CLIs** run as fresh subprocesses; sessions remain provider-native.
 - **SQLite** is the source of truth for all Server-managed runs.
