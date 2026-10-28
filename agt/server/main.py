@@ -14,6 +14,7 @@ import uvicorn
 from fastapi import FastAPI
 
 from .config import DaemonTarget, ServerConfig, ServerConfigError
+from .console import router as console_router
 from .daemon_link import DaemonLink
 from .database import bind_get_db, make_engine, make_session_factory, session_scope
 from .mcp_server import build_catalog_mcp, catalog_mcp_asgi
@@ -58,9 +59,17 @@ def _is_loopback_bind(host: str) -> bool:
 def create_app(config: ServerConfig | None = None) -> FastAPI:
     """Build the FastAPI app, configured against the given ServerConfig."""
     cfg = config or ServerConfig.from_env()
-    console_enabled = cfg.console_enabled and (
-        cfg.console_allow_remote or _is_loopback_bind(cfg.host)
-    )
+    if (
+        cfg.console_enabled
+        and cfg.host not in {"127.0.0.1", "localhost", "::1"}
+        and not cfg.console_allow_remote
+    ):
+        log.warning(
+            "Browser console disabled for non-loopback bind %s; "
+            "set AGT_CONSOLE_ALLOW_REMOTE=1 only behind an authenticated proxy",
+            cfg.host,
+        )
+        cfg.console_enabled = False
     engine = make_engine(cfg)
     session_factory = make_session_factory(engine)
     # Phase B: ``daemon_id → DaemonTarget`` lookup, built once here and
@@ -94,6 +103,8 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                     "Startup sweep: removed %d stale runtime row(s)", removed,
                 )
         log.info("agt-server ready on %s:%d (db=%s)", cfg.host, cfg.port, cfg.db_path)
+        if cfg.console_enabled:
+            log.info("AGT console: http://127.0.0.1:%d/", cfg.port)
 
         # Optional PID file (detached mode): write the live pid so that
         # ``agt server stop`` / ``status`` can find and signal us. Only
@@ -201,8 +212,9 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     app.include_router(sessions_router)
     app.include_router(heartbeat_router)
     app.include_router(identities_router)
-    if console_enabled:
+    if cfg.console_enabled:
         app.include_router(projects_router)
+        app.include_router(console_router)
 
     return app
 

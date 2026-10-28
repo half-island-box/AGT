@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,11 +12,26 @@ from ..models import JobModel
 from ..schemas import SopRunListResponse, SopRunSummary
 
 
+def normalize_sop_template_path(raw: str) -> str:
+    """Normalize a client-supplied SOP template path for exact association."""
+    value = raw.strip()
+    expanded = Path(value).expanduser()
+    if not value or not expanded.is_absolute():
+        raise ValueError("template_path must be an absolute path")
+    if expanded.suffix.lower() not in {".yaml", ".yml"}:
+        raise ValueError("template_path must point to a YAML file")
+    resolved = expanded.resolve(strict=False)
+    if len(str(resolved)) > 1024:
+        raise ValueError("template_path must be at most 1024 characters")
+    return str(resolved)
+
+
 async def list_sop_runs(
     db: AsyncSession,
     *,
     cwd: str | None = None,
     daemon_id: str | None = None,
+    template_path: str | None = None,
     limit: int,
     offset: int,
 ) -> tuple[list[SopRunSummary], int]:
@@ -28,6 +44,8 @@ async def list_sop_runs(
         filters.append(JobModel.cwd == cwd)
     if daemon_id is not None:
         filters.append(JobModel.target_daemon_id == daemon_id)
+    if template_path is not None:
+        filters.append(JobModel.sop_template_path == template_path)
 
     roots = (
         (
@@ -77,6 +95,8 @@ async def list_sop_runs(
                 identity_did=root.identity_did,
                 daemon_id=root.target_daemon_id,
                 cwd=root.cwd,
+                template_path=root.sop_template_path,
+                template_hash=root.sop_template_hash,
                 created_at=root.created_at,
                 updated_at=root.updated_at,
                 total_nodes=len(root_nodes),
@@ -91,10 +111,16 @@ async def list_sop_runs_response(
     *,
     cwd: str | None = None,
     daemon_id: str | None = None,
+    template_path: str | None = None,
     limit: int,
     offset: int,
 ) -> SopRunListResponse:
     runs, total = await list_sop_runs(
-        db, cwd=cwd, daemon_id=daemon_id, limit=limit, offset=offset
+        db,
+        cwd=cwd,
+        daemon_id=daemon_id,
+        template_path=template_path,
+        limit=limit,
+        offset=offset,
     )
     return SopRunListResponse(runs=runs, total=total)

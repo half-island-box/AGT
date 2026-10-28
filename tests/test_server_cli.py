@@ -364,3 +364,11 @@ class TestMissingSecret:
         secret_path.write_text("d" * 64, encoding="utf-8")
         cfg = ServerConfig.from_env()
         assert cfg.secret == "c" * 64
+
+    def test_console_workspace_roots_default_to_home(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.delenv("AGT_CONSOLE_WORKSPACE_ROOTS", raising=False)
+        cfg = ServerConfig.from_env()
+        assert cfg.console_workspace_roots == [str(tmp_path)]

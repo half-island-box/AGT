@@ -454,6 +454,15 @@ class ConsoleDirectoryListResponse(BaseModel):
     directories: list[ConsoleDirectoryOut]
 
 
+class ConsoleDirectoryPickResponse(BaseModel):
+    path: str | None = None
+
+
+class ConsoleSopRenameRequest(BaseModel):
+    path: str
+    new_name: str
+
+
 # ── Identity (Phase 4 Step 1) ───────────────────────────────────────
 
 
@@ -659,6 +668,8 @@ class SopRunSummary(BaseModel):
     identity_did: str | None = None
     daemon_id: str | None = None
     cwd: str | None = None
+    template_path: str | None = None
+    template_hash: str | None = None
     created_at: str
     updated_at: str
     total_nodes: int
@@ -700,6 +711,8 @@ class RunSummary(BaseModel):
     identity_did: str | None = None
     daemon_id: str | None = None
     cwd: str | None = None
+    template_path: str | None = None
+    template_hash: str | None = None
     title: str | None = None
     created_at: str
     updated_at: str
@@ -746,6 +759,7 @@ __all__ = [
     "ConsoleProjectListResponse",
     "ConsoleDirectoryOut",
     "ConsoleDirectoryListResponse",
+    "ConsoleDirectoryPickResponse",
     "IdentityCreate",
     "IdentityOut",
     "IdentityUpdate",

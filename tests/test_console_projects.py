@@ -22,9 +22,21 @@ def _build_app(
     *,
     host: str = "127.0.0.1",
     enabled: bool = True,
+    allow_remote: bool = False,
 ) -> tuple[TestClient, callable, Path]:
     workspace = tmp_path / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
+    assets = tmp_path / "console-assets"
+    assets.mkdir()
+    for page in ("chat", "goal", "projects", "settings", "sop"):
+        (assets / f"webview-console-{page}.js").write_text(
+            f"console.log({page!r})",
+            encoding="utf-8",
+        )
+        (assets / f"webview-console-{page}.css").write_text(
+            "body{}",
+            encoding="utf-8",
+        )
     cfg = ServerConfig(
         host=host,
         port=8420,
@@ -32,6 +44,8 @@ def _build_app(
         sessions_json_path=str(tmp_path / "sessions.json"),
         secret=SECRET,
         console_enabled=enabled,
+        console_allow_remote=allow_remote,
+        console_assets_dir=str(assets),
         console_workspace_roots=[str(workspace)],
     )
     engine = make_engine(cfg)
@@ -282,3 +296,48 @@ def test_console_project_api_disabled_for_non_loopback_or_opt_out(
         dispose_loopback()
         dispose_remote()
         dispose_disabled()
+
+
+def test_console_project_routes_and_assets(tmp_path: Path) -> None:
+    client, dispose, _ = _build_app(tmp_path)
+    try:
+        root = client.get("/", follow_redirects=False)
+        assert root.status_code == 302
+        assert root.headers["location"] == "/console/"
+
+        index = client.get("/console/", follow_redirects=False)
+        assert index.status_code == 302
+        assert index.headers["location"] == "/console/projects"
+
+        projects = client.get("/console/projects")
+        assert projects.status_code == 200
+        assert "/console/assets/webview-console-projects.js" in projects.text
+
+        legacy_chat = client.get("/console/chat", follow_redirects=False)
+        assert legacy_chat.status_code == 302
+        assert legacy_chat.headers["location"] == "/console/projects"
+
+        project = client.get(
+            "/console/projects/project-example",
+            follow_redirects=False,
+        )
+        assert project.status_code == 302
+        assert (
+            project.headers["location"]
+            == "/console/projects/project-example/chat"
+        )
+
+        chat = client.get("/console/projects/project-example/chat")
+        assert chat.status_code == 200
+        assert "/console/assets/webview-console-chat.js" in chat.text
+
+        asset = client.get("/console/assets/webview-console-projects.js")
+        assert asset.status_code == 200
+        assert "console.log('projects')" in asset.text
+
+        missing_mode = client.get(
+            "/console/projects/project-example/settings",
+        )
+        assert missing_mode.status_code == 404
+    finally:
+        dispose()
