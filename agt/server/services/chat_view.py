@@ -9,6 +9,19 @@ from ..models import JobModel, SessionModel, StepModel
 from ..schemas import ChatRunListResponse, ChatRunSummary
 
 
+def _first_prompt(job: JobModel) -> str | None:
+    """Return the conversation title, falling back to its earliest Step.
+
+    ``first_prompt`` is persisted when a chat Job is created. The Step
+    fallback keeps runs created by old servers visible before the backfill
+    migration runs (or when a test/legacy fixture constructs rows directly).
+    """
+    prompt = job.first_prompt
+    if prompt is None:
+        prompt = next((step.prompt for step in job.steps if step.prompt), None)
+    return prompt if prompt and prompt.strip() else None
+
+
 async def list_chat_runs(
     db: AsyncSession,
     *,
@@ -62,7 +75,7 @@ async def list_chat_runs(
                 identity_did=session.identity_did or job.identity_did,
                 daemon_id=job.target_daemon_id,
                 cwd=session.cwd or job.cwd,
-                title=None,  # TODO: derive from first StepModel.prompt if desired
+                title=_first_prompt(job),
                 status=job.status,
                 created_at=session.created_at,
                 updated_at=session.updated_at,

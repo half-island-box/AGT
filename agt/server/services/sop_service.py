@@ -30,6 +30,7 @@ from ..models import (
     IdentityBindingModel,
     IdentityModel,
     JobModel,
+    JobParentModel,
     RuntimeModel,
     StepModel,
 )
@@ -277,6 +278,58 @@ async def _validate_routability(db: AsyncSession, spec) -> None:
             })
 
 
+def _topo_sort_non_loop(nodes: list) -> list:
+    """Stably topologically sort non-loop nodes by non-loop dependency edges.
+
+    ``parse_sop`` rejects cycles outside a declared loop, so the non-loop
+    subgraph is acyclic and a dependent can always be placed after its
+    non-loop upstreams — regardless of the author's ``tasks`` order.
+    """
+    by_name = {n.name: n for n in nodes}
+    indeg = {n.name: 0 for n in nodes}
+    dependents: dict[str, list[str]] = {n.name: [] for n in nodes}
+    for n in nodes:
+        for dep in n.depends_on:
+            if dep in by_name:  # non-loop -> non-loop edge only
+                indeg[n.name] += 1
+                dependents[dep].append(n.name)
+
+    queue = [n.name for n in nodes if indeg[n.name] == 0]
+    ordered: list = []
+    while queue:
+        current = queue.pop(0)  # FIFO keeps the stable spec order for ties
+        ordered.append(by_name[current])
+        for dependent in dependents[current]:
+            indeg[dependent] -= 1
+            if indeg[dependent] == 0:
+                queue.append(dependent)
+    return ordered
+
+
+def _resolve_parent(expansion: SOPExpansion, node_by_name: dict, node, dep: str) -> str:
+    """Resolve one ``depends_on`` name to an already-materialized job id.
+
+    Raises a structured ``ValueError`` (mapped to 400 by the route) instead
+    of a bare ``KeyError`` when a parent is missing — a defensive backstop
+    for any residual ordering bug during expansion.
+    """
+    dep_node = node_by_name[dep]
+    if node.loop_name is not None and dep_node.loop_name == node.loop_name:
+        job_id = expansion.loop_node_jobs.get(dep_node.name, {}).get(1)
+    elif dep_node.loop_name:
+        job_id = expansion.sentinel_jobs.get(dep_node.loop_name)
+    else:
+        job_id = expansion.node_jobs.get(dep)
+    if job_id is None:
+        raise ValueError({
+            "type": "sop_internal_parent_missing",
+            "message": f"task '{node.name}' depends on unresolved task '{dep}'",
+            "task": node.name,
+            "dep": dep,
+        })
+    return job_id
+
+
 async def expand_sop(
     db: AsyncSession, spec, cwd: str | None = None, local_daemon_id: str | None = None
 ) -> SOPExpansion:
@@ -360,18 +413,16 @@ async def expand_sop(
         sentinel = await _create_loop_sentinel(db, loop, root.job_id, cwd=cwd)
         expansion.sentinel_jobs[loop.name] = sentinel
 
-    # Create non-loop DAG jobs.
-    for node in non_loop_nodes:
+    # Create non-loop DAG jobs in dependency order so a node's parents are
+    # always materialized before the node itself.
+    for node in _topo_sort_non_loop(non_loop_nodes):
         if node.name == root_node.name:
             continue
         meta = _node_meta(node, spec.identities, cwd, local_daemon_id)
-        parents: list[str] = []
-        for dep in node.depends_on:
-            dep_node = node_by_name[dep]
-            if dep_node.loop_name:
-                parents.append(expansion.sentinel_jobs[dep_node.loop_name])
-            else:
-                parents.append(expansion.node_jobs[dep])
+        parents = [
+            _resolve_parent(expansion, node_by_name, node, dep)
+            for dep in node.depends_on
+        ]
         job = await create_job(
             db,
             provider=meta["provider_hint"] or "claude",
@@ -386,7 +437,10 @@ async def expand_sop(
         )
         expansion.node_jobs[node.name] = job.job_id
 
-    # Create iteration 1 jobs for loop nodes.
+    # Create iteration 1 jobs for loop nodes. Split into two passes so
+    # same-loop parent edges can be wired only after every iteration-1 job
+    # id exists — loop-internal cycles make a single dependency-ordered
+    # pass impossible.
     for node in loop_nodes:
         if node.name == root_node.name:
             continue
@@ -394,15 +448,11 @@ async def expand_sop(
         meta = _node_meta(node, spec.identities, cwd, local_daemon_id)
         meta["loop_name"] = loop.name
         meta["iteration"] = 1
-        parents: list[str] = []
-        for dep in node.depends_on:
-            dep_node = node_by_name[dep]
-            if dep_node.loop_name == node.loop_name:
-                parents.append(expansion.loop_node_jobs[dep_node.name][1])
-            elif dep_node.loop_name:
-                parents.append(expansion.sentinel_jobs[dep_node.loop_name])
-            else:
-                parents.append(expansion.node_jobs[dep])
+        external_parents = [
+            _resolve_parent(expansion, node_by_name, node, dep)
+            for dep in node.depends_on
+            if node_by_name[dep].loop_name != node.loop_name
+        ]
         job = await create_job(
             db,
             provider=meta["provider_hint"] or "claude",
@@ -411,7 +461,7 @@ async def expand_sop(
             with_step=False,
             work_dir=cwd,
             job_type="sop",
-            parents=parents,
+            parents=external_parents,
             root_job_id=root.job_id,
             sop_node=json.dumps(meta, ensure_ascii=False),
             sop_loop_name=loop.name,
@@ -419,6 +469,34 @@ async def expand_sop(
             sop_loop_meta=_loop_meta_json(loop),
         )
         expansion.loop_node_jobs.setdefault(node.name, {})[1] = job.job_id
+
+    # Wire same-loop internal edges now that every iteration-1 job exists.
+    now = _now()
+    for node in loop_nodes:
+        this_job = expansion.loop_node_jobs.get(node.name, {}).get(1)
+        if this_job is None:  # pragma: no cover — internal invariant
+            raise ValueError({
+                "type": "sop_internal_job_missing",
+                "message": f"loop node '{node.name}' has no iteration-1 job",
+                "task": node.name,
+            })
+        for dep in node.depends_on:
+            dep_node = node_by_name[dep]
+            if dep_node.loop_name != node.loop_name:
+                continue
+            parent = expansion.loop_node_jobs.get(dep_node.name, {}).get(1)
+            if parent is None:  # pragma: no cover — internal invariant
+                raise ValueError({
+                    "type": "sop_internal_parent_missing",
+                    "message": f"loop task '{node.name}' depends on unresolved task '{dep}'",
+                    "task": node.name,
+                    "dep": dep,
+                })
+            db.add(JobParentModel(
+                job_id=this_job,
+                parent_job_id=parent,
+                created_at=now,
+            ))
 
     await db.flush()
 

@@ -137,6 +137,10 @@ class ServerConfig:
     console_workspace_roots: list[str] = field(
         default_factory=lambda: [str(Path.home())]
     )
+    # Chat attachment limits (user → agent input uploads). The Server owns
+    # the bytes; these caps are enforced before anything is written.
+    max_upload_bytes: int = 32 * 1024 * 1024
+    upload_ttl_days: int = 7
 
     @classmethod
     def from_env(cls) -> "ServerConfig":
@@ -182,6 +186,10 @@ class ServerConfig:
                 str(Path(__file__).resolve().parent.parent / "web_console" / "assets"),
             ),
             console_workspace_roots=workspace_roots,
+            max_upload_bytes=int(
+                os.environ.get("AGT_MAX_UPLOAD_BYTES", str(32 * 1024 * 1024))
+            ),
+            upload_ttl_days=int(os.environ.get("AGT_UPLOAD_TTL_DAYS", "7")),
         )
 
 

@@ -356,6 +356,39 @@ class ServerClient:
                 return None
             raise
 
+    async def upload_input_file(
+        self,
+        *,
+        name: str,
+        content_b64: str,
+        mime_type: str | None = None,
+        source: str = "cli",
+    ) -> dict[str, Any]:
+        """Upload one chat attachment; returns metadata incl. ``uri``.
+
+        The Server deduplicates on content hash, so re-sending the same
+        bytes in a later turn is free.
+        """
+        payload: dict[str, Any] = {
+            "name": name,
+            "content_b64": content_b64,
+            "source": source,
+        }
+        if mime_type:
+            payload["mime_type"] = mime_type
+        return await self._post("/api/uploads", payload)
+
+    async def get_upload_content(self, upload_id: str) -> bytes:
+        """Fetch an upload's bytes over HTTP (daemon-side fallback)."""
+        assert self._client is not None, "ServerClient must be used as async context manager"
+        resp = await self._client.get(
+            f"/api/uploads/{upload_id}/content",
+            headers=self._headers(),
+        )
+        if resp.status_code >= 300:
+            raise RPCRejected(resp.status_code, {"raw": resp.text})
+        return resp.content
+
     async def submit_sop(
         self,
         spec: dict,
@@ -575,9 +608,16 @@ class ServerClient:
         work_dir: str | None = None,
         identity_did: str | None = None,
         agent_cwd: str | None = None,
+        message: dict | None = None,
     ) -> dict:
-        """Create a Job with its first Step. Returns {"job_id", "task_id", "status"}."""
+        """Create a Job with its first Step. Returns {"job_id", "task_id", "status"}.
+
+        ``message`` is the optional A2A-shaped structured input (used by
+        chat attachments: a TextPart plus one FilePart per upload).
+        """
         payload: dict[str, Any] = {"prompt": prompt, "provider": provider}
+        if message is not None:
+            payload["message"] = message
         if target_daemon_id is not None:
             payload["target_daemon_id"] = target_daemon_id
         if work_dir is not None:
@@ -588,9 +628,14 @@ class ServerClient:
             payload["agent_cwd"] = agent_cwd
         return await self._post("/api/jobs", payload)
 
-    async def job_input(self, job_id: str, prompt: str) -> dict:
+    async def job_input(
+        self, job_id: str, prompt: str, message: dict | None = None
+    ) -> dict:
         """Append a new Step to an existing Job."""
-        return await self._post(f"/api/jobs/{job_id}/input", {"prompt": prompt})
+        payload: dict[str, Any] = {"prompt": prompt}
+        if message is not None:
+            payload["message"] = message
+        return await self._post(f"/api/jobs/{job_id}/input", payload)
 
     async def job_status(self, job_id: str) -> dict:
         return await self._get(f"/api/jobs/{job_id}/status")

@@ -42,6 +42,8 @@ from .routes.runtimes import router as runtimes_router
 from .routes.runs import router as runs_router
 from .routes.sessions import router as sessions_router
 from .routes.tasks import router as tasks_router
+from .routes.uploads import router as uploads_router
+from .services.input_service import sweep_expired_uploads
 from .services.runtime_service import prune_stale_runtimes
 
 log = logging.getLogger(__name__)
@@ -102,6 +104,11 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                 log.info(
                     "Startup sweep: removed %d stale runtime row(s)", removed,
                 )
+            # Expired chat attachments: same one-shot sweep idea. A live
+            # job's already-materialized inputs are unaffected (the daemon
+            # copied them at claim time).
+            await sweep_expired_uploads(db)
+            await db.commit()
         log.info("agt-server ready on %s:%d (db=%s)", cfg.host, cfg.port, cfg.db_path)
         if cfg.console_enabled:
             log.info("AGT console: http://127.0.0.1:%d/", cfg.port)
@@ -203,6 +210,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     app.include_router(daemon_config_router)
     app.include_router(daemons_router)
     app.include_router(tasks_router)
+    app.include_router(uploads_router)
     app.include_router(jobs_router)
     app.include_router(artifacts_router)
     app.include_router(context_router)

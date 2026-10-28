@@ -285,6 +285,60 @@ def ensure_schema(conn: Connection) -> None:
         )
         log.info("Migrated jobs table: added goal_meta column")
 
+    # Chat history title: preserve the immutable first user prompt on the
+    # conversation owner (Job), rather than duplicating it on every provider
+    # session pointer row.
+    if _table_exists(conn, "jobs") and "first_prompt" not in _column_names(conn, "jobs"):
+        conn.exec_driver_sql(
+            "ALTER TABLE jobs ADD COLUMN first_prompt TEXT"
+        )
+        log.info("Migrated jobs table: added first_prompt column")
+
+    jobs_columns = _column_names(conn, "jobs") if _table_exists(conn, "jobs") else set()
+    tasks_columns = _column_names(conn, "tasks") if _table_exists(conn, "tasks") else set()
+    if (
+        {"job_id", "job_type", "first_prompt"} <= jobs_columns
+        and {"job_id", "task_id", "prompt", "created_at"} <= tasks_columns
+    ):
+        conn.exec_driver_sql("""
+            UPDATE jobs
+            SET first_prompt = (
+                SELECT t.prompt
+                FROM tasks AS t
+                WHERE t.job_id = jobs.job_id
+                ORDER BY t.created_at ASC, t.task_id ASC
+                LIMIT 1
+            )
+            WHERE job_type = 'chat'
+              AND (first_prompt IS NULL OR first_prompt = '')
+        """)
+
+    # Chat attachments: user-uploaded inputs owned by the Server. New
+    # databases get this from ``create_all``; this guard covers DB files
+    # whose tables were created before the feature landed (and keeps the
+    # Alembic / ensure_schema tracks in step).
+    if not _table_exists(conn, "input_uploads"):
+        conn.exec_driver_sql("""
+            CREATE TABLE input_uploads (
+                upload_id VARCHAR(64) NOT NULL,
+                name VARCHAR(512) NOT NULL,
+                mime_type VARCHAR(128) NOT NULL DEFAULT '',
+                size INTEGER NOT NULL,
+                sha256 VARCHAR(64) NOT NULL,
+                storage_path VARCHAR(1024),
+                inline_bytes BLOB,
+                source VARCHAR(32) NOT NULL DEFAULT '',
+                created_at VARCHAR(32) NOT NULL,
+                expires_at VARCHAR(32),
+                PRIMARY KEY (upload_id)
+            )
+        """)
+        conn.exec_driver_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ix_input_uploads_sha256 "
+            "ON input_uploads (sha256)"
+        )
+        log.info("Migrated schema: created input_uploads table")
+
     # Phase 6: unify run history by cwd and first-class job_type.
     if _table_exists(conn, "jobs") and "cwd" not in _column_names(conn, "jobs"):
         conn.exec_driver_sql(

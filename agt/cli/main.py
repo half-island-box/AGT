@@ -13,7 +13,9 @@ without the Server, preserving the no-daemon-required workflow.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+import mimetypes
 import os
 import shutil
 import signal
@@ -541,12 +543,42 @@ def _chat_turn_local(
     resume_session_id: str | None = None,
     first_prompt: str | None = None,
     turn_index: int = 1,
+    files: tuple[Path, ...] = (),
 ) -> None:
-    """Run one chat turn against the local daemon."""
+    """Run one chat turn against the local daemon.
+
+    ``files`` never touch the Server on this path: the local controller
+    already runs on this machine, so each attachment is passed as a
+    zero-copy ``local_path`` hint and rendered to ``Input file: <path>``
+    by the shared message renderer (same prompt shape as remote turns).
+    """
     async def _run():
+        effective_prompt = prompt
+        if files:
+            from ..task.message_render import render_task_message
+
+            message = {
+                "role": "user",
+                "parts": [
+                    {"type": "text", "text": prompt},
+                    *[
+                        {
+                            "type": "file",
+                            "uri": path.resolve().as_uri(),
+                            "name": path.name,
+                            "mime_type": mimetypes.guess_type(path.name)[0],
+                            "local_path": str(path.resolve()),
+                        }
+                        for path in files
+                    ],
+                ],
+            }
+            effective_prompt = await render_task_message(
+                message, agent_cwd=agent_cwd
+            )
         return await controller.run(
             provider=provider,
-            prompt=prompt,
+            prompt=effective_prompt,
             task_id=task_id,
             agent_cwd=agent_cwd,
             agt_meta_dir=agt_meta_dir,
@@ -765,6 +797,15 @@ def _chat_turn_remote(
          "creates it if missing. Auto-detected to your cwd when --daemon "
          "points at this machine's local daemon.",
 )
+@click.option(
+    "--file",
+    "files",
+    multiple=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Attach a file to the FIRST chat turn (repeatable, max 10). "
+         "With --daemon the file is uploaded to the Server first; local "
+         "chat passes the path directly to the agent.",
+)
 def chat(
     provider: str | None,
     target_daemon_id: str | None,
@@ -776,11 +817,19 @@ def chat(
     no_history: bool,
     identity_did: str | None,
     agent_cwd_override: Path | None,
+    files: tuple[Path, ...],
 ) -> None:
     if identity_did is not None and target_daemon_id is None:
         click.echo(
             "Error: --identity requires --daemon "
             "(identity runtime resolution happens on the Server).",
+            err=True,
+        )
+        sys.exit(2)
+    if len(files) > _MAX_CHAT_ATTACHMENTS:
+        click.echo(
+            f"Error: at most {_MAX_CHAT_ATTACHMENTS} --file attachments "
+            f"per turn (got {len(files)}).",
             err=True,
         )
         sys.exit(2)
@@ -968,7 +1017,12 @@ def chat(
         initial_resume=initial_resume,
         identity_did=identity_did,
         agent_cwd=agent_cwd,
+        files=files,
     )
+
+
+# Chat attachments: per-turn cap (the Server enforces the byte limit).
+_MAX_CHAT_ATTACHMENTS = 10
 
 
 def _chat_loop(
@@ -984,6 +1038,7 @@ def _chat_loop(
     initial_resume: str | None,
     identity_did: str | None,
     agent_cwd: Path | None,
+    files: tuple[Path, ...] = (),
 ) -> None:
     """Read-eval-print loop.
 
@@ -992,6 +1047,9 @@ def _chat_loop(
 
     Remote path: a Job is created on the first turn (unless resuming) and
     each turn appends a new Step via ``POST /api/jobs/{job_id}/input``.
+
+    ``--file`` attachments belong to the first turn only: the user names
+    them on the command line, then types the prompt they describe.
     """
     turn_index = 0
     first_prompt: str | None = None
@@ -1027,6 +1085,7 @@ def _chat_loop(
             turn_index=turn_index,
             identity_did=identity_did,
             agent_cwd=agent_cwd,
+            files=files if is_first else (),
         )
 
 
@@ -1048,11 +1107,17 @@ def _remote_chat_step_id(
     work_dir_str: str | None,
     identity_did: str | None,
     agent_cwd: Path | None,
+    files: tuple[Path, ...] = (),
 ) -> tuple[str | None, str | None]:
     """Resolve the Step id for one remote chat turn.
 
     If ``job_id`` is None, creates a new Job with ``prompt`` as the first
     Step. Otherwise appends a new Step via ``POST /api/jobs/{job_id}/input``.
+
+    ``files`` are uploaded to the Server first (deduplicated on content
+    hash) and sent as FileParts alongside the TextPart. A failed upload
+    aborts the turn with an error — silently dropping an attachment would
+    let the agent answer a question it never saw the input for.
 
     Returns ``(step_id, job_id)`` so the caller can keep the Job id for
     subsequent turns.
@@ -1060,6 +1125,9 @@ def _remote_chat_step_id(
 
     async def _create_or_input() -> dict:
         async with ServerClient(base_url=server_url, daemon_id="cli-direct") as client:
+            message = None
+            if files:
+                message = await _upload_chat_attachments(client, prompt, files)
             if job_id is None:
                 return await client.create_job(
                     prompt=prompt,
@@ -1068,8 +1136,9 @@ def _remote_chat_step_id(
                     work_dir=work_dir_str,
                     identity_did=identity_did,
                     agent_cwd=str(agent_cwd) if agent_cwd is not None else None,
+                    message=message,
                 )
-            return await client.job_input(job_id, prompt)
+            return await client.job_input(job_id, prompt, message=message)
 
     try:
         resp = asyncio.run(_create_or_input())
@@ -1085,6 +1154,36 @@ def _remote_chat_step_id(
         )
         return None, job_id
     return resp.get("task_id"), resp.get("job_id", job_id)
+
+
+async def _upload_chat_attachments(
+    client: ServerClient,
+    prompt: str,
+    files: tuple[Path, ...],
+) -> dict:
+    """Upload ``files`` and build the A2A Message for one chat turn.
+
+    Each upload is stored by the Server (deduplicated on content hash)
+    and referenced by ``agt-upload://<id>``; the daemon resolves the
+    bytes at claim time and materializes them under ``.agt/inputs/``.
+    """
+    parts: list[dict] = [{"type": "text", "text": prompt}]
+    for path in files:
+        data = path.read_bytes()
+        mime = mimetypes.guess_type(path.name)[0]
+        info = await client.upload_input_file(
+            name=path.name,
+            content_b64=base64.b64encode(data).decode(),
+            mime_type=mime,
+            source="cli",
+        )
+        parts.append({
+            "type": "file",
+            "uri": info.get("uri") or f"agt-upload://{info['upload_id']}",
+            "name": info.get("name") or path.name,
+            "mime_type": info.get("mime_type") or mime,
+        })
+    return {"role": "user", "parts": parts}
 
 
 def _run_chat_turn(
@@ -1104,6 +1203,7 @@ def _run_chat_turn(
     agent_cwd: Path | None,
     turn_index: int,
     identity_did: str | None,
+    files: tuple[Path, ...] = (),
 ) -> str | None:
     """Dispatch one chat turn to the local daemon or the remote Server.
 
@@ -1120,6 +1220,7 @@ def _run_chat_turn(
             resume_session_id=resume_for_turn,
             first_prompt=first_prompt if is_first else None,
             turn_index=turn_index,
+            files=files,
         )
         return job_id
 
@@ -1133,6 +1234,7 @@ def _run_chat_turn(
         work_dir_str=work_dir_str,
         identity_did=identity_did,
         agent_cwd=agent_cwd,
+        files=files,
     )
     if step_id is None:
         return current_job_id

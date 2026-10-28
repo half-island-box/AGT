@@ -93,6 +93,10 @@ class JobModel(Base):
     job_type: Mapped[str] = mapped_column(
         String(16), nullable=False, default="task", index=True
     )
+    # Chat history display title: the immutable first user prompt for a
+    # conversation. NULL on non-chat Jobs and legacy rows whose original
+    # prompt could not be recovered.
+    first_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Denormalized from the first Step for convenient querying.
     provider: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     identity_did: Mapped[str | None] = mapped_column(
@@ -347,6 +351,41 @@ class ArtifactModel(Base):
     created_at: Mapped[str] = mapped_column(String(32), nullable=False)
 
 
+class InputUploadModel(Base):
+    """A user-uploaded input file, owned by the Server.
+
+    Deliberately separate from ``ArtifactModel``: artifacts are a Step's
+    *declared output* (foreign-keyed to job/step, origin daemon, lazy
+    cross-daemon fetch), whereas an upload is *job input* that the Server
+    owns before any Step exists. Reusing the artifact table would pollute
+    its lazy-load / GC semantics with rows that have no producer.
+
+    Bytes live inline (<4KB) or on the server disk (``storage_path``).
+    ``sha256`` is unique — identical content reuses one row. Rows expire
+    (``expires_at``) and are swept by the Server; a reference already
+    baked into a Step's ``input_message`` is valid for the job's lifetime.
+    """
+
+    __tablename__ = "input_uploads"
+
+    upload_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # Original basename (sanitized — never a path).
+    name: Mapped[str] = mapped_column(String(512), nullable=False)
+    mime_type: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    size: Mapped[int] = mapped_column(Integer, nullable=False)
+    sha256: Mapped[str] = mapped_column(
+        String(64), nullable=False, unique=True, index=True
+    )
+    # Server-side materialized storage (>4KB blobs).
+    storage_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    # Small content stored directly in the DB (<4KB).
+    inline_bytes: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    # Origin hint for display/audit: console / vscode / cli.
+    source: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    created_at: Mapped[str] = mapped_column(String(32), nullable=False)
+    expires_at: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+
 class IdentityModel(Base):
     """An identity (role) that can be bound to multiple runtimes."""
 
@@ -539,6 +578,7 @@ __all__ = [
     "IdentityModel",
     "IdentityBindingModel",
     "ArtifactModel",
+    "InputUploadModel",
     "JobParentModel",
     "SpawnBatchModel",
     "ContextEntryModel",
