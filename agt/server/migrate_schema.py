@@ -292,6 +292,24 @@ def ensure_schema(conn: Connection) -> None:
         )
         log.info("Migrated jobs table: added cwd column")
 
+    # SOP run-template association. Legacy rows stay NULL so they are never
+    # incorrectly attributed to a template.
+    if (
+        _table_exists(conn, "jobs")
+        and "sop_template_path" not in _column_names(conn, "jobs")
+    ):
+        conn.exec_driver_sql(
+            "ALTER TABLE jobs ADD COLUMN sop_template_path VARCHAR(1024)"
+        )
+        conn.exec_driver_sql(
+            "ALTER TABLE jobs ADD COLUMN sop_template_hash VARCHAR(128)"
+        )
+        conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_jobs_sop_template_path "
+            "ON jobs (sop_template_path)"
+        )
+        log.info("Migrated jobs table: added SOP template association columns")
+
     if _table_exists(conn, "sessions") and "cwd" not in _column_names(conn, "sessions"):
         conn.exec_driver_sql(
             "ALTER TABLE sessions ADD COLUMN cwd VARCHAR(1024)"
@@ -338,6 +356,10 @@ def ensure_schema(conn: Connection) -> None:
         )
         conn.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_jobs_cwd_root_job_id_updated_at ON jobs (cwd, root_job_id, updated_at)"
+        )
+        conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_jobs_sop_template_path "
+            "ON jobs (sop_template_path)"
         )
     if _table_exists(conn, "sessions"):
         conn.exec_driver_sql(

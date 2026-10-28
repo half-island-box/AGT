@@ -6,9 +6,11 @@ import re
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db
+from ..models import JobModel
 from ..schemas import (
     ConsoleDirectoryPickResponse,
     ConsoleDirectoryListResponse,
@@ -26,7 +28,6 @@ from ..services.project_service import (
     list_directories,
     list_projects,
     open_project,
-    resolve_project_path,
     resolve_project_path,
     update_project,
 )
@@ -59,10 +60,45 @@ async def directories(
     return ConsoleDirectoryListResponse(**result)
 
 
+@router.post(
+    "/directories/pick",
+    response_model=ConsoleDirectoryPickResponse,
+)
+async def pick_directory(request: Request) -> ConsoleDirectoryPickResponse:
+    config = request.app.state.config
+    if not native_picker_allowed_for_host(config.host):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "type": "native_picker_local_only",
+                "message": "native directory picker requires a loopback server",
+            },
+        )
+    try:
+        picked = await pick_native_directory()
+        if picked is None:
+            return ConsoleDirectoryPickResponse(path=None)
+        path = resolve_project_path(config, picked)
+        if not path.is_dir():
+            raise ProjectServiceError(
+                "path_not_directory",
+                "selected path must be an existing directory",
+            )
+    except NativePickerError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"type": exc.code, "message": str(exc)},
+        ) from None
+    except ProjectServiceError as exc:
+        raise _error(exc) from None
+    return ConsoleDirectoryPickResponse(path=str(path))
+
+
 @router.post("/sop/file/rename")
 async def rename_sop_file(
     payload: ConsoleSopRenameRequest,
     request: Request,
+    db: AsyncSession = Depends(get_db),
 ) -> dict[str, str]:
     try:
         source = resolve_project_path(request.app.state.config, payload.path)
@@ -90,6 +126,15 @@ async def rename_sop_file(
         return {"path": str(source), "label": source.name}
     if destination.exists():
         raise HTTPException(status_code=409, detail="SOP filename already exists")
+    await db.execute(
+        update(JobModel)
+        .where(
+            JobModel.root_job_id == JobModel.job_id,
+            JobModel.job_type == "sop",
+            JobModel.sop_template_path == str(source),
+        )
+        .values(sop_template_path=str(destination))
+    )
     try:
         source.rename(destination)
     except OSError as exc:
@@ -97,6 +142,7 @@ async def rename_sop_file(
             status_code=500,
             detail=f"cannot rename SOP file: {exc}",
         ) from None
+    await db.commit()
     return {"path": str(destination), "label": destination.name}
 
 

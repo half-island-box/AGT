@@ -14,6 +14,7 @@ from ...sop.dsl import SOPError, parse_sop
 from ..database import get_db
 from ..models import ArtifactModel, JobModel, JobParentModel, StepModel
 from ..services.claim_service import notify_steps_available
+from ..services.sop_view import normalize_sop_template_path
 from ..services.sop_service import expand_sop
 
 router = APIRouter(prefix="/api/sop", tags=["sop"])
@@ -31,6 +32,8 @@ class SopSubmitRequest(BaseModel):
     spec: dict
     cwd: str | None = None
     local_daemon_id: str | None = None
+    template_path: str | None = None
+    template_hash: str | None = None
 
 
 class SopSubmitResponse(BaseModel):
@@ -128,6 +131,26 @@ async def submit_sop(
     db: AsyncSession = Depends(get_db),
 ) -> SopSubmitResponse:
     """Validate + expand a SOP DAG into shared-root Jobs (one transaction)."""
+    template_path: str | None = None
+    if payload.template_path is not None:
+        try:
+            template_path = normalize_sop_template_path(payload.template_path)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from None
+    template_hash = payload.template_hash.strip() if payload.template_hash else None
+    if template_hash and not template_path:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="template_path is required when template_hash is provided",
+        )
+    if template_hash and len(template_hash) > 128:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="template_hash must be at most 128 characters",
+        )
+
     try:
         spec = parse_sop(payload.spec)
         expansion = await expand_sop(
@@ -143,6 +166,10 @@ async def submit_sop(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=body.get("message", str(exc)),
         ) from None
+    root = await db.get(JobModel, expansion.root_job_id)
+    if root is not None:
+        root.sop_template_path = template_path
+        root.sop_template_hash = template_hash
     await db.commit()
     # Wake claim loops: entry nodes are immediately runnable.
     notify_steps_available()

@@ -112,6 +112,12 @@ class JobModel(Base):
     sop_loop_name: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     sop_iteration: Mapped[int] = mapped_column(Integer, nullable=False, default=0, index=True)
     sop_loop_meta: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # SOP run-template association. Only SOP root jobs carry these values;
+    # legacy and non-SOP rows remain NULL.
+    sop_template_path: Mapped[str | None] = mapped_column(
+        String(1024), nullable=True, index=True
+    )
+    sop_template_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
     # Goal mode: root-Job metadata JSON — {"mode":"goal","budget":
     # {max_depth,max_descendants,max_batch},"template":…,"goal":…,
     # "goal_sha256":…}. Only goal roots write this; children, SOP nodes
