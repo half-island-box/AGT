@@ -5,10 +5,13 @@ import { renderMarkdown } from './markdown';
 import { providerLogo } from '../core/icons';
 import { t, type MessageKey } from '../core/i18n';
 import type {
+  ChatInputMessage,
   ChatSessionInfo,
   ConsoleProjectInfo,
   DaemonInfo,
   IdentityWithBindings,
+  InputUploadInfo,
+  MessagePart,
   RuntimeInfo,
   SessionHistoryInfo,
   UiLanguage,
@@ -33,12 +36,33 @@ interface ChatSelection {
   provider?: string;
 }
 
+interface ChatMessageFile {
+  name: string;
+  size: number;
+}
+
 interface ChatMessage {
   id: number;
   role: 'user' | 'assistant' | 'system';
   content: string;
   provider?: string;
   streaming?: boolean;
+  /** Attachments this turn carried (what the user sent, not the uploads). */
+  files?: ChatMessageFile[];
+}
+
+/**
+ * A file the user picked but has not sent yet. ``uploading`` covers the
+ * eager ``POST /api/uploads`` that happens as soon as the file is selected,
+ * so sending never blocks on a big file.
+ */
+interface ChatAttachment extends ChatMessageFile {
+  id: number;
+  mimeType: string;
+  status: 'uploading' | 'ready' | 'error';
+  uploadId?: string;
+  uri?: string;
+  error?: string;
 }
 
 interface ActiveJob {
@@ -72,6 +96,11 @@ type ChatEvent = Record<string, unknown> & { kind?: string };
 type MockSendResult = { events?: ChatEvent[] };
 type BusyState = 'idle' | 'sending' | 'settling' | 'cancelling';
 
+// Match the Server's defaults (ServerConfig.max_upload_bytes / the 10-file
+// per-turn cap); the Server still enforces both, this is early feedback.
+const MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024;
+const MAX_ATTACHMENTS = 10;
+
 const SIDEBAR_WIDTH_KEY = 'agt.chat.sidebarWidth';
 const SIDEBAR_COLLAPSED_KEY = 'agt.chat.sidebarCollapsed';
 const DEFAULT_SIDEBAR_WIDTH = 292;
@@ -101,6 +130,8 @@ let documentClickWired = false;
 let promptHistory: string[] = [];
 let promptHistoryIndex: number | null = null;
 let promptDraft = '';
+let attachments: ChatAttachment[] = [];
+let attachmentSeq = 0;
 
 function storedSidebarWidth(): number {
   const value = Number(window.localStorage.getItem(SIDEBAR_WIDTH_KEY));
@@ -181,6 +212,19 @@ function trashIcon(): string {
     <path d="M6.5 7v4"></path>
     <path d="M9.5 7v4"></path>
   </svg>`;
+}
+
+function paperclipIcon(): string {
+  return `<svg class="agd-attachment-icon" viewBox="0 0 16 16" aria-hidden="true">
+    <path d="M11.4 4.9 5.9 10.4a1.8 1.8 0 0 0 2.6 2.6l5.1-5.1a3.1 3.1 0 0 0-4.4-4.4L3.6 8.4a4.4 4.4 0 0 0 6.2 6.2l2.5-2.5"></path>
+  </svg>`;
+}
+
+function formatSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return '';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 async function copyText(value: string, button?: HTMLButtonElement): Promise<void> {
@@ -401,9 +445,15 @@ function renderFrame(): void {
     </div>
     <section class="agd-chat-main">
       <div id="agd-messages" class="agd-messages"></div>
-      <footer class="agd-composer">
+      <footer id="agd-chat-composer" class="agd-composer">
+        <div class="agd-drop-hint">${tr('chat.attachmentDrop')}</div>
         <div id="agd-chat-status" class="agd-chat-status"></div>
+        <div id="agd-chat-attachments" class="agd-attachments">${attachmentChipsHtml(attachments)}</div>
         <div class="agd-composer-row">
+          <div class="agd-composer-tools">
+            <button type="button" id="agd-chat-attach" class="agd-icon-btn" title="${tr('chat.attachFiles')}" aria-label="${tr('chat.attachFiles')}">${paperclipIcon()}</button>
+            <input id="agd-chat-file-input" type="file" multiple hidden />
+          </div>
           <textarea id="agd-chat-input" rows="3" placeholder="${tr('chat.placeholder')}"></textarea>
           <div id="agd-chat-controls" class="agd-chat-controls"></div>
         </div>
@@ -550,7 +600,7 @@ function renderMessages(): void {
   }
   container.innerHTML = messages.map((message) => {
     if (message.role === 'user') {
-      return `<div class="agd-msg agd-msg-user"><div class="agd-bubble">${esc(message.content)}</div><div class="agd-msg-actions"><button type="button" class="agd-mini-btn" data-copy-message="${message.id}" title="${tr('chat.copyMessage')}" aria-label="${tr('chat.copyMessage')}">${copyIcon()}</button></div></div>`;
+      return `<div class="agd-msg agd-msg-user"><div class="agd-bubble">${esc(message.content)}${messageFilesHtml(message.files)}</div><div class="agd-msg-actions"><button type="button" class="agd-mini-btn" data-copy-message="${message.id}" title="${tr('chat.copyMessage')}" aria-label="${tr('chat.copyMessage')}">${copyIcon()}</button></div></div>`;
     }
     if (message.role === 'system') {
       return `<div class="agd-msg agd-msg-system"><div class="agd-bubble">${esc(message.content)}</div><div class="agd-msg-actions"><button type="button" class="agd-mini-btn" data-copy-message="${message.id}" title="${tr('chat.copyMessage')}" aria-label="${tr('chat.copyMessage')}">${copyIcon()}</button></div></div>`;
@@ -615,7 +665,179 @@ function renderControls(): void {
   document.getElementById('agd-chat-cancel')?.addEventListener('click', () => void cancelTurn());
 }
 
+// ── Attachments (user → agent files) ────────────────────────────────
+
+function attachmentChipsHtml(items: ChatAttachment[]): string {
+  return items
+    .map((item) => {
+      const meta = item.status === 'uploading'
+        ? tr('chat.attachmentUploading')
+        : item.status === 'error'
+          ? '!'
+          : formatSize(item.size);
+      return `<span class="agd-attachment ${item.status === 'error' ? 'is-error' : ''}" title="${esc(item.error ?? item.name)}">
+        ${paperclipIcon()}
+        <span class="agd-attachment-name">${esc(item.name)}</span>
+        <small class="agd-attachment-size">${esc(meta)}</small>
+        <button type="button" class="agd-attachment-remove" data-remove-attachment="${item.id}" title="${tr('chat.attachmentRemove')}" aria-label="${tr('chat.attachmentRemove')}">×</button>
+      </span>`;
+    })
+    .join('');
+}
+
+function renderAttachments(): void {
+  const container = document.getElementById('agd-chat-attachments');
+  if (container) container.innerHTML = attachmentChipsHtml(attachments);
+}
+
+/** Chips shown inside a sent message bubble (no remove button). */
+function messageFilesHtml(files: ChatMessageFile[] | undefined): string {
+  if (!files?.length) return '';
+  return `<div class="agd-msg-files">${files
+    .map(
+      (file) => `<span class="agd-attachment is-static">${paperclipIcon()}<span class="agd-attachment-name">${esc(file.name)}</span><small class="agd-attachment-size">${esc(formatSize(file.size))}</small></span>`,
+    )
+    .join('')}</div>`;
+}
+
+/**
+ * Base64-encode in chunks: spreading a whole multi-MB byte array into
+ * ``String.fromCharCode`` would blow the argument limit.
+ */
+async function fileToBase64(file: File): Promise<string> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const chunk = 0x8000;
+  let binary = '';
+  for (let offset = 0; offset < bytes.length; offset += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunk));
+  }
+  return btoa(binary);
+}
+
+async function addFiles(selected: File[]): Promise<void> {
+  if (!selected.length) return;
+  const room = MAX_ATTACHMENTS - attachments.length;
+  if (room <= 0) {
+    notice = tr('chat.attachmentTooMany', { max: MAX_ATTACHMENTS });
+    renderControls();
+    return;
+  }
+  for (const file of selected.slice(0, room)) {
+    if (file.size > MAX_ATTACHMENT_BYTES) {
+      notice = tr('chat.attachmentTooLarge', {
+        max: Math.round(MAX_ATTACHMENT_BYTES / (1024 * 1024)),
+        name: file.name,
+      });
+      continue;
+    }
+    const item: ChatAttachment = {
+      id: ++attachmentSeq,
+      name: file.name,
+      size: file.size,
+      mimeType: file.type || '',
+      status: 'uploading',
+    };
+    attachments.push(item);
+    void uploadAttachment(item, file);
+  }
+  if (selected.length > room) {
+    notice = tr('chat.attachmentTooMany', { max: MAX_ATTACHMENTS });
+  }
+  renderAttachments();
+  renderControls();
+}
+
+/** Upload eagerly so a later "send" never waits on the network. */
+async function uploadAttachment(item: ChatAttachment, file: File): Promise<void> {
+  try {
+    const contentB64 = await fileToBase64(file);
+    const info = await bridge.call<InputUploadInfo>('upload', {
+      name: file.name,
+      mimeType: file.type || null,
+      contentB64,
+    });
+    if (!attachments.includes(item)) return;
+    item.uploadId = info.upload_id;
+    item.uri = info.uri;
+    item.name = info.name || item.name;
+    item.mimeType = info.mime_type || item.mimeType;
+    item.status = 'ready';
+  } catch (err) {
+    if (!attachments.includes(item)) return;
+    item.status = 'error';
+    item.error = err instanceof Error ? err.message : String(err);
+  }
+  renderAttachments();
+  if (item.status === 'ready') renderControls();
+}
+
+function removeAttachment(id: number): void {
+  const index = attachments.findIndex((item) => item.id === id);
+  if (index < 0) return;
+  const [item] = attachments.splice(index, 1);
+  if (item.uploadId) {
+    void bridge.call('deleteUpload', { uploadId: item.uploadId }).catch(() => {});
+  }
+  renderAttachments();
+  renderControls();
+}
+
+function resetAttachments(): void {
+  attachments = [];
+  renderAttachments();
+}
+
+function buildMessageParts(prompt: string, ready: ChatAttachment[]): MessagePart[] {
+  const parts: MessagePart[] = [];
+  if (prompt) parts.push({ type: 'text', text: prompt });
+  for (const item of ready) {
+    if (!item.uri) continue;
+    parts.push({
+      type: 'file',
+      uri: item.uri,
+      name: item.name,
+      mime_type: item.mimeType || null,
+    });
+  }
+  return parts;
+}
+
+function wireAttachments(): void {
+  const fileInput = document.getElementById('agd-chat-file-input') as HTMLInputElement | null;
+  document.getElementById('agd-chat-attach')?.addEventListener('click', () => fileInput?.click());
+  fileInput?.addEventListener('change', () => {
+    const picked = Array.from(fileInput.files ?? []);
+    // Reset first so picking the same file again still fires ``change``.
+    fileInput.value = '';
+    void addFiles(picked);
+  });
+  document
+    .getElementById('agd-chat-attachments')
+    ?.addEventListener('click', (event) => {
+      const button = (event.target as HTMLElement | null)?.closest<HTMLElement>(
+        '[data-remove-attachment]',
+      );
+      if (button) removeAttachment(Number(button.dataset.removeAttachment));
+    });
+  const composer = document.getElementById('agd-chat-composer');
+  if (!composer) return;
+  composer.addEventListener('dragover', (event) => {
+    event.preventDefault();
+    composer.classList.add('is-dragging');
+  });
+  composer.addEventListener('dragleave', (event) => {
+    const next = event.relatedTarget as Node | null;
+    if (!next || !composer.contains(next)) composer.classList.remove('is-dragging');
+  });
+  composer.addEventListener('drop', (event) => {
+    event.preventDefault();
+    composer.classList.remove('is-dragging');
+    void addFiles(Array.from(event.dataTransfer?.files ?? []));
+  });
+}
+
 function wireFrame(): void {
+  wireAttachments();
   document.getElementById('agd-chat-projects-home')?.addEventListener('click', () => {
     void bridge.call('openProjects');
   });
@@ -637,6 +859,11 @@ function wireFrame(): void {
     void bridge.call('openGoal');
   });
   const input = document.getElementById('agd-chat-input') as HTMLTextAreaElement | null;
+  input?.addEventListener('paste', (event) => {
+    // Screenshots and copied files arrive here; plain text still pastes.
+    const files = Array.from(event.clipboardData?.files ?? []);
+    if (files.length) void addFiles(files);
+  });
   input?.addEventListener('keydown', (event) => {
     if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
       if (input) recallPrompt(event, input);
@@ -970,18 +1197,44 @@ async function selectSession(jobId: string, dir?: string): Promise<void> {
 async function submit(): Promise<void> {
   if (!canSend()) return;
   const textarea = document.getElementById('agd-chat-input') as HTMLTextAreaElement | null;
-  const prompt = textarea?.value.trim() ?? '';
-  if (!prompt) return;
+  const typed = textarea?.value.trim() ?? '';
+  const failed = attachments.find((item) => item.status === 'error');
+  if (failed) {
+    notice = tr('chat.attachmentFailed', { error: failed.error ?? failed.name });
+    renderControls();
+    return;
+  }
+  if (attachments.some((item) => item.status === 'uploading')) {
+    notice = tr('chat.attachmentStillUploading');
+    renderControls();
+    return;
+  }
+  const ready = attachments.filter((item) => item.status === 'ready');
+  if (!typed && !ready.length) return;
+  // Attachment-only turns still need a prompt for the run title / legacy
+  // readers; the same text leads the structured message.
+  const prompt = typed || tr('chat.attachmentOnlyPrompt');
+  const parts = ready.length ? buildMessageParts(prompt, ready) : undefined;
+  const message: ChatInputMessage | undefined =
+    parts && parts.some((part) => part.type === 'file')
+      ? { role: 'user', parts }
+      : undefined;
   const provider = selectedProvider;
   if (!provider) return;
 
   if (textarea) textarea.value = '';
-  messages.push({ id: ++messageSeq, role: 'user', content: prompt });
-  if (promptHistory[promptHistory.length - 1] !== prompt) {
-    promptHistory.push(prompt);
+  messages.push({
+    id: ++messageSeq,
+    role: 'user',
+    content: prompt,
+    files: ready.length ? ready.map(({ name, size }) => ({ name, size })) : undefined,
+  });
+  if (typed && promptHistory[promptHistory.length - 1] !== typed) {
+    promptHistory.push(typed);
   }
   promptHistoryIndex = null;
   promptDraft = '';
+  resetAttachments();
   messages.push({
     id: ++messageSeq,
     role: 'assistant',
@@ -1003,6 +1256,7 @@ async function submit(): Promise<void> {
       identityDid: selectedIdentityDid || null,
       agentCwd: agentCwd || null,
       currentJobId: currentJob?.jobId ?? null,
+      ...(message ? { message } : {}),
     });
     if (bridge.isMock && result.events) {
       for (const event of result.events) applyChatEvent(event);

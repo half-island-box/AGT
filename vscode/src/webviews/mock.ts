@@ -1130,16 +1130,41 @@ export async function mockCall<T>(_method: string, params?: Record<string, unkno
         sessions,
       } as T;
     }
+    case 'upload': {
+      const p = (params ?? {}) as { name?: string; mimeType?: string; contentB64?: string };
+      if (!p.contentB64) throw new Error('upload content is required');
+      const uploadId = `mock-${Math.random().toString(16).slice(2, 10)}`;
+      // base64 length → approximate byte size, enough for the mock chips.
+      const size = Math.floor((p.contentB64.length * 3) / 4);
+      return {
+        upload_id: uploadId,
+        name: p.name ?? 'attachment.bin',
+        mime_type: p.mimeType ?? 'application/octet-stream',
+        size,
+        sha256: '0'.repeat(64),
+        uri: `agt-upload://${uploadId}`,
+        source: 'mock',
+        created_at: new Date().toISOString(),
+        expires_at: null,
+      } as T;
+    }
+    case 'deleteUpload':
+      return { ok: true } as T;
     case 'send': {
       const p = (params ?? {}) as {
         prompt?: string;
         currentJobId?: string | null;
         daemonId?: string;
+        message?: { parts?: { type?: string; name?: string }[] };
       };
       const daemonId = p.daemonId ?? 'dev-box-1';
       const jobId = p.currentJobId ?? `job-${Math.random().toString(16).slice(2, 8)}`;
       const taskId = `task-${Math.random().toString(16).slice(2, 8)}`;
-      const answer = `Mock response\n\nYou said: ${p.prompt ?? ''}`;
+      const files = (p.message?.parts ?? [])
+        .filter((part) => part.type === 'file')
+        .map((part) => part.name ?? 'attachment');
+      const fileNote = files.length ? `\n\n(${files.length} attachment(s): ${files.join(', ')})` : '';
+      const answer = `Mock response\n\nYou said: ${p.prompt ?? ''}${fileNote}`;
       return {
         accepted: true,
         events: [

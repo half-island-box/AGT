@@ -385,6 +385,15 @@ const zh = {
   'chat.goalComing': 'Goal 模式将在 M4 提供',
   'chat.openSettings': '打开设置',
   'chat.toggleSidebar': '收起/展开侧栏',
+  'chat.attachFiles': '添加附件',
+  'chat.attachmentDrop': '松开以添加附件',
+  'chat.attachmentOnlyPrompt': '请看这些附件',
+  'chat.attachmentRemove': '移除附件',
+  'chat.attachmentUploading': '上传中…',
+  'chat.attachmentFailed': '上传失败：{error}',
+  'chat.attachmentTooLarge': '文件超过 {max} MB：{name}',
+  'chat.attachmentTooMany': '单条消息最多 {max} 个附件',
+  'chat.attachmentStillUploading': '附件仍在上传，请稍候',
 };
 
 const en: Record<keyof typeof zh, string> = {
@@ -768,6 +777,15 @@ const en: Record<keyof typeof zh, string> = {
   'chat.goalComing': 'Goal mode arrives in M4',
   'chat.openSettings': 'Open settings',
   'chat.toggleSidebar': 'Collapse/expand sidebar',
+  'chat.attachFiles': 'Attach files',
+  'chat.attachmentDrop': 'Drop to attach files',
+  'chat.attachmentOnlyPrompt': 'Please look at the attached files',
+  'chat.attachmentRemove': 'Remove attachment',
+  'chat.attachmentUploading': 'Uploading…',
+  'chat.attachmentFailed': 'Upload failed: {error}',
+  'chat.attachmentTooLarge': 'File exceeds {max} MB: {name}',
+  'chat.attachmentTooMany': 'At most {max} attachments per message',
+  'chat.attachmentStillUploading': 'Attachments are still uploading',
 };
 
 const dictionaries: Record<UiLanguage, Record<string, string>> = { zh, en };

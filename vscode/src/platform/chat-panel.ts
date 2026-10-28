@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import type { ServerLifecycle } from '../core/lifecycle';
 import type { AgtApi } from '../core/api';
 import type {
+  ChatInputMessage,
   ChatSessionInfo,
   RunInfo,
   SessionHistoryInfo,
@@ -329,8 +330,29 @@ export class ChatPanel {
             identityDid: params.identityDid ? String(params.identityDid) : null,
             agentCwd: params.agentCwd ? String(params.agentCwd) : null,
             currentJobId: params.currentJobId ? String(params.currentJobId) : null,
+            message: (params.message as ChatInputMessage | undefined) ?? null,
           });
           result = { accepted: true };
+          break;
+        }
+        case 'upload': {
+          const params = msg.params ?? {};
+          const contentB64 = String(params.contentB64 ?? '');
+          if (!contentB64) throw new Error('upload content is required');
+          result = await this.ctx.lifecycle.api.uploadInput({
+            name: String(params.name ?? ''),
+            contentB64,
+            mimeType: params.mimeType ? String(params.mimeType) : null,
+            source: 'vscode',
+          });
+          break;
+        }
+        case 'deleteUpload': {
+          const uploadId = String(msg.params?.uploadId ?? '');
+          if (uploadId) {
+            await this.ctx.lifecycle.api.deleteInputUpload(uploadId).catch(() => {});
+          }
+          result = { ok: true };
           break;
         }
         case 'stop': {
@@ -384,19 +406,21 @@ export class ChatPanel {
     identityDid: string | null;
     agentCwd: string | null;
     currentJobId: string | null;
+    message?: ChatInputMessage | null;
   }): Promise<void> {
     this.streaming = true;
     this.streamAbort = new AbortController();
     const api = this.ctx.lifecycle.api;
     try {
       const job = input.currentJobId
-        ? await api.appendChatInput(input.currentJobId, input.prompt)
+        ? await api.appendChatInput(input.currentJobId, input.prompt, input.message)
         : await api.createChatJob({
             prompt: input.prompt,
             provider: input.provider,
             targetDaemonId: input.daemonId,
             identityDid: input.identityDid,
             agentCwd: input.agentCwd,
+            message: input.message,
           });
       await this.emitChat({ kind: 'started', ...job });
 

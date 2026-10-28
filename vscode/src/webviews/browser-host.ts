@@ -8,6 +8,7 @@
 
 import { AgtApi } from '../core/api';
 import type {
+  ChatInputMessage,
   ChatSessionInfo,
   ConsoleDirectoryListing,
   ConsoleProjectInfo,
@@ -291,15 +292,17 @@ async function runChatTurn(
   try {
     const currentJobId = params.currentJobId ? String(params.currentJobId) : null;
     const effectiveProject = params.agentCwd ? String(params.agentCwd) : project;
+    const message = (params.message as ChatInputMessage | undefined) ?? null;
     if (params.agentCwd) storageSet(PROJECT_KEY, effectiveProject);
     const job = currentJobId
-      ? await api.appendChatInput(currentJobId, String(params.prompt ?? ''))
+      ? await api.appendChatInput(currentJobId, String(params.prompt ?? ''), message)
       : await api.createChatJob({
           prompt: String(params.prompt ?? ''),
           provider: String(params.provider ?? 'claude'),
           targetDaemonId: String(params.daemonId ?? ''),
           identityDid: params.identityDid ? String(params.identityDid) : null,
           agentCwd: effectiveProject,
+          message,
         });
     emit('chat', { kind: 'started', ...job });
     let final: Record<string, unknown> | null = null;
@@ -660,6 +663,21 @@ export async function browserCall<T>(
         emit,
       );
       return { accepted: true } as T;
+    }
+    case 'upload': {
+      const contentB64 = String(p.contentB64 ?? '');
+      if (!contentB64) throw new Error('upload content is required');
+      return await api.uploadInput({
+        name: String(p.name ?? ''),
+        contentB64,
+        mimeType: p.mimeType ? String(p.mimeType) : null,
+        source: 'console',
+      }) as T;
+    }
+    case 'deleteUpload': {
+      const uploadId = String(p.uploadId ?? '');
+      if (uploadId) await api.deleteInputUpload(uploadId).catch(() => {});
+      return { ok: true } as T;
     }
     case 'stop':
       return await api.stopChatJob(String(p.jobId ?? '')) as T;

@@ -179,6 +179,31 @@ export interface SessionHistoryInfo {
   not_implemented: boolean;
 }
 
+/** One A2A message part as accepted by ``POST /api/jobs`` / ``/input``. */
+export type MessagePart =
+  | { type: 'text'; text: string }
+  | { type: 'file'; uri: string; name?: string | null; mime_type?: string | null };
+
+/** Structured input for one chat turn (legacy turns send ``prompt`` only). */
+export interface ChatInputMessage {
+  role: 'user';
+  parts: MessagePart[];
+}
+
+/** A user-uploaded input file owned by the Server (``agt-upload://<id>``). */
+export interface InputUploadInfo {
+  upload_id: string;
+  name: string;
+  mime_type: string;
+  size: number;
+  sha256: string;
+  /** Public reference to embed in a ``FilePart``. */
+  uri: string;
+  source: string;
+  created_at: string;
+  expires_at: string | null;
+}
+
 export interface JobInfo {
   job_id: string;
   task_id: string;

@@ -1,4 +1,5 @@
 import type {
+  ChatInputMessage,
   ChatSessionInfo,
   DaemonConfigInfo,
   ArtifactInfo,
@@ -10,6 +11,7 @@ import type {
   IdentityInfo,
   IdentityUpdateInput,
   IdentityWithBindings,
+  InputUploadInfo,
   GoalJobTreeNode,
   GoalRunListInfo,
   GoalRunInfo,
@@ -398,12 +400,41 @@ export class AgtApi {
     );
   }
 
+  /**
+   * Store one chat attachment on the Server and get its ``agt-upload://``
+   * reference. Base64 is used because the webview cannot post a Blob through
+   * ``postMessage`` and the Server deliberately avoids multipart parsing.
+   */
+  async uploadInput(input: {
+    name: string;
+    contentB64: string;
+    mimeType?: string | null;
+    source?: string;
+  }): Promise<InputUploadInfo> {
+    return this.post<InputUploadInfo>(
+      '/api/uploads',
+      {
+        name: input.name,
+        mime_type: input.mimeType ?? null,
+        content_b64: input.contentB64,
+        source: input.source ?? 'console',
+      },
+      60_000,
+    );
+  }
+
+  /** Drop an attachment the user removed before sending it (best effort). */
+  async deleteInputUpload(uploadId: string): Promise<void> {
+    return this.delete(`/api/uploads/${encodeURIComponent(uploadId)}`, 10_000);
+  }
+
   async createChatJob(input: {
     prompt: string;
     provider: string;
     targetDaemonId: string;
     identityDid?: string | null;
     agentCwd?: string | null;
+    message?: ChatInputMessage | null;
   }): Promise<JobInfo> {
     return this.post<JobInfo>('/api/jobs', {
       prompt: input.prompt,
@@ -411,11 +442,19 @@ export class AgtApi {
       target_daemon_id: input.targetDaemonId,
       identity_did: input.identityDid ?? null,
       agent_cwd: input.agentCwd ?? null,
+      message: input.message ?? null,
     });
   }
 
-  async appendChatInput(jobId: string, prompt: string): Promise<JobInfo> {
-    return this.post<JobInfo>(`/api/jobs/${encodeURIComponent(jobId)}/input`, { prompt });
+  async appendChatInput(
+    jobId: string,
+    prompt: string,
+    message?: ChatInputMessage | null,
+  ): Promise<JobInfo> {
+    return this.post<JobInfo>(`/api/jobs/${encodeURIComponent(jobId)}/input`, {
+      prompt,
+      message: message ?? null,
+    });
   }
 
   async jobStatus(jobId: string): Promise<JobStatusInfo> {
