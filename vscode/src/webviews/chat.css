@@ -1,0 +1,602 @@
+@import './styles.css';
+
+body.agd-chat-body {
+  height: 100vh;
+  padding: 0;
+  overflow: hidden;
+}
+
+#agt-root,
+.agd-chat {
+  height: 100vh;
+}
+
+.agd-chat {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-columns:
+    minmax(0, clamp(180px, var(--agd-chat-sidebar-width, 292px), 520px))
+    12px
+    minmax(0, 1fr);
+  background: var(--vscode-editor-background, #1f1f1f);
+}
+
+.agd-chat-head {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  grid-column: 1 / -1;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--vscode-panel-border, #2e2e2e);
+  background: var(--vscode-sideBar-background, #202020);
+}
+
+.agd-chat-brand {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  font-size: 14px;
+  font-weight: 800;
+}
+.agd-chat-brand small {
+  color: var(--vscode-descriptionForeground, #8b8b8b);
+  font-size: 10.5px;
+  font-weight: 400;
+}
+
+.agd-chat-tools { display: flex; align-items: center; gap: 7px; margin-left: auto; }
+.agd-icon-btn {
+  height: 26px;
+  min-width: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--vscode-input-border, #3a3a3a);
+  border-radius: 6px;
+  background: var(--vscode-button-secondaryBackground, #2a2a2a);
+  color: var(--vscode-button-secondaryForeground, #ccc);
+  font-size: 11px;
+  cursor: pointer;
+  transition: filter var(--agd-motion-duration) var(--agd-motion-ease), transform var(--agd-motion-duration) var(--agd-motion-ease);
+}
+.agd-icon-btn:hover:not(:disabled) { filter: brightness(1.15); }
+.agd-icon-btn:active:not(:disabled) { transform: translateY(1px); }
+.agd-icon-btn:focus-visible { outline: 1px solid var(--vscode-focusBorder, #3794ff); outline-offset: 1px; }
+
+.agd-chat.is-collapsed {
+  grid-template-columns: 0px 12px minmax(0, 1fr);
+}
+
+.agd-chat-side {
+  grid-column: 1;
+  grid-row: 2;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--vscode-sideBar-background, #202020);
+  overflow: hidden;
+}
+
+.agd-chat.is-collapsed .agd-chat-side {
+  display: none;
+}
+
+.agd-chat-side-boundary {
+  grid-column: 2;
+  grid-row: 2;
+  position: relative;
+  z-index: 4;
+  min-height: 0;
+  cursor: col-resize;
+  touch-action: none;
+  background: transparent;
+}
+
+.agd-chat-side-boundary::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 5px;
+  width: 2px;
+  background: var(--vscode-panel-border, #2e2e2e);
+  opacity: 0.65;
+  transition: background 0.15s ease, opacity 0.15s ease;
+}
+
+.agd-chat-side-boundary:hover::before,
+.agd-chat-side-boundary:focus-within::before {
+  background: var(--vscode-focusBorder, #3794ff);
+  opacity: 1;
+}
+
+.agd-sidebar-toggle {
+  position: absolute;
+  z-index: 2;
+  top: 18px;
+  left: -6px;
+  width: 16px;
+  height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--vscode-panel-border, #2e2e2e);
+  border-radius: 999px;
+  background: var(--vscode-editorWidget-background, #252526);
+  color: var(--vscode-descriptionForeground, #8b8b8b);
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.agd-sidebar-toggle:hover {
+  color: var(--vscode-foreground, #ccc);
+  border-color: var(--vscode-focusBorder, #3794ff);
+}
+
+.agd-side-section {
+  padding: 14px 13px;
+  border-bottom: 1px solid color-mix(in srgb, var(--vscode-panel-border, #2e2e2e) 70%, transparent);
+}
+.agd-side-sessions {
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  border-bottom: none;
+}
+.agd-side-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  color: var(--vscode-foreground, #ccc);
+  font-size: 12px;
+  font-weight: 750;
+}
+.agd-side-label {
+  display: block;
+  margin: 10px 0 5px;
+  color: var(--vscode-descriptionForeground, #8b8b8b);
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: 0.03em;
+}
+.agd-mini-btn {
+  width: 21px;
+  height: 21px;
+  border: 1px solid var(--vscode-input-border, #3a3a3a);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--vscode-descriptionForeground, #8b8b8b);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+.agd-mini-btn:hover { color: var(--vscode-foreground, #ccc); filter: brightness(1.2); }
+.agd-mini-btn:disabled { opacity: 0.45; cursor: default; }
+
+.agd-select { position: relative; }
+.agd-select-trigger {
+  width: 100%;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 8px;
+  border: 1px solid var(--vscode-input-border, #3a3a3a);
+  border-radius: 6px;
+  background: var(--vscode-input-background, #2a2a2a);
+  color: var(--vscode-input-foreground, #ccc);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.agd-select-trigger > small { margin-left: auto; color: var(--vscode-descriptionForeground, #8b8b8b); }
+.agd-select-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agd-select-menu {
+  position: absolute;
+  z-index: 20;
+  left: 0;
+  right: 0;
+  top: calc(100% + 4px);
+  max-height: 230px;
+  overflow: auto;
+  padding: 4px;
+  border: 1px solid var(--vscode-widget-border, #2e2e2e);
+  border-radius: 7px;
+  background: var(--vscode-editorWidget-background, #252526);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.24);
+}
+.agd-option {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 8px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--vscode-input-foreground, #ccc);
+  font-size: 11.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.agd-option span {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agd-option small {
+  max-width: 42%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--vscode-descriptionForeground, #8b8b8b);
+}
+.agd-option:hover { background: color-mix(in srgb, var(--vscode-focusBorder, #3794ff) 14%, transparent); }
+.agd-option.is-selected { background: color-mix(in srgb, var(--vscode-focusBorder, #3794ff) 22%, transparent); }
+.agd-select-empty,
+.agd-side-empty {
+  padding: 10px 4px;
+  color: var(--vscode-descriptionForeground, #8b8b8b);
+  font-size: 11px;
+}
+
+.agd-session-list {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.agd-session {
+  position: relative;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--vscode-foreground, #ccc);
+}
+.agd-session:hover { background: color-mix(in srgb, var(--vscode-list-hoverBackground, #2a2d2e) 85%, transparent); }
+.agd-session.is-selected {
+  border-color: color-mix(in srgb, var(--vscode-focusBorder, #3794ff) 58%, transparent);
+  background: color-mix(in srgb, var(--vscode-focusBorder, #3794ff) 12%, transparent);
+}
+.agd-session-main {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 28px 8px 8px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.agd-session-main:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder, #3794ff);
+  outline-offset: -1px;
+}
+.agd-session-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.agd-session-line strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+}
+.agd-session small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--vscode-descriptionForeground, #8b8b8b);
+  font-size: 10px;
+}
+.agd-session-delete {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 21px;
+  height: 21px;
+  padding: 3px;
+  border: 1px solid color-mix(in srgb, var(--agd-color-error) 42%, transparent);
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--vscode-editorWidget-background, #252526) 92%, transparent);
+  color: var(--agd-color-error);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--agd-motion-duration) var(--agd-motion-ease), filter var(--agd-motion-duration) var(--agd-motion-ease);
+}
+.agd-session-delete svg {
+  width: 100%;
+  height: 100%;
+}
+.agd-session-delete svg path {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.15;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.agd-session:hover .agd-session-delete,
+.agd-session-delete:focus-visible {
+  opacity: 1;
+}
+.agd-session-delete:hover { filter: brightness(1.15); }
+.agd-session-delete:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder, #3794ff);
+  outline-offset: 1px;
+}
+
+.agd-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: color-mix(in srgb, #000 45%, transparent);
+}
+.agd-modal {
+  width: min(420px, 100%);
+  padding: 16px;
+  border: 1px solid var(--vscode-panel-border, #2e2e2e);
+  border-radius: 10px;
+  background: var(--vscode-editorWidget-background, #252526);
+  box-shadow: 0 18px 48px rgb(0 0 0 / 32%);
+}
+.agd-modal h3 {
+  margin: 0 0 8px;
+  color: var(--vscode-foreground, #ccc);
+  font-size: 13px;
+}
+.agd-modal p {
+  margin: 0;
+  color: var(--vscode-descriptionForeground, #8b8b8b);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+.agd-modal-target {
+  margin-top: 10px;
+  padding: 7px 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px solid var(--vscode-panel-border, #2e2e2e);
+  border-radius: 6px;
+  background: var(--vscode-input-background, #2a2a2a);
+  color: var(--vscode-foreground, #ccc);
+  font-size: 11px;
+}
+.agd-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
+.agd-modal-danger {
+  border-color: color-mix(in srgb, var(--agd-color-error) 38%, transparent);
+  background: color-mix(in srgb, var(--agd-color-error) 8%, transparent);
+  color: var(--agd-color-error);
+}
+
+.agd-chat-main {
+  grid-column: 3;
+  grid-row: 2;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+}
+.agd-messages {
+  min-height: 0;
+  overflow: auto;
+  padding: 20px max(24px, 6%) 16px;
+  scroll-behavior: smooth;
+}
+.agd-chat-empty,
+.agd-chat-loading {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--vscode-descriptionForeground, #8b8b8b);
+  font-size: 12px;
+  text-align: center;
+}
+.agd-chat-empty::before,
+.agd-chat-loading::before {
+  content: "";
+  display: inline-block;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--vscode-descriptionForeground, #8b8b8b) 12%, transparent);
+}
+.agd-chat-empty.has-logo::before {
+  display: none;
+}
+.agd-chat-empty-logo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+}
+.agd-chat-empty-logo .agd-provider-logo,
+.agd-chat-empty-logo .agd-logo {
+  width: 100%;
+  height: 100%;
+}
+.agd-chat-empty-logo .agd-logo {
+  border-radius: 12px;
+  font-size: 22px;
+}
+.agd-chat-loading::after {
+  content: "";
+  width: 16px;
+  height: 16px;
+  border: 2px solid color-mix(in srgb, currentColor 30%, transparent);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: agd-spin 0.8s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .agd-chat-loading::after { animation-duration: 2.4s; }
+}
+
+.agd-msg { margin-bottom: 14px; }
+.agd-msg-actions {
+  display: flex;
+  justify-content: flex-start;
+  margin-top: 4px;
+}
+.agd-msg-user .agd-msg-actions { justify-content: flex-end; }
+.agd-msg-actions .agd-mini-btn {
+  height: 20px;
+  width: 20px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--vscode-descriptionForeground, #8b8b8b);
+}
+.agd-msg-actions .agd-mini-btn:hover {
+  color: var(--vscode-foreground, #cccccc);
+}
+.agd-msg-user { display: flex; justify-content: flex-end; }
+.agd-msg-system { display: flex; justify-content: center; }
+.agd-msg-system .agd-bubble {
+  max-width: 78%;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--vscode-descriptionForeground, #8b8b8b) 12%, transparent);
+  color: var(--vscode-descriptionForeground, #8b8b8b);
+  font-size: 11px;
+}
+.agd-msg-agent { display: flex; flex-direction: column; gap: 6px; }
+.agd-msg-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--vscode-descriptionForeground, #8b8b8b);
+  font-size: 11px;
+  font-weight: 650;
+}
+.agd-bubble {
+  max-width: min(860px, 86%);
+  padding: 9px 12px;
+  border: 1px solid var(--vscode-input-border, #3a3a3a);
+  border-radius: 10px;
+  background: var(--vscode-input-background, #232323);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.agd-msg-user .agd-bubble {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--vscode-button-background, #3794ff) 24%, transparent);
+}
+.agd-agent-bubble {
+  font-family: var(--vscode-editor-font-family, ui-monospace, Menlo, Consolas, monospace);
+  font-size: 12px;
+  line-height: 1.62;
+}
+.agd-code-block {
+  position: relative;
+}
+.agd-code-block pre {
+  padding-right: 36px;
+}
+.agd-code-block .agd-code-copy {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 2;
+  height: 20px;
+  width: 20px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  background: color-mix(in srgb, var(--vscode-editorWidget-background, #252526) 92%, transparent);
+  transition: opacity 0.15s ease;
+}
+.agd-copy-icon {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.agd-code-block:hover .agd-code-copy,
+.agd-code-block:focus-within .agd-code-copy {
+  opacity: 1;
+}
+.agd-composer {
+  padding: 10px max(24px, 6%) 16px;
+  border-top: 1px solid var(--vscode-panel-border, #2e2e2e);
+  background: var(--vscode-editor-background, #1f1f1f);
+}
+.agd-chat-status {
+  min-height: 19px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+  color: var(--vscode-descriptionForeground, #8b8b8b);
+  font-size: 10.5px;
+}
+.agd-chat-notice {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--agd-color-warning);
+}
+.agd-composer-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 9px;
+  align-items: end;
+}
+#agd-chat-input {
+  min-height: 60px;
+  max-height: 180px;
+  resize: vertical;
+  padding: 9px 10px;
+  border: 1px solid var(--vscode-input-border, #3a3a3a);
+  border-radius: 8px;
+  background: var(--vscode-input-background, #2a2a2a);
+  color: var(--vscode-input-foreground, #ccc);
+  font-family: var(--vscode-font-family, inherit);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+#agd-chat-input:focus { outline: 1px solid var(--vscode-focusBorder, #3794ff); }
+#agd-chat-input:focus-visible { outline: 2px solid var(--vscode-focusBorder, #3794ff); outline-offset: 1px; }
+.agd-chat-controls { display: flex; gap: 7px; }
+
+@media (max-width: 780px) {
+  .agd-chat-brand small { display: none; }
+  .agd-bubble,
+  .agd-md { max-width: 94%; }
+}

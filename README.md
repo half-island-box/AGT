@@ -10,9 +10,8 @@ multi-machine execution, goal-driven sub-agent orchestration, static DAG
 workflows, and a shared artifact registry.
 
 > [!NOTE]
-> `agt` is under active development. The CLI, server, daemon, Goal mode, and
-> SOP workflows are usable today. The desktop client is planned, but its
-> framework has not been selected.
+> `agt` is under active development. The CLI, server, daemon, browser console,
+> Goal mode, SOP workflows, and the VS Code client are usable today.
 
 ## Highlights
 
@@ -34,6 +33,9 @@ workflows, and a shared artifact registry.
   allowed directories through loopback-only server APIs.
 - **MCP and editor integration** — expose sub-agent spawning to MCP-capable
   agents and use the early VS Code extension for chat, Goals, and SOP editing.
+- **Browser console** — the FastAPI server hosts a project browser plus the
+  same Chat, Settings, SOP, and Goal UI at `http://127.0.0.1:8420/`. No second
+  frontend process is required at runtime.
 
 Supported agents include Claude Code, Codex, Cursor Agent, GitHub Copilot,
 Qwen, Kimi, OpenCode, OpenClaw, and custom CLIs.
@@ -162,7 +164,8 @@ environment variables, and exit codes.
 
 ```text
 ┌───────────┐   HTTP / WS    ┌───────────┐  claim / report  ┌────────────┐
-│   CLI     │ ◄────────────► │  Server   │ ◄──────────────► │  Daemon    │
+│ CLIENT    │ ◄────────────► │  Server   │ ◄──────────────► │  Daemon    │
+│ CLI / Web │                │           │                  │            │
 └───────────┘                └───────────┘                  └────────────┘
                                   │                               │
                                   │ SQLite + artifacts            │ subprocess
@@ -174,6 +177,8 @@ environment variables, and exit codes.
 ```
 
 - **CLI** submits work and provides human-readable views of runs.
+- **Web console** is served by FastAPI on the same origin and uses the same
+  HTTP/SSE APIs as the VS Code client.
 - **Server** owns coordination, persistence, routing, MCP, and artifacts.
 - **Console projects** are persistent directory pointers; run history remains
   scoped by the project path in `jobs.cwd`.

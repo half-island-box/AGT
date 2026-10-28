@@ -196,6 +196,51 @@ def test_directory_browsing_returns_only_allowed_directories(tmp_path: Path) -> 
         dispose()
 
 
+def test_sop_file_rename_is_scoped_and_non_overwriting(tmp_path: Path) -> None:
+    client, dispose, workspace = _build_app(tmp_path)
+    source = workspace / "review.sop.yaml"
+    existing = workspace / "existing.sop.yaml"
+    source.write_text(
+        "name: review\ntasks:\n  - name: one\n    input: test\n",
+        encoding="utf-8",
+    )
+    existing.write_text("name: existing\n", encoding="utf-8")
+    try:
+        renamed = client.post(
+            "/api/console/sop/file/rename",
+            json={
+                "path": str(source),
+                "new_name": "renamed.sop.yaml",
+            },
+        )
+        assert renamed.status_code == 200
+        assert renamed.json()["path"] == str(
+            (workspace / "renamed.sop.yaml").resolve()
+        )
+        assert not source.exists()
+        assert (workspace / "renamed.sop.yaml").is_file()
+
+        duplicate = client.post(
+            "/api/console/sop/file/rename",
+            json={
+                "path": str(workspace / "renamed.sop.yaml"),
+                "new_name": "existing.sop.yaml",
+            },
+        )
+        assert duplicate.status_code == 409
+
+        traversal = client.post(
+            "/api/console/sop/file/rename",
+            json={
+                "path": str(workspace / "renamed.sop.yaml"),
+                "new_name": "../outside.sop.yaml",
+            },
+        )
+        assert traversal.status_code == 400
+    finally:
+        dispose()
+
+
 def test_unavailable_project_can_be_listed_but_not_opened(tmp_path: Path) -> None:
     client, dispose, workspace = _build_app(tmp_path)
     target = workspace / "gone"

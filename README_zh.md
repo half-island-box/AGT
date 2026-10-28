@@ -9,8 +9,8 @@ Daemon 接口使用它们。在基础执行能力之上，项目提供持久会�
 Goal 驱动的子 Agent 编排、静态 DAG 工作流和统一产物注册表。
 
 > [!NOTE]
-> `agt` 正在积极开发中。CLI、Server、Daemon、Goal 模式和 SOP 工作流已经
-> 可用；桌面客户端仍在规划中，技术栈尚未确定。
+> `agt` 正在积极开发中。CLI、Server、Daemon、浏览器控制台、Goal 模式、
+> SOP 工作流和 VS Code 客户端已经可用。
 
 ## 功能概览
 
@@ -32,6 +32,8 @@ Goal 驱动的子 Agent 编排、静态 DAG 工作流和统一产物注册表。
   浏览允许范围内的目录。
 - **MCP 与编辑器集成**：向支持 MCP 的 Agent 暴露子 Agent Spawn 工具，并
   提供早期 VS Code 扩展，用于 Chat、Goal 和 SOP 编辑。
+- **浏览器控制台**：FastAPI Server 在 `http://127.0.0.1:8420/` 直接提供
+  项目页以及 Chat、设置、SOP 和 Goal 页面，生产运行不需要额外启动前端进程。
 
 当前支持 Claude Code、Codex、Cursor Agent、GitHub Copilot、Qwen、Kimi、
 OpenCode、OpenClaw，以及自定义 CLI。

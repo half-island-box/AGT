@@ -1,0 +1,39 @@
+.agd-projects-page { padding-bottom: 32px; }
+.agd-projects-hero {
+  display: flex; align-items: flex-end; justify-content: space-between; gap: 18px;
+  padding: 18px 0 14px;
+}
+.agd-projects-hero h1 { margin: 0; font-size: 20px; }
+.agd-projects-hero p { margin: 4px 0 0; color: var(--vscode-descriptionForeground, #8b8b8b); font-size: 12px; }
+.agd-project-list { display: flex; flex-direction: column; gap: 10px; }
+.agd-project-card {
+  display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; gap: 12px;
+  align-items: center; padding: 14px 16px; cursor: pointer;
+  border: 1px solid var(--vscode-panel-border, #2e2e2e); border-radius: 10px;
+  background: var(--vscode-sideBar-background, #202020);
+  transition: border-color var(--agd-motion-duration) var(--agd-motion-ease), background var(--agd-motion-duration) var(--agd-motion-ease);
+}
+.agd-project-card:hover { border-color: var(--vscode-focusBorder, #3794ff); background: color-mix(in srgb, var(--vscode-list-hoverBackground, #2a2d2e) 70%, transparent); }
+.agd-project-card.is-unavailable { cursor: default; opacity: 0.72; }
+.agd-project-icon {
+  display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px;
+  border-radius: 9px; background: color-mix(in srgb, var(--vscode-focusBorder, #3794ff) 16%, transparent);
+  color: var(--vscode-focusBorder, #3794ff); font-size: 19px;
+}
+.agd-project-main { min-width: 0; }
+.agd-project-title-line { display: flex; align-items: center; gap: 8px; }
+.agd-project-title-line strong { font-size: 13px; }
+.agd-project-path { margin-top: 3px; color: var(--vscode-descriptionForeground, #8b8b8b); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agd-project-meta { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 7px; color: var(--vscode-descriptionForeground, #8b8b8b); font-size: 10.5px; }
+.agd-project-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.agd-projects-empty { margin-top: 8px; }
+.agd-projects-empty .agd-empty-state { min-height: 230px; }
+.agd-project-modal { width: min(720px, 100%); }
+.agd-project-path-input { display: flex; gap: 8px; margin-bottom: 10px; }
+.agd-project-path-input .agd-input { flex: 1; }
+.agd-project-delete-warning { padding: 10px; border-radius: 7px; background: color-mix(in srgb, var(--agd-color-error, #f85149) 10%, transparent); color: var(--vscode-foreground, #ccc); }
+@media (max-width: 680px) {
+  .agd-projects-hero { align-items: stretch; flex-direction: column; }
+  .agd-project-card { grid-template-columns: 34px minmax(0, 1fr); }
+  .agd-project-actions { grid-column: 1 / -1; justify-content: flex-start; }
+}

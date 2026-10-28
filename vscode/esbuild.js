@@ -1,0 +1,135 @@
+const esbuild = require('esbuild');
+
+const production = process.argv.includes('--production');
+const watch = process.argv.includes('--watch');
+const consoleOnly = process.argv.includes('--console');
+
+/** Extension host entry — Node context, `vscode` is provided by the host. */
+const extension = {
+  entryPoints: ['src/platform/extension.ts'],
+  bundle: true,
+  platform: 'node',
+  format: 'cjs',
+  target: 'node18',
+  external: ['vscode'],
+  outfile: 'dist/extension.js',
+  sourcemap: !production,
+  minify: production,
+  logLevel: 'info',
+  loader: { '.svg': 'text' },
+};
+
+/** Settings webview entry — browser context, also previewable standalone. */
+const webviewSettings = {
+  entryPoints: ['src/webviews/settings.ts'],
+  bundle: true,
+  platform: 'browser',
+  format: 'iife',
+  target: 'es2022',
+  outfile: 'dist/webview-settings.js',
+  sourcemap: false,
+  minify: production,
+  logLevel: 'info',
+  loader: { '.svg': 'text' },
+};
+
+/** Chat webview entry — browser context, also previewable standalone. */
+const webviewChat = {
+  entryPoints: ['src/webviews/chat.ts'],
+  bundle: true,
+  platform: 'browser',
+  format: 'iife',
+  target: 'es2022',
+  outfile: 'dist/webview-chat.js',
+  sourcemap: false,
+  minify: production,
+  logLevel: 'info',
+  loader: { '.svg': 'text' },
+};
+
+/** SOP editor webview entry — browser context, also previewable standalone. */
+const webviewSop = {
+  entryPoints: ['src/webviews/sop-editor.ts'],
+  bundle: true,
+  platform: 'browser',
+  format: 'iife',
+  target: 'es2022',
+  outfile: 'dist/webview-sop.js',
+  sourcemap: false,
+  minify: production,
+  logLevel: 'info',
+  loader: { '.svg': 'text' },
+};
+
+/** Goal webview entry — browser context, also previewable standalone. */
+const webviewGoal = {
+  entryPoints: ['src/webviews/goal.ts'],
+  bundle: true,
+  platform: 'browser',
+  format: 'iife',
+  target: 'es2022',
+  outfile: 'dist/webview-goal.js',
+  sourcemap: false,
+  minify: production,
+  logLevel: 'info',
+  loader: { '.svg': 'text' },
+};
+
+function consoleWebview(entry, page) {
+  return {
+    entryPoints: [`src/webviews/${entry}`],
+    bundle: true,
+    platform: 'browser',
+    format: 'iife',
+    target: 'es2022',
+    outfile: `../agt/web_console/assets/webview-console-${page}.js`,
+    sourcemap: false,
+    minify: production,
+    logLevel: 'info',
+    loader: { '.svg': 'text' },
+  };
+}
+
+const consoleSettings = consoleWebview('settings.ts', 'settings');
+const consoleChat = consoleWebview('chat.ts', 'chat');
+const consoleSop = consoleWebview('sop-editor.ts', 'sop');
+const consoleGoal = consoleWebview('goal.ts', 'goal');
+const consoleProjects = consoleWebview('projects.ts', 'projects');
+
+async function main() {
+  if (consoleOnly) {
+    await Promise.all([
+      esbuild.build(consoleSettings),
+      esbuild.build(consoleChat),
+      esbuild.build(consoleSop),
+      esbuild.build(consoleGoal),
+      esbuild.build(consoleProjects),
+    ]);
+    return;
+  }
+  if (watch) {
+    const ctxExt = await esbuild.context(extension);
+    const ctxWeb = await esbuild.context(webviewSettings);
+    const ctxChat = await esbuild.context(webviewChat);
+    const ctxSop = await esbuild.context(webviewSop);
+    const ctxGoal = await esbuild.context(webviewGoal);
+    await Promise.all([
+      ctxExt.watch(),
+      ctxWeb.watch(),
+      ctxChat.watch(),
+      ctxSop.watch(),
+      ctxGoal.watch(),
+    ]);
+  } else {
+    await esbuild.build(extension);
+    await esbuild.build(webviewSettings);
+    await esbuild.build(webviewChat);
+    await esbuild.build(webviewSop);
+    await esbuild.build(webviewGoal);
+  }
+}
+
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});

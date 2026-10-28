@@ -1,0 +1,224 @@
+{
+  "name": "agt-vscode",
+  "displayName": "AGT — Multi-Agent Bridge",
+  "description": "VS Code client for the local agt server: daemons, agent runtimes, chat, SOP and goal orchestration.",
+  "version": "0.1.0",
+  "publisher": "agt",
+  "license": "MIT",
+  "private": true,
+  "engines": {
+    "vscode": "^1.104.0"
+  },
+  "categories": [
+    "AI",
+    "Chat",
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "agt-daemons",
+          "title": "AGT Daemons",
+          "icon": "media/agt.svg"
+        }
+      ],
+      "secondarySidebar": [
+        {
+          "id": "agt-sidebar",
+          "title": "AGT",
+          "icon": "media/agt.svg"
+        }
+      ]
+    },
+    "views": {
+      "agt-daemons": [
+        {
+          "id": "agt.daemons",
+          "name": "Daemons"
+        }
+      ],
+      "agt-sidebar": [
+        {
+          "id": "agt.workspace",
+          "name": "AGT",
+          "type": "webview",
+          "visibility": "visible"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "agt.showChat",
+        "title": "AGT: Open Chat",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "agt.showSop",
+        "title": "AGT: Open SOP Editor",
+        "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "agt.showGoal",
+        "title": "AGT: Open Goal",
+        "icon": "$(rocket)"
+      },
+      {
+        "command": "agt.newSop",
+        "title": "AGT: New SOP Template",
+        "icon": "$(new-file)"
+      },
+      {
+        "command": "agt.openSopEditor",
+        "title": "AGT: Open With SOP Editor"
+      },
+      {
+        "command": "agt.showSettings",
+        "title": "AGT: Open Settings",
+        "icon": "$(settings-gear)"
+      },
+      {
+        "command": "agt.refresh",
+        "title": "AGT: Refresh",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "agt.startServer",
+        "title": "AGT: Start Server"
+      },
+      {
+        "command": "agt.stopServer",
+        "title": "AGT: Stop Server"
+      },
+      {
+        "command": "agt.startDaemon",
+        "title": "AGT: Start Local Daemon"
+      },
+      {
+        "command": "agt.stopDaemon",
+        "title": "AGT: Stop Local Daemon"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "agt.showChat",
+          "when": "view == agt.daemons",
+          "group": "navigation"
+        },
+        {
+          "command": "agt.showSop",
+          "when": "view == agt.daemons",
+          "group": "navigation"
+        },
+        {
+          "command": "agt.showGoal",
+          "when": "view == agt.daemons",
+          "group": "navigation"
+        },
+        {
+          "command": "agt.newSop",
+          "when": "view == agt.daemons",
+          "group": "navigation"
+        },
+        {
+          "command": "agt.showSettings",
+          "when": "view == agt.daemons",
+          "group": "navigation"
+        },
+        {
+          "command": "agt.refresh",
+          "when": "view == agt.daemons",
+          "group": "navigation"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "agt.openSopEditor",
+          "when": "resourceExtname == .yaml || resourceExtname == .yml",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "AGT",
+      "properties": {
+        "agt.serverUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8420",
+          "description": "Base URL of the agt server"
+        },
+        "agt.autoStart": {
+          "type": "boolean",
+          "default": true,
+          "description": "Start the agt server automatically when it is unreachable"
+        },
+        "agt.startCommand": {
+          "type": "string",
+          "default": "uv run agt server start --detach",
+          "description": "Shell command used to start the agt server (run in the workspace root)"
+        },
+        "agt.stopCommand": {
+          "type": "string",
+          "default": "uv run agt server stop",
+          "description": "Shell command used to stop the agt server"
+        },
+        "agt.autoStartDaemon": {
+          "type": "boolean",
+          "default": true,
+          "description": "Also start the local daemon when the server is started by the extension"
+        },
+        "agt.daemonStartCommand": {
+          "type": "string",
+          "default": "uv run agt daemon start --detach",
+          "description": "Shell command used to start the local daemon (AGT_SERVER_URL is exported for it)"
+        },
+        "agt.daemonStopCommand": {
+          "type": "string",
+          "default": "uv run agt daemon stop",
+          "description": "Shell command used to stop the local daemon"
+        },
+        "agt.language": {
+          "type": "string",
+          "enum": [
+            "zh",
+            "en"
+          ],
+          "default": "zh",
+          "description": "UI language for AGT views (static text only)"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.js --production",
+    "build:console": "node esbuild.js --production --console",
+    "build:all": "npm run build && npm run build:console",
+    "watch": "node esbuild.js --watch",
+    "test:core": "esbuild tests/sop-core.test.ts --bundle --platform=node --format=cjs --outfile=dist/test/sop-core.test.cjs --log-level=warning && node --test dist/test/sop-core.test.cjs",
+    "test:inspector": "esbuild tests/sop-inspector.test.ts --bundle --platform=node --format=cjs --outfile=dist/test/sop-inspector.test.cjs --log-level=warning && node --test dist/test/sop-inspector.test.cjs",
+    "test:run": "esbuild tests/sop-run.test.ts --bundle --platform=node --format=cjs --outfile=dist/test/sop-run.test.cjs --log-level=warning && node --test dist/test/sop-run.test.cjs",
+    "test:loop": "esbuild tests/sop-loop.test.ts --bundle --platform=node --format=cjs --outfile=dist/test/sop-loop.test.cjs --log-level=warning && node --test dist/test/sop-loop.test.cjs",
+    "check:sop": "esbuild tests/roundtrip-check.ts --bundle --platform=node --format=cjs --outfile=dist/test/roundtrip-check.cjs --log-level=warning && node dist/test/roundtrip-check.cjs && cd .. && uv run agt sop validate /tmp/agt-sop-roundtrip/edited.sop.yaml",
+    "check:server-endpoint": "esbuild tests/probe-validate-endpoint.ts --bundle --platform=node --format=cjs --outfile=dist/test/probe-validate-endpoint.cjs --log-level=warning && node dist/test/probe-validate-endpoint.cjs",
+    "check:run": "esbuild tests/probe-sop-run.ts --bundle --platform=node --format=cjs --outfile=dist/test/probe-sop-run.cjs --log-level=warning && node dist/test/probe-sop-run.cjs",
+    "typecheck": "tsc --noEmit",
+    "dev:web": "node scripts/dev.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/vscode": "^1.104.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.7.0"
+  },
+  "dependencies": {
+    "@lobehub/icons-static-svg": "^1.95.1",
+    "dompurify": "^3.4.16",
+    "marked": "^18.0.14",
+    "yaml": "^2.9.1"
+  }
+}
