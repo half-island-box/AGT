@@ -330,6 +330,8 @@ async function runChatTurn(
         stdout: task.stdout ?? '',
         session_id: task.session_id,
         exit_code: task.exit_code,
+        usage: task.usage ?? null,
+        model: task.usage?.model ?? null,
       });
     }
     const [jobStatus, sessions] = await Promise.all([

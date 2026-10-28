@@ -1165,13 +1165,90 @@ export async function mockCall<T>(_method: string, params?: Record<string, unkno
         .map((part) => part.name ?? 'attachment');
       const fileNote = files.length ? `\n\n(${files.length} attachment(s): ${files.join(', ')})` : '';
       const answer = `Mock response\n\nYou said: ${p.prompt ?? ''}${fileNote}`;
+      const half = Math.ceil(answer.length / 2);
+      const usage = {
+        input_tokens: 1200,
+        output_tokens: 180,
+        cache_read_input_tokens: 900,
+        cache_creation_input_tokens: 60,
+        cost_usd: 0.0012,
+        model: 'mock-model',
+        num_turns: 1,
+      };
       return {
         accepted: true,
         events: [
           { kind: 'started', job_id: jobId, task_id: taskId, status: 'pending' },
-          { kind: 'snapshot', type: 'snapshot', status: 'pending', stdout: '' },
-          { kind: 'delta', type: 'delta', chunk: answer.slice(0, Math.ceil(answer.length / 2)) },
-          { kind: 'delta', type: 'delta', chunk: answer.slice(Math.ceil(answer.length / 2)) },
+          {
+            kind: 'snapshot',
+            type: 'snapshot',
+            status: 'pending',
+            stdout: '',
+            events: [],
+            event_cursor: 0,
+            usage: null,
+          },
+          {
+            kind: 'agent_events',
+            type: 'agent_events',
+            events: [
+              { seq: 1, kind: 'thinking_start', block_id: 'b0', text_offset: 0 },
+              {
+                seq: 2,
+                kind: 'thinking_delta',
+                block_id: 'b0',
+                text: '正在整理一个演示回答…',
+                text_offset: 0,
+              },
+              { seq: 3, kind: 'thinking_end', block_id: 'b0', text_offset: 0 },
+            ],
+          },
+          { kind: 'delta', type: 'delta', chunk: answer.slice(0, half) },
+          {
+            kind: 'agent_events',
+            type: 'agent_events',
+            events: [
+              {
+                seq: 4,
+                kind: 'tool_use_start',
+                block_id: 'b1',
+                tool_use_id: 'mock-tool-1',
+                name: 'Bash',
+                text_offset: half,
+              },
+              {
+                seq: 5,
+                kind: 'tool_use_end',
+                block_id: 'b1',
+                tool_use_id: 'mock-tool-1',
+                name: 'Bash',
+                input: { command: 'echo mock' },
+                text_offset: half,
+              },
+              {
+                seq: 6,
+                kind: 'tool_result',
+                tool_use_id: 'mock-tool-1',
+                content: 'mock\n',
+                is_error: false,
+                text_offset: half,
+              },
+            ],
+          },
+          { kind: 'delta', type: 'delta', chunk: answer.slice(half) },
+          {
+            kind: 'agent_events',
+            type: 'agent_events',
+            events: [
+              {
+                seq: 7,
+                kind: 'usage',
+                scope: 'turn',
+                ...usage,
+                text_offset: answer.length,
+              },
+            ],
+          },
           {
             kind: 'done',
             type: 'done',
@@ -1180,6 +1257,8 @@ export async function mockCall<T>(_method: string, params?: Record<string, unkno
             stderr: '',
             session_id: `mock-${Math.random().toString(16).slice(2, 10)}`,
             exit_code: 0,
+            usage,
+            model: usage.model,
           },
           {
             kind: 'settled',

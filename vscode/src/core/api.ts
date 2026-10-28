@@ -721,7 +721,13 @@ function parseSseFrame(frame: string): TaskStreamEvent | undefined {
       data += rawLine.slice(5).trim();
     }
   }
-  if (!data || (type !== 'snapshot' && type !== 'delta' && type !== 'done')) {
+  if (
+    !data ||
+    (type !== 'snapshot' &&
+      type !== 'delta' &&
+      type !== 'agent_events' &&
+      type !== 'done')
+  ) {
     return undefined;
   }
   const payload = JSON.parse(data) as Record<string, unknown>;

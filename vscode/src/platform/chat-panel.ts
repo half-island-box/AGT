@@ -451,6 +451,9 @@ export class ChatPanel {
           stdout: status.stdout ?? '',
           session_id: status.session_id,
           exit_code: status.exit_code,
+          // Status carries the same summary the SSE ``done`` frame would.
+          usage: status.usage ?? null,
+          model: status.usage?.model ?? null,
         };
         await this.emitChat({ kind: 'done', ...finalEvent });
       }

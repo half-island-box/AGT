@@ -5,6 +5,8 @@ import { renderMarkdown } from './markdown';
 import { providerLogo } from '../core/icons';
 import { t, type MessageKey } from '../core/i18n';
 import type {
+  AgentEvent,
+  AgentUsage,
   ChatInputMessage,
   ChatSessionInfo,
   ConsoleProjectInfo,
@@ -49,7 +51,31 @@ interface ChatMessage {
   streaming?: boolean;
   /** Attachments this turn carried (what the user sent, not the uploads). */
   files?: ChatMessageFile[];
+  /** Structured transcript (thinking / tool calls) for this assistant turn. */
+  events?: AgentEvent[];
+  /** Turn-level usage summary (from ``done`` or the snapshot). */
+  usage?: AgentUsage | null;
 }
+
+/**
+ * One renderable piece of an assistant turn.
+ *
+ * Text arrives on the plain ``stdout`` channel; the events are spliced back
+ * in by ``text_offset`` at render time, so the stream never duplicates text
+ * across two channels.
+ */
+type ChatBlock =
+  | { type: 'text'; text: string }
+  | { type: 'thinking'; key: string; text: string; done: boolean }
+  | {
+      type: 'tool_use';
+      key: string;
+      toolUseId: string;
+      name: string;
+      input?: unknown;
+      done: boolean;
+    }
+  | { type: 'tool_result'; toolUseId: string; content: string; isError: boolean };
 
 /**
  * A file the user picked but has not sent yet. ``uploading`` covers the
@@ -577,6 +603,228 @@ function renderSidebar(): void {
   wireSidebar();
 }
 
+/**
+ * Merge event batches by ``seq`` (idempotent — snapshots, live batches and
+ * reconnects may all carry overlapping ranges) and keep them ordered.
+ */
+function mergeAgentEvents(
+  existing: AgentEvent[] | undefined,
+  incoming: unknown,
+): AgentEvent[] {
+  const bySeq = new Map<number, AgentEvent>();
+  for (const event of existing ?? []) bySeq.set(event.seq, event);
+  if (Array.isArray(incoming)) {
+    for (const raw of incoming) {
+      if (!raw || typeof raw !== 'object') continue;
+      const event = raw as AgentEvent;
+      if (typeof event.seq !== 'number' || typeof event.kind !== 'string') continue;
+      bySeq.set(event.seq, event);
+    }
+  }
+  return [...bySeq.values()].sort((a, b) => a.seq - b.seq);
+}
+
+/**
+ * Splice structured events back into the plain-text stream.
+ *
+ * ``text_offset`` is non-decreasing per Step, so clamping to the already
+ * placed length keeps a late/duplicated batch from reordering text. A
+ * thinking block is merged by ``block_id``; a tool call by ``tool_use_id``.
+ */
+function buildBlocks(text: string, events: AgentEvent[]): ChatBlock[] {
+  const blocks: ChatBlock[] = [];
+  const thinkingAt = new Map<string, number>();
+  const toolAt = new Map<string, number>();
+  let placed = 0;
+
+  const pushText = (chunk: string): void => {
+    if (chunk) blocks.push({ type: 'text', text: chunk });
+  };
+
+  for (const event of [...events].sort((a, b) => a.seq - b.seq)) {
+    const rawOffset = Number(event.text_offset);
+    const offset = Number.isFinite(rawOffset)
+      ? Math.min(Math.max(rawOffset, placed), text.length)
+      : placed;
+    pushText(text.slice(placed, offset));
+    placed = offset;
+
+    switch (event.kind) {
+      case 'thinking_start': {
+        const key = String(event.block_id ?? `thinking-${event.seq}`);
+        thinkingAt.set(key, blocks.length);
+        blocks.push({ type: 'thinking', key, text: '', done: false });
+        break;
+      }
+      case 'thinking_delta': {
+        const key = String(event.block_id ?? 'thinking');
+        let index = thinkingAt.get(key);
+        if (index === undefined) {
+          index = blocks.length;
+          thinkingAt.set(key, index);
+          blocks.push({ type: 'thinking', key, text: '', done: false });
+        }
+        const block = blocks[index];
+        if (block.type === 'thinking') block.text += String(event.text ?? '');
+        break;
+      }
+      case 'thinking_end': {
+        const key = String(event.block_id ?? 'thinking');
+        const index = thinkingAt.get(key);
+        const block = index === undefined ? undefined : blocks[index];
+        if (block && block.type === 'thinking') block.done = true;
+        break;
+      }
+      case 'tool_use_start': {
+        const toolUseId = String(event.tool_use_id ?? event.block_id ?? event.seq);
+        toolAt.set(toolUseId, blocks.length);
+        blocks.push({
+          type: 'tool_use',
+          key: toolUseId,
+          toolUseId,
+          name: String(event.name ?? 'tool'),
+          done: false,
+        });
+        break;
+      }
+      case 'tool_use_end': {
+        const toolUseId = String(event.tool_use_id ?? event.block_id ?? '');
+        let index = toolAt.get(toolUseId);
+        if (index === undefined) {
+          index = blocks.length;
+          toolAt.set(toolUseId, index);
+          blocks.push({
+            type: 'tool_use',
+            key: toolUseId,
+            toolUseId,
+            name: String(event.name ?? 'tool'),
+            done: false,
+          });
+        }
+        const block = blocks[index];
+        if (block.type === 'tool_use') {
+          block.input = event.input;
+          block.done = true;
+          if (!block.name || block.name === 'tool') {
+            block.name = String(event.name ?? block.name);
+          }
+        }
+        break;
+      }
+      case 'tool_result': {
+        blocks.push({
+          type: 'tool_result',
+          toolUseId: String(event.tool_use_id ?? ''),
+          content: String(event.content ?? ''),
+          isError: event.is_error === true,
+        });
+        break;
+      }
+      default:
+        // ``usage`` and unknown kinds are not transcript blocks.
+        break;
+    }
+  }
+  pushText(text.slice(placed));
+  return blocks;
+}
+
+/** One-line summary of a tool input — what the call is actually doing. */
+function toolInputSummary(input: unknown): string {
+  if (!input || typeof input !== 'object') return '';
+  const record = input as Record<string, unknown>;
+  for (const key of ['command', 'file_path', 'path', 'pattern', 'query', 'url', 'description']) {
+    const value = record[key];
+    if (typeof value === 'string' && value.trim()) {
+      const flat = value.trim().replace(/\s+/g, ' ');
+      return `${key}=${flat.length > 100 ? `${flat.slice(0, 99)}…` : flat}`;
+    }
+  }
+  return '';
+}
+
+function renderBlocks(blocks: ChatBlock[]): string {
+  return blocks.map((block) => {
+    if (block.type === 'text') {
+      return `<div class="agd-md">${renderMarkdown(block.text)}</div>`;
+    }
+    if (block.type === 'thinking') {
+      const label = esc(tr(block.done ? 'chat.thinking' : 'chat.thinkingActive'));
+      return `<details class="agd-thinking"><summary>💭 ${label}</summary><pre class="agd-thinking-body">${esc(block.text)}</pre></details>`;
+    }
+    if (block.type === 'tool_use') {
+      const summary = toolInputSummary(block.input);
+      const head = `🔧 <span class="agd-tool-name">${esc(block.name || 'tool')}</span>${
+        summary ? `<span class="agd-tool-summary">${esc(summary)}</span>` : ''
+      }`;
+      if (block.input === undefined) {
+        return `<div class="agd-tool">${head}</div>`;
+      }
+      let pretty = '';
+      try {
+        pretty = JSON.stringify(block.input, null, 2);
+      } catch {
+        pretty = String(block.input);
+      }
+      return `<details class="agd-tool"><summary>${head}</summary><pre class="agd-tool-json">${esc(pretty)}</pre></details>`;
+    }
+    const marker = block.isError ? '✗' : '↳';
+    const label = esc(tr(block.isError ? 'chat.toolFailed' : 'chat.toolResult'));
+    const body = block.content.trim() ? `<pre class="agd-tool-json">${esc(block.content)}</pre>` : '';
+    return `<details class="agd-tool-result${block.isError ? ' is-error' : ''}"><summary>${marker} ${label}</summary>${body}</details>`;
+  }).join('');
+}
+
+/** The turn aggregate: ``done``/status usage first, else the ``usage`` event. */
+function turnUsage(message: ChatMessage): AgentUsage | null {
+  if (message.usage) return message.usage;
+  const events = message.events ?? [];
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const event = events[i];
+    if (event.kind !== 'usage') continue;
+    if (event.scope === 'message') continue;
+    return event as unknown as AgentUsage;
+  }
+  return null;
+}
+
+function formatTokens(value: number): string {
+  return value.toLocaleString('en-US');
+}
+
+/** ``↑in ↓out · cache hit% · $cost`` for one finished turn. */
+function usageFooter(usage: AgentUsage | null): string {
+  if (!usage) return '';
+  const cacheRead = Number(usage.cache_read_input_tokens ?? 0);
+  const cacheCreate = Number(usage.cache_creation_input_tokens ?? 0);
+  const billedInput = Number(usage.input_tokens ?? 0) + cacheRead + cacheCreate;
+  const output = Number(usage.output_tokens ?? 0);
+  const parts = [`↑${formatTokens(billedInput)}`, `↓${formatTokens(output)}`];
+  if ((cacheRead || cacheCreate) && billedInput > 0) {
+    parts.push(tr('chat.usageCache', { percent: String(Math.round((cacheRead / billedInput) * 100)) }));
+  }
+  if (typeof usage.cost_usd === 'number') {
+    parts.push(`$${usage.cost_usd.toFixed(4)}`);
+  }
+  const model = usage.model ? ` title="${esc(usage.model)}"` : '';
+  return `<div class="agd-usage"${model}>${esc(parts.join(' · '))}</div>`;
+}
+
+function assistantBodyHtml(message: ChatMessage): string {
+  const events = message.events ?? [];
+  const footer = usageFooter(turnUsage(message));
+  if (!events.length) {
+    const body = message.content
+      ? renderMarkdown(message.content)
+      : '<span class="agd-dim">…</span>';
+    return `<div class="agd-bubble agd-agent-bubble agd-md">${body}</div>${footer}`;
+  }
+  const blocks = buildBlocks(message.content, events);
+  const hasText = blocks.some((block) => block.type === 'text' && block.text.trim());
+  const placeholder = !hasText && message.streaming ? '<span class="agd-dim">…</span>' : '';
+  return `<div class="agd-bubble agd-agent-bubble agd-rich-bubble">${renderBlocks(blocks)}${placeholder}</div>${footer}`;
+}
+
 function renderMessages(): void {
   const container = document.getElementById('agd-messages');
   if (!container) return;
@@ -612,7 +860,7 @@ function renderMessages(): void {
         <span>${esc(message.provider ?? 'agent')}</span>
         ${message.streaming ? '<span class="agd-spinner" aria-hidden="true"></span>' : ''}
       </div>
-      <div class="agd-bubble agd-agent-bubble agd-md">${message.content ? renderMarkdown(message.content) : '<span class="agd-dim">…</span>'}</div>
+      ${assistantBodyHtml(message)}
       <div class="agd-msg-actions"><button type="button" class="agd-mini-btn" data-copy-message="${message.id}" title="${tr('chat.copyMessage')}" aria-label="${tr('chat.copyMessage')}">${copyIcon()}</button></div>
     </div>
     `;
@@ -1303,6 +1551,21 @@ function applyChatEvent(payload: ChatEvent): void {
       assistant.content = kind === 'snapshot'
         ? String(payload.stdout ?? '')
         : assistant.content + String(payload.chunk ?? '');
+      if (kind === 'snapshot') {
+        // Reconnect / resumed turn: the snapshot replays stored events and
+        // may carry the turn usage summary.
+        assistant.events = mergeAgentEvents([], payload.events);
+        const usage = payload.usage;
+        if (usage && typeof usage === 'object') assistant.usage = usage as AgentUsage;
+      }
+      renderMessages();
+    }
+    return;
+  }
+  if (kind === 'agent_events') {
+    const assistant = lastAssistant();
+    if (assistant) {
+      assistant.events = mergeAgentEvents(assistant.events, payload.events);
       renderMessages();
     }
     return;
@@ -1312,6 +1575,8 @@ function applyChatEvent(payload: ChatEvent): void {
     if (assistant) {
       assistant.content = String(payload.stdout ?? '');
       assistant.streaming = false;
+      const usage = payload.usage;
+      if (usage && typeof usage === 'object') assistant.usage = usage as AgentUsage;
     }
     if (currentJob) {
       if (payload.session_id) {
