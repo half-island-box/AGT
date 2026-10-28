@@ -77,6 +77,8 @@ interface RunSummary {
   updatedAt: string;
   startedAt: number;
   stale: boolean;
+  templatePath?: string | null;
+  templateHash?: string | null;
 }
 
 const INSPECTOR_WIDTH_KEY = 'agt.sop.inspectorWidth';
@@ -303,9 +305,14 @@ export class SopEditorPanel {
 
   private async serverSopRuns(): Promise<RunInfo[]> {
     const cwd = this.workspaceFolder();
-    if (!cwd) return [];
+    const templatePath = this.document?.uri.fsPath ?? null;
+    if (!cwd || !templatePath) return [];
     try {
-      const list = await this.ctx.lifecycle.api.listRuns({ mode: 'sop', cwd });
+      const list = await this.ctx.lifecycle.api.listRuns({
+        mode: 'sop',
+        cwd,
+        templatePath,
+      });
       return list.runs;
     } catch {
       return [];
@@ -378,6 +385,8 @@ export class SopEditorPanel {
         identity_did: null,
         daemon_id: null,
         cwd: this.workspaceFolder(),
+        template_path: this.document?.uri.fsPath ?? null,
+        template_hash: entry.specHash ?? null,
         title: entry.rootJobId,
         created_at: '',
         updated_at: '',
@@ -394,6 +403,7 @@ export class SopEditorPanel {
     startedAt?: number,
     specHash?: string,
   ): RunSummary {
+    const effectiveHash = specHash ?? run.template_hash ?? undefined;
     return {
       rootJobId: run.root_job_id,
       name: run.title ?? run.root_job_id,
@@ -402,7 +412,9 @@ export class SopEditorPanel {
       daemonId: run.daemon_id,
       updatedAt: run.updated_at,
       startedAt: (startedAt ?? Date.parse(run.created_at)) || Date.now(),
-      stale: specHash !== undefined && specHash !== fingerprint(text),
+      stale: effectiveHash !== undefined && effectiveHash !== fingerprint(text),
+      templatePath: this.document?.uri.fsPath ?? null,
+      templateHash: effectiveHash ?? null,
     };
   }
 
@@ -684,6 +696,8 @@ export class SopEditorPanel {
             spec,
             cwd: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null,
             localDaemonId: this.localDaemon(),
+            templatePath: this.document.uri.fsPath,
+            templateHash: fingerprint(this.document.getText()),
           });
           const entry: RunState = {
             rootJobId: submitted.root_job_id,

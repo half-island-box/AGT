@@ -145,6 +145,8 @@ export interface RunInfo {
   identity_did: string | null;
   daemon_id: string | null;
   cwd: string | null;
+  template_path: string | null;
+  template_hash: string | null;
   title: string | null;
   created_at: string;
   updated_at: string;

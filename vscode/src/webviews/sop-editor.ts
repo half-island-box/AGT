@@ -74,6 +74,8 @@ interface SopRunSummary {
   updatedAt?: string;
   startedAt: number;
   stale: boolean;
+  templatePath?: string | null;
+  templateHash?: string | null;
 }
 
 interface ServerValidation {
@@ -418,19 +420,43 @@ function allIssues(): SopIssue[] {
 }
 
 function applyBoot(next: SopBoot): void {
+  const previous = boot;
+  const templateChanged = previous?.templatePath !== next.templatePath;
+  const trackedRunChanged =
+    previous?.trackedRun?.rootJobId !== next.trackedRun?.rootJobId;
+  const runContextChanged = templateChanged || trackedRunChanged;
+
   boot = next;
   lang = next.language;
-  if (!next.trackedRun) {
+  if (runContextChanged) {
+    stopPolling();
     runStatus = null;
+    selectedRunStatus = null;
+    selectedRunStatusRoot = null;
+    nodeLog = null;
+    nodeLogFor = null;
+    selected = null;
+    selectedInstanceId = null;
+    inspectorCollapsed = true;
+    validation = null;
+    showPreview = false;
+    viewInitialized = false;
+  } else if (!next.trackedRun) {
+    runStatus = null;
+    selectedRunStatus = null;
+    selectedRunStatusRoot = null;
+    nodeLog = null;
+    nodeLogFor = null;
     stopPolling();
   }
-  selectedRunStatusRoot = null;
   // Local drags win over the values echoed back by the host (workspace
   // state is written on a debounce, so its copy can lag a drag).
   const merged: Record<string, SopPoint> = {};
   const computed = next.model ? computeLayout(next.model) : {};
   for (const node of next.model?.nodes ?? []) {
-    merged[node.name] = positions[node.name] ?? next.positions[node.name] ?? computed[node.name];
+    const previousPosition = templateChanged ? undefined : positions[node.name];
+    merged[node.name] =
+      previousPosition ?? next.positions[node.name] ?? computed[node.name];
   }
   positions = merged;
   if (selected && !next.model?.nodes.some((node) => node.name === selected)) {
@@ -1554,7 +1580,11 @@ function activeStatusGraph(): SopStatus | null {
   if (runActive() && runStatus && !runStatus.all_terminal) {
     return runStatus;
   }
-  if (editorMode === 'inspect' && selectedRunStatus) {
+  if (
+    editorMode === 'inspect' &&
+    selectedRunStatus &&
+    selectedRunStatusRoot === boot?.run?.rootJobId
+  ) {
     return selectedRunStatus;
   }
   return null;

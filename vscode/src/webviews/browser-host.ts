@@ -26,7 +26,7 @@ import {
   parseSopText,
   serializeSop,
 } from '../core/sop/yaml-doc';
-import { localDaemonId } from '../core/sop/run';
+import { fingerprint, localDaemonId } from '../core/sop/run';
 
 type Params = Record<string, unknown>;
 type Emit = (event: string, payload: unknown) => void;
@@ -40,6 +40,14 @@ const SOP_RUN_KEY = 'agt.console.sop.trackedRun';
 const SOP_SELECTED_RUN_KEY = 'agt.console.sop.selectedRun';
 
 const api = new AgtApi(window.location.origin);
+
+function sopTrackedRunKey(templatePath: string): string {
+  return `agt.console.sop.trackedRun:${templatePath}`;
+}
+
+function sopSelectedRunKey(templatePath: string): string {
+  return `agt.console.sop.selectedRun:${templatePath}`;
+}
 
 function storageGet(key: string): string | null {
   try {
@@ -146,7 +154,7 @@ function toGoalRun(run: RunInfo): GoalRunInfo {
   };
 }
 
-function toRunSummary(run: RunInfo): Record<string, unknown> {
+function toRunSummary(run: RunInfo, text = ''): Record<string, unknown> {
   return {
     rootJobId: run.root_job_id,
     name: run.title ?? run.root_job_id,
@@ -155,7 +163,12 @@ function toRunSummary(run: RunInfo): Record<string, unknown> {
     daemonId: run.daemon_id,
     updatedAt: run.updated_at,
     startedAt: Date.parse(run.created_at) || Date.now(),
-    stale: false,
+    stale:
+      run.template_hash !== null &&
+      run.template_hash !== undefined &&
+      run.template_hash !== fingerprint(text),
+    templatePath: run.template_path,
+    templateHash: run.template_hash,
   };
 }
 
@@ -377,9 +390,22 @@ async function sopBoot() {
     text = (await api.readConsoleSopFile(path)).text;
   }
   const parsed = parseSopText(text);
-  const runs = (await api.listRuns({ mode: 'sop', cwd: root })).runs;
-  const trackedId = storageGet(SOP_RUN_KEY);
-  const selectedId = storageGet(SOP_SELECTED_RUN_KEY) ?? trackedId ?? runs[0]?.root_job_id ?? null;
+  const runs = path
+    ? (await api.listRuns({ mode: 'sop', cwd: root, templatePath: path })).runs
+    : [];
+  // Legacy global keys are considered only when the ID still belongs to the
+  // template-filtered result. New writes always use a template-scoped key.
+  const legacyTrackedId = storageGet(SOP_RUN_KEY);
+  const legacySelectedId = storageGet(SOP_SELECTED_RUN_KEY);
+  const trackedId = path
+    ? storageGet(sopTrackedRunKey(path)) ?? legacyTrackedId
+    : null;
+  const selectedId = path
+    ? storageGet(sopSelectedRunKey(path)) ??
+      legacySelectedId ??
+      trackedId ??
+      runs[0]?.root_job_id
+    : null;
   const trackedRun = runs.find((run) => run.root_job_id === trackedId);
   const selectedRun = runs.find((run) => run.root_job_id === selectedId);
   return {
@@ -406,8 +432,8 @@ async function sopBoot() {
     sidebarWidth: null,
     inspectorWidth: null,
     trackedRun: trackedRun ? toRunSummary(trackedRun) : null,
-    runs: runs.map(toRunSummary),
-    run: selectedRun ? toRunSummary(selectedRun) : null,
+    runs: runs.map((run) => toRunSummary(run, text)),
+    run: selectedRun ? toRunSummary(selectedRun, text) : null,
     capabilities: { lifecycleControl: false, console: true },
   };
 }
@@ -744,6 +770,20 @@ export async function browserCall<T>(
       if (storageGet(SOP_PATH_KEY) === sourcePath) {
         storageSet(SOP_PATH_KEY, renamed.path);
       }
+      for (const [oldKey, newKey] of [
+        [sopTrackedRunKey(sourcePath), sopTrackedRunKey(renamed.path)],
+        [sopSelectedRunKey(sourcePath), sopSelectedRunKey(renamed.path)],
+        [
+          `agt.console.sop.layout:${sourcePath}`,
+          `agt.console.sop.layout:${renamed.path}`,
+        ],
+      ] as const) {
+        const value = storageGet(oldKey);
+        if (value !== null) {
+          storageSet(newKey, value);
+          storageSet(oldKey, null);
+        }
+      }
       return await sopBoot() as T;
     }
     case 'sop.save':
@@ -763,9 +803,11 @@ export async function browserCall<T>(
         spec: parsed.model,
         cwd: project?.path ?? projectPath(boot.bootstrap.default_project),
         localDaemonId: preferredDaemon(boot.daemons)?.daemon_id ?? null,
+        templatePath: current.path,
+        templateHash: fingerprint(current.text),
       });
-      storageSet(SOP_RUN_KEY, submitted.root_job_id);
-      storageSet(SOP_SELECTED_RUN_KEY, submitted.root_job_id);
+      storageSet(sopTrackedRunKey(current.path), submitted.root_job_id);
+      storageSet(sopSelectedRunKey(current.path), submitted.root_job_id);
       return {
         rootJobId: submitted.root_job_id,
         nodes: submitted.nodes,
@@ -788,10 +830,13 @@ export async function browserCall<T>(
       return { cancelled: pending.map((node) => node.name) } as T;
     }
     case 'sop.selectRun':
-      storageSet(SOP_SELECTED_RUN_KEY, String(p.rootJobId ?? ''));
+      storageSet(
+        sopSelectedRunKey(storageGet(SOP_PATH_KEY) ?? ''),
+        String(p.rootJobId ?? ''),
+      );
       return await sopBoot() as T;
     case 'sop.forgetRun':
-      storageSet(SOP_RUN_KEY, null);
+      storageSet(sopTrackedRunKey(storageGet(SOP_PATH_KEY) ?? ''), null);
       return await sopBoot() as T;
     case 'sop.revealYaml': {
       const current = await currentSopText();

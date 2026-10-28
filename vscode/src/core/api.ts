@@ -329,11 +329,15 @@ export class AgtApi {
     spec: unknown;
     cwd?: string | null;
     localDaemonId?: string | null;
+    templatePath?: string | null;
+    templateHash?: string | null;
   }): Promise<SopSubmitResult> {
     return this.post<SopSubmitResult>('/api/sop/submit', {
       spec: input.spec,
       cwd: input.cwd ?? null,
       local_daemon_id: input.localDaemonId ?? null,
+      template_path: input.templatePath ?? null,
+      template_hash: input.templateHash ?? null,
     });
   }
 
@@ -472,6 +476,7 @@ export class AgtApi {
     cwd?: string | null;
     daemonId?: string | null;
     provider?: string | null;
+    templatePath?: string | null;
     limit?: number;
     offset?: number;
   }): Promise<RunListInfo> {
@@ -483,6 +488,7 @@ export class AgtApi {
     if (input.cwd) params.set('cwd', input.cwd);
     if (input.daemonId) params.set('daemon_id', input.daemonId);
     if (input.provider) params.set('provider', input.provider);
+    if (input.templatePath) params.set('template_path', input.templatePath);
     return this.request<RunListInfo>(`/api/runs?${params}`);
   }
 

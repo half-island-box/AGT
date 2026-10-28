@@ -177,6 +177,8 @@ const chatRuns: RunInfo[] = [
     identity_did: 'did:agt:code-reviewer',
     daemon_id: 'dev-box-1',
     cwd: '/home/you/project',
+    template_path: null,
+    template_hash: null,
     title: 'Review the current diff',
     created_at: '2026-09-15 09:55:00',
     updated_at: '2026-09-15 10:00:00',
@@ -189,6 +191,8 @@ const chatRuns: RunInfo[] = [
     identity_did: null,
     daemon_id: 'dev-box-1',
     cwd: '/home/you/project',
+    template_path: null,
+    template_hash: null,
     title: 'Summarize this repository',
     created_at: '2026-09-14 18:15:00',
     updated_at: '2026-09-14 18:20:00',
@@ -201,6 +205,8 @@ const chatRuns: RunInfo[] = [
     identity_did: null,
     daemon_id: 'dev-box-2',
     cwd: '/remote/project',
+    template_path: null,
+    template_hash: null,
     title: 'Check Rust build',
     created_at: '2026-09-15 09:15:00',
     updated_at: '2026-09-15 09:20:00',
@@ -362,6 +368,7 @@ function toSopRunSummary(
     updatedAt: new Date(run.startedAt).toISOString(),
     startedAt: run.startedAt,
     stale: run.stale,
+    templatePath: sopPath,
     ...overrides,
   };
 }
@@ -369,18 +376,22 @@ function toSopRunSummary(
 function sopBoot(): Record<string, unknown> {
   const doc = sopPath ? sopDocs[sopPath] : null;
   const currentRun = toSopRunSummary(sopRun);
-  const serverRuns: Record<string, unknown>[] = [
-    {
-      rootJobId: 'job-sop-001',
-      name: 'review-fix',
-      status: 'done',
-      provider: 'claude',
-      daemonId: 'dev-box-1',
-      updatedAt: '2026-09-15T10:00:00.000Z',
-      startedAt: Date.parse('2026-09-15T09:55:00.000Z'),
-      stale: false,
-    },
-  ];
+  const serverRuns: Record<string, unknown>[] =
+    sopPath === '/home/you/project/pipelines/review-fix.sop.yaml'
+      ? [
+          {
+            rootJobId: 'job-sop-001',
+            name: 'review-fix',
+            status: 'done',
+            provider: 'claude',
+            daemonId: 'dev-box-1',
+            updatedAt: '2026-09-15T10:00:00.000Z',
+            startedAt: Date.parse('2026-09-15T09:55:00.000Z'),
+            stale: false,
+            templatePath: sopPath,
+          },
+        ]
+      : [];
   const runs: Record<string, unknown>[] = currentRun
     ? [currentRun, ...serverRuns]
     : serverRuns;
