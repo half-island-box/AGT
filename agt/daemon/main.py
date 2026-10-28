@@ -397,12 +397,42 @@ async def _execute_one(
             effective_prompt = task_payload["prompt"]
             raw_message = task_payload.get("message")
             if raw_message:
+                from ..a2a import parse_artifact_uri, parse_upload_uri
                 from ..task.message_render import render_task_message
 
-                async def _artifact_resolver(artifact_id: str):
+                async def _input_resolver(uri: str):
+                    """Resolve one FilePart reference by URI namespace.
+
+                    ``agt-artifact://`` → ``artifacts.get``;
+                    ``agt-upload://``   → ``uploads.get``.
+                    WS first (the reverse-dial link), HTTP fallback.
+                    """
                     cur_ws = (
                         _resolve_ws_source(ws_server) if ws_server is not None else None
                     )
+                    import base64
+
+                    upload_id = parse_upload_uri(uri)
+                    artifact_id = parse_artifact_uri(uri)
+                    if upload_id is not None:
+                        if cur_ws is not None and cur_ws.supports_rpc_v1:
+                            try:
+                                return await cur_ws.call(
+                                    "uploads.get",
+                                    {"upload_id": upload_id},
+                                    timeout_ms=8000,
+                                )
+                            except Exception as exc:
+                                log.warning("uploads.get over WS failed: %s", exc)
+                                return None
+                        try:
+                            content = await client.get_upload_content(upload_id)
+                            return {"content_b64": base64.b64encode(content).decode()}
+                        except Exception as exc:
+                            log.warning("upload content fetch failed: %s", exc)
+                            return None
+                    if artifact_id is None:
+                        return None
                     if cur_ws is not None and cur_ws.supports_rpc_v1:
                         try:
                             return await cur_ws.call(
@@ -415,8 +445,6 @@ async def _execute_one(
                             return None
                     try:
                         content = await client.get_artifact_content(artifact_id)
-                        import base64
-
                         return {"content_b64": base64.b64encode(content).decode()}
                     except Exception as exc:
                         log.warning("artifact content fetch failed: %s", exc)
@@ -426,7 +454,7 @@ async def _execute_one(
                     effective_prompt = await render_task_message(
                         raw_message,
                         agent_cwd=agent_cwd or Path.cwd(),
-                        resolver=_artifact_resolver,
+                        resolver=_input_resolver,
                     )
                 except Exception as exc:
                     log.exception("task %s input rendering failed", task_id)

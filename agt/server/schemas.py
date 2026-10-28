@@ -240,6 +240,47 @@ class ProgressRequest(BaseModel):
     stdout_prefix: str
 
 
+# ── Input uploads (chat attachments) ────────────────────────────────
+
+
+class UploadCreateRequest(BaseModel):
+    """One user file uploaded before/with a chat turn.
+
+    JSON base64 (no multipart dependency): the bytes are small enough
+    for a local bridge and the same shape works from the VS Code webview,
+    the browser console and the CLI alike.
+    """
+
+    name: str
+    mime_type: str | None = None
+    content_b64: str
+    # Origin hint: "console" / "vscode" / "cli". Display/audit only.
+    source: str = ""
+
+
+class UploadOut(BaseModel):
+    """Public upload metadata. ``uri`` is the only reference form."""
+
+    upload_id: str
+    name: str
+    mime_type: str
+    size: int
+    sha256: str
+    uri: str
+    source: str = ""
+    created_at: str
+    expires_at: str | None = None
+
+
+class UploadResolveOut(BaseModel):
+    """``uploads.get`` RPC response — bytes + display metadata."""
+
+    content_b64: str
+    name: str
+    mime_type: str = ""
+    sha256: str
+
+
 class ProgressResponse(BaseModel):
     recorded: bool
 

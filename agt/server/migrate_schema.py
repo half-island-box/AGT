@@ -313,6 +313,32 @@ def ensure_schema(conn: Connection) -> None:
               AND (first_prompt IS NULL OR first_prompt = '')
         """)
 
+    # Chat attachments: user-uploaded inputs owned by the Server. New
+    # databases get this from ``create_all``; this guard covers DB files
+    # whose tables were created before the feature landed (and keeps the
+    # Alembic / ensure_schema tracks in step).
+    if not _table_exists(conn, "input_uploads"):
+        conn.exec_driver_sql("""
+            CREATE TABLE input_uploads (
+                upload_id VARCHAR(64) NOT NULL,
+                name VARCHAR(512) NOT NULL,
+                mime_type VARCHAR(128) NOT NULL DEFAULT '',
+                size INTEGER NOT NULL,
+                sha256 VARCHAR(64) NOT NULL,
+                storage_path VARCHAR(1024),
+                inline_bytes BLOB,
+                source VARCHAR(32) NOT NULL DEFAULT '',
+                created_at VARCHAR(32) NOT NULL,
+                expires_at VARCHAR(32),
+                PRIMARY KEY (upload_id)
+            )
+        """)
+        conn.exec_driver_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ix_input_uploads_sha256 "
+            "ON input_uploads (sha256)"
+        )
+        log.info("Migrated schema: created input_uploads table")
+
     # Phase 6: unify run history by cwd and first-class job_type.
     if _table_exists(conn, "jobs") and "cwd" not in _column_names(conn, "jobs"):
         conn.exec_driver_sql(

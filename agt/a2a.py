@@ -18,6 +18,10 @@ Concept mapping (see docs/impl/agent-orchestration-design.md §8.6):
 Public artifact URIs are ALWAYS ``agt-artifact://<artifact_id>``. Daemon
 local paths are an internal zero-copy detail and never appear in public
 input/output payloads.
+
+User-uploaded inputs use the parallel ``agt-upload://<upload_id>``
+namespace: the Server owns the bytes, the daemon resolves them on demand
+(there is no same-machine zero-copy path for uploads).
 """
 
 from __future__ import annotations
@@ -38,11 +42,14 @@ __all__ = [
     "render_message",
     "make_artifact_uri",
     "parse_artifact_uri",
+    "make_upload_uri",
+    "parse_upload_uri",
     "INLINE_MAX_BYTES",
     "REPORT_INLINE_BUDGET_BYTES",
     "MAX_ARTIFACT_FILE_BYTES",
     "MAX_ARTIFACTS_PER_STEP",
     "ARTIFACT_URI_PREFIX",
+    "UPLOAD_URI_PREFIX",
 ]
 
 # ── Budgets (design D7; enforced on both daemon and server) ─────────
@@ -54,6 +61,15 @@ MAX_ARTIFACTS_PER_STEP = 50
 ARTIFACT_URI_PREFIX = "agt-artifact://"
 _ARTIFACT_URI_RE = re.compile(
     r"^agt-artifact://([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
+)
+
+# User-uploaded input references. Same shape as artifact URIs, but the
+# bytes are owned by the Server (see ``Server /api/uploads``) — a daemon
+# always resolves them over the link, never from a same-machine path.
+UPLOAD_URI_PREFIX = "agt-upload://"
+_UPLOAD_URI_RE = re.compile(
+    r"^agt-upload://([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
 )
 
@@ -78,6 +94,11 @@ class FilePart(BaseModel):
     type: Literal["file"] = "file"
     uri: str
     mime_type: str | None = None
+    # Optional human-readable filename, carried for ``agt-upload://``
+    # references so the daemon can materialize the input under its
+    # original name. A2A-compatible additive field; ``None`` for older
+    # artifact references.
+    name: str | None = None
 
 
 Part = Annotated[Union[TextPart, DataPart, FilePart], Field(discriminator="type")]
@@ -107,6 +128,17 @@ def parse_artifact_uri(uri: str) -> str | None:
     never valid public references).
     """
     m = _ARTIFACT_URI_RE.match(uri)
+    return m.group(1) if m else None
+
+
+def make_upload_uri(upload_id: str) -> str:
+    """Build the public reference for a user-uploaded input."""
+    return f"{UPLOAD_URI_PREFIX}{upload_id}"
+
+
+def parse_upload_uri(uri: str) -> str | None:
+    """Extract the upload id from an ``agt-upload://`` URI, else ``None``."""
+    m = _UPLOAD_URI_RE.match(uri)
     return m.group(1) if m else None
 
 

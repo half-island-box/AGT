@@ -351,6 +351,8 @@ class DaemonLink:
             return await self._handle_tasks_progress(body)
         if method == "artifacts.get":
             return await self._handle_artifacts_get(body)
+        if method == "uploads.get":
+            return await self._handle_uploads_get(body)
         if method == "catalog.list":
             return await self._handle_catalog_list(body)
         if method == "spawn.create":
@@ -532,6 +534,47 @@ class DaemonLink:
                 "content_b64": base64.b64encode(content).decode(),
                 "mime_type": artifact.mime_type,
                 "sha256": artifact.sha256,
+            }
+
+    async def _handle_uploads_get(self, body: dict) -> dict:
+        """Daemon→server input-side upload resolution (chat attachments).
+
+        Unlike ``artifacts.get`` there is no same-daemon zero-copy branch:
+        the bytes belong to the Server, so every daemon reads them over
+        the link. A missing row/expired blob raises ``upload_missing`` so
+        the daemon fails the Step loudly instead of running without the
+        user's file.
+        """
+        upload_id = body.get("upload_id")
+        if not isinstance(upload_id, str) or not upload_id:
+            raise ValueError({
+                "type": "validation_error",
+                "message": "uploads.get requires upload_id",
+            })
+        import base64
+
+        from .services.input_service import get_upload, read_upload_content
+
+        async with session_scope(self._session_factory) as db:
+            upload = await get_upload(db, upload_id)
+            if upload is None:
+                raise ValueError({
+                    "type": "upload_missing",
+                    "reason": "upload_missing",
+                    "message": upload_id,
+                })
+            content = await read_upload_content(upload)
+            if content is None:
+                raise ValueError({
+                    "type": "upload_missing",
+                    "reason": "upload_expired",
+                    "message": upload_id,
+                })
+            return {
+                "content_b64": base64.b64encode(content).decode(),
+                "name": upload.name,
+                "mime_type": upload.mime_type,
+                "sha256": upload.sha256,
             }
 
     def _artifacts_dir(self) -> "Path":

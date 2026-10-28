@@ -69,6 +69,9 @@ agt probe
 agt run --provider claude --prompt "Explain this repository"
 agt chat --provider claude
 
+# Attach files to the first chat turn (repeatable, max 10)
+agt chat --file report.pdf --file notes.md
+
 # Resume a persisted session
 agt chat --list
 agt chat --resume <session-id>
