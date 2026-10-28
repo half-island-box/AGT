@@ -82,6 +82,7 @@ class Daemon:
         outputs_subdir: str | None = None,
         use_cwd_session_store: bool = False,
         progress_cb=None,
+        event_cb=None,
     ) -> TaskResult:
         """Execute one prompt against the named provider.
 
@@ -199,6 +200,7 @@ class Daemon:
         executor = TaskExecutor(runtime=runtime, config=self.config)
         result = await executor.execute(
             task, interactive=interactive, progress_cb=progress_cb,
+            event_cb=event_cb,
         )
 
         # Update the session store based on the outcome (only when caller

@@ -695,6 +695,11 @@ class DaemonLink:
                     artifacts=_parse_artifact_items(body.get("artifacts")),
                     outcome_payload=body.get("outcome_payload"),
                     context_ops=body.get("context_ops") or [],
+                    # Token usage + the event tail not acknowledged by a
+                    # progress call. Both optional; malformed events are
+                    # dropped inside the service.
+                    usage=body.get("usage"),
+                    agent_events=body.get("agent_events") or [],
                 )
         except ValueError as exc:
             payload = (
@@ -733,6 +738,7 @@ class DaemonLink:
                     daemon_id=self.daemon_id,
                     step_id=body["task_id"],
                     stdout_prefix=str(body["stdout_prefix"]),
+                    events=body.get("events") or [],
                 )
         except ValueError as exc:
             payload = (

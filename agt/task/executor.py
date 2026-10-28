@@ -231,6 +231,7 @@ class TaskExecutor:
         *,
         interactive: bool = False,
         progress_cb=None,
+        event_cb=None,
     ) -> TaskResult:
         """Run one agent subprocess for ``task``.
 
@@ -357,6 +358,7 @@ class TaskExecutor:
                 result = await self._execute_streaming(
                     task, cmd, work_dir, env, start, sink, adapter,
                     progress_cb=progress_cb,
+                    event_cb=event_cb,
                 )
                 return result
             result = await self._execute_pipe_text(task, cmd, work_dir, env, start)
@@ -408,11 +410,20 @@ class TaskExecutor:
     # ── Mode: interactive ───────────────────────────────────────
 
 
-    def _cancelled_result(self, task: Task, start: float, stdout: str = "", stderr: str = "") -> TaskResult:
+    def _cancelled_result(
+        self,
+        task: Task,
+        start: float,
+        stdout: str = "",
+        stderr: str = "",
+        events: list | None = None,
+    ) -> TaskResult:
         """Terminal result for a server-cancelled Step (Phase 4).
 
         Built after the subprocess was killed by the cancellation path;
         ``status="cancelled"`` flows through the normal report chain.
+        ``events`` carries whatever structured events the sink collected
+        before the cancellation so the report tail is not lost.
         """
         return TaskResult(
             task_id=task.task_id,
@@ -424,6 +435,7 @@ class TaskExecutor:
             status="cancelled",
             session_id=None,
             resume_rejected=False,
+            events=list(events or []),
         )
 
     async def _execute_interactive(
@@ -502,6 +514,7 @@ class TaskExecutor:
         adapter: ProviderAdapter,
         *,
         progress_cb=None,
+        event_cb=None,
     ) -> TaskResult:
         """Spawn the agent and consume its structured event stream.
 
@@ -526,12 +539,19 @@ class TaskExecutor:
         ``_echo_task_result``, report_service) see no shape change.
 
         ``progress_cb`` (Phase 5 remote streaming), when provided, is an
-        ``async(current_prefix) -> None`` callback invoked by a background
-        sampler every ``_PROGRESS_FLUSH_INTERVAL`` seconds while the
-        cumulative stdout prefix grows. It never affects the terminal
-        ``TaskResult`` — the sampler is cancelled in ``finally`` and its
-        exceptions are swallowed (see design decision 10).
+        ``async(current_prefix, events) -> None`` callback invoked by a
+        background sampler every ``_PROGRESS_FLUSH_INTERVAL`` seconds while
+        the cumulative stdout prefix or the event buffer grows. It never
+        affects the terminal ``TaskResult`` — the sampler is cancelled in
+        ``finally`` and its exceptions are swallowed (see design decision 10).
+
+        ``event_cb`` (local structured rendering), when provided, is a plain
+        ``(event) -> None`` observer attached to the sink. The CLI uses it
+        to print ``--show-tools`` / ``--show-thinking`` lines live; the
+        remote path never uses it (events ride progress/report instead).
         """
+        if event_cb is not None:
+            sink.on_event = event_cb
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -570,6 +590,7 @@ class TaskExecutor:
                 stderr="",
                 duration=duration,
                 status="timeout",
+                events=list(getattr(sink, "events", []) or []),
             )
         except asyncio.CancelledError:
             # Phase 4: server-initiated cancel — kill the agent, surface
@@ -578,7 +599,9 @@ class TaskExecutor:
             process.kill()
             with contextlib.suppress(ProcessLookupError):
                 await process.wait()
-            return self._cancelled_result(task, start)
+            return self._cancelled_result(
+                task, start, events=list(getattr(sink, "events", []) or []),
+            )
         finally:
             if sampler_task is not None:
                 sampler_task.cancel()
@@ -607,27 +630,38 @@ class TaskExecutor:
             status="completed" if exit_code == 0 else "failed",
             session_id=session_id,
             resume_rejected=resume_rejected,
+            events=list(result.events),
+            usage=result.usage,
         )
 
     async def _sample_progress(self, sink: StreamingSink, progress_cb) -> None:
-        """Periodically report the sink's cumulative stdout prefix.
+        """Periodically report the sink's cumulative stdout prefix + events.
 
         Runs as a background task for the duration of the streaming
         execution. Reports the **full prefix** (idempotency requirement on
         the server side — a lost prefix can always be rebuilt by the next
-        sample), only when it grew since the previous sample. ``progress_cb``
+        sample) and only the **new** structured events since the previous
+        sample. A sample is skipped when neither grew. ``progress_cb``
         exceptions are swallowed so a network blip on the report path can
         never crash the executor or leave an un-retrieved task exception.
         """
         last_len = 0
+        last_seq = -1
         while True:
             await asyncio.sleep(_PROGRESS_FLUSH_INTERVAL)
             current = "".join(sink.accumulated_text)
-            if len(current) <= last_len:
+            all_events = list(getattr(sink, "events", []) or [])
+            new_events = [
+                event for event in all_events
+                if int(event.get("seq", 0)) > last_seq
+            ]
+            if len(current) <= last_len and not new_events:
                 continue
-            last_len = len(current)
+            last_len = max(last_len, len(current))
+            if new_events:
+                last_seq = int(new_events[-1].get("seq", last_seq))
             try:
-                await progress_cb(current)
+                await progress_cb(current, new_events)
             except Exception:
                 log.debug(
                     "progress_cb raised; skipping this sample",

@@ -339,6 +339,37 @@ def ensure_schema(conn: Connection) -> None:
         )
         log.info("Migrated schema: created input_uploads table")
 
+    # Structured agent events + per-turn token usage. New databases get
+    # both from ``create_all``; these guards cover DB files that predate
+    # the feature (the same dual-track pattern as the other Phase columns).
+    for column, ddl in (
+        ("input_tokens", "INTEGER"),
+        ("output_tokens", "INTEGER"),
+        ("cache_read_tokens", "INTEGER"),
+        ("cache_creation_tokens", "INTEGER"),
+        ("cost_usd", "REAL"),
+        ("model", "VARCHAR(128)"),
+        ("num_turns", "INTEGER"),
+    ):
+        if _table_exists(conn, "tasks") and column not in _column_names(conn, "tasks"):
+            conn.exec_driver_sql(f"ALTER TABLE tasks ADD COLUMN {column} {ddl}")
+            log.info("Migrated tasks table: added %s column", column)
+
+    if not _table_exists(conn, "step_events"):
+        conn.exec_driver_sql("""
+            CREATE TABLE step_events (
+                task_id VARCHAR(64) NOT NULL,
+                seq INTEGER NOT NULL,
+                kind VARCHAR(32) NOT NULL,
+                text_offset INTEGER NOT NULL DEFAULT 0,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                created_at VARCHAR(32) NOT NULL,
+                PRIMARY KEY (task_id, seq),
+                FOREIGN KEY (task_id) REFERENCES tasks (task_id) ON DELETE CASCADE
+            )
+        """)
+        log.info("Migrated schema: created step_events table")
+
     # Phase 6: unify run history by cwd and first-class job_type.
     if _table_exists(conn, "jobs") and "cwd" not in _column_names(conn, "jobs"):
         conn.exec_driver_sql(

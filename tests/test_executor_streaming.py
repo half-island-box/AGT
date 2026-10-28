@@ -15,6 +15,7 @@ dependency.
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -423,7 +424,7 @@ def test_progress_callback_receives_growing_prefix(tmp_path, monkeypatch):
     )
     progress_calls: list[str] = []
 
-    async def progress_cb(prefix: str) -> None:
+    async def progress_cb(prefix: str, events) -> None:
         progress_calls.append(prefix)
 
     async def go():
@@ -468,7 +469,7 @@ def test_progress_callback_exception_is_swallowed(tmp_path):
         agent_cwd=tmp_path,
     )
 
-    async def progress_cb(_prefix: str) -> None:
+    async def progress_cb(_prefix: str, _events) -> None:
         raise RuntimeError("network blip")
 
     async def go():
@@ -510,3 +511,68 @@ def test_no_callback_runs_without_sampler(tmp_path):
     result = asyncio.run(go())
     assert result.status == "completed"
     assert result.session_id == "x"
+
+def test_tool_and_usage_events_reach_progress_and_result(tmp_path, monkeypatch):
+    """Structured events ride the sampler (tool calls produce no text) and
+    the terminal ``TaskResult`` carries the full list plus turn usage."""
+    monkeypatch.setattr(
+        "agt.task.executor._PROGRESS_FLUSH_INTERVAL", 0.02, raising=True
+    )
+    executor = TaskExecutor(runtime=_runtime_with_provider("claude"), config=_config())
+    task = Task(
+        prompt="hi",
+        provider="claude",
+        task_id="t1",
+        work_dir=tmp_path,
+        agent_cwd=tmp_path,
+    )
+    streamed: list[dict] = []
+
+    async def progress_cb(_prefix: str, events) -> None:
+        streamed.extend(events)
+
+    lines = [
+        {"type": "stream_event", "event": {"type": "message_start", "message": {
+            "id": "m1", "usage": {"input_tokens": 10, "output_tokens": 1}}}},
+        {"type": "stream_event", "event": {"type": "content_block_start", "index": 0,
+            "content_block": {"type": "tool_use", "id": "tu", "name": "Bash"}}},
+        {"type": "stream_event", "event": {"type": "content_block_delta", "index": 0,
+            "delta": {"type": "input_json_delta", "partial_json": "{\"command\":\"ls\"}"}}},
+        {"type": "stream_event", "event": {"type": "content_block_stop", "index": 0}},
+        {"type": "stream_event", "event": {"type": "message_delta",
+            "usage": {"output_tokens": 5}}},
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "tu", "content": "ok"}]}},
+        {"type": "result", "is_error": False, "session_id": "sess-ev",
+         "num_turns": 1, "total_cost_usd": 0.01,
+         "usage": {"input_tokens": 10, "output_tokens": 5}},
+    ]
+
+    async def go():
+        chunks = [
+            json.dumps(line) + "\n" for line in lines
+        ]
+        fake = _SlowFeedProcess(chunks=chunks)
+        fake.attach()
+        with _patched_subprocess(lambda *a, **k: fake):
+            return await executor.execute(
+                task, interactive=False, progress_cb=progress_cb
+            )
+
+    result = asyncio.run(go())
+    assert result.status == "completed"
+    assert [e["kind"] for e in streamed] == [
+        "tool_use_start", "tool_use_end", "usage", "tool_result",
+    ]
+    assert streamed[1]["input"] == {"command": "ls"}
+    assert [e["kind"] for e in result.events] == [
+        "tool_use_start", "tool_use_end", "usage", "tool_result", "usage",
+    ]
+    assert result.events[-1]["scope"] == "turn"
+    assert result.usage == {
+        "scope": "turn",
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "cost_usd": 0.01,
+        "num_turns": 1,
+    }

@@ -44,11 +44,23 @@ class Subscriber:
     per-task) so a fresh subscriber always aligns with the DB snapshot at
     subscribe time — a server restart therefore can never re-send already
     printed content (see design decision 3).
+
+    ``event_cursor`` is the highest structured-event ``seq`` already
+    delivered. The snapshot replays stored events and seeds this cursor, so
+    the hub only forwards genuinely new events.
     """
 
-    def __init__(self, task_id: str, *, cursor: int, maxsize: int) -> None:
+    def __init__(
+        self,
+        task_id: str,
+        *,
+        cursor: int,
+        maxsize: int,
+        event_cursor: int = 0,
+    ) -> None:
         self.task_id = task_id
         self.cursor = cursor
+        self.event_cursor = event_cursor
         self.queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(
             maxsize=maxsize
         )
@@ -65,9 +77,12 @@ class StreamHub:
       enqueues ``{"type": "delta", "chunk": ...}`` when the chunk is
       non-empty.
     - ``{"type": "done", ...}`` — terminal report payload (full stdout,
-      status, session_id, exit_code, resume_rejected, stderr). Enqueued
-      verbatim to every subscriber and remembered so a subscriber that
-      arrives after the report still gets its ``done``.
+      status, session_id, exit_code, resume_rejected, stderr, usage).
+      Enqueued verbatim to every subscriber and remembered so a subscriber
+      that arrives after the report still gets its ``done``.
+    - ``{"type": "agent_events", "events": [...]}`` — structured thinking /
+      tool / usage events. Each subscriber receives only events with
+      ``seq`` above its ``event_cursor``.
     """
 
     def __init__(self, *, maxsize: int = 256) -> None:
@@ -75,10 +90,15 @@ class StreamHub:
         self._done_events: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
         self._maxsize = maxsize
 
-    def subscribe(self, task_id: str, *, cursor: int = 0) -> Subscriber:
+    def subscribe(
+        self, task_id: str, *, cursor: int = 0, event_cursor: int = 0
+    ) -> Subscriber:
         """Register a subscriber and replay ``done`` if the task already
         finished (closes the subscribe-vs-report race)."""
-        sub = Subscriber(task_id, cursor=cursor, maxsize=self._maxsize)
+        sub = Subscriber(
+            task_id, cursor=cursor, maxsize=self._maxsize,
+            event_cursor=event_cursor,
+        )
         self._subscribers.setdefault(task_id, set()).add(sub)
         done = self._done_events.get(task_id)
         if done is not None:
@@ -118,6 +138,18 @@ class StreamHub:
                         continue
                     sub.cursor = len(full_prefix)
                     sub.queue.put_nowait({"type": "delta", "chunk": chunk})
+                elif etype == "agent_events":
+                    events = [
+                        item
+                        for item in event.get("events") or []
+                        if int(item.get("seq", 0)) > sub.event_cursor
+                    ]
+                    if not events:
+                        continue
+                    sub.event_cursor = int(events[-1].get("seq", sub.event_cursor))
+                    sub.queue.put_nowait(
+                        {"type": "agent_events", "events": events}
+                    )
                 else:
                     sub.queue.put_nowait(event)
             except asyncio.QueueFull:
