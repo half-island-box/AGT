@@ -116,6 +116,8 @@ export interface RunInfo {
   identity_did: string | null;
   daemon_id: string | null;
   cwd: string | null;
+  template_path: string | null;
+  template_hash: string | null;
   title: string | null;
   created_at: string;
   updated_at: string;
@@ -148,6 +150,31 @@ export interface SessionHistoryInfo {
   not_implemented: boolean;
 }
 
+/** One A2A message part as accepted by ``POST /api/jobs`` / ``/input``. */
+export type MessagePart =
+  | { type: 'text'; text: string }
+  | { type: 'file'; uri: string; name?: string | null; mime_type?: string | null };
+
+/** Structured input for one chat turn (legacy turns send ``prompt`` only). */
+export interface ChatInputMessage {
+  role: 'user';
+  parts: MessagePart[];
+}
+
+/** A user-uploaded input file owned by the Server (``agt-upload://<id>``). */
+export interface InputUploadInfo {
+  upload_id: string;
+  name: string;
+  mime_type: string;
+  size: number;
+  sha256: string;
+  /** Public reference to embed in a ``FilePart``. */
+  uri: string;
+  source: string;
+  created_at: string;
+  expires_at: string | null;
+}
+
 export interface JobInfo {
   job_id: string;
   task_id: string;
@@ -171,11 +198,60 @@ export interface TaskStatusInfo {
   duration: number | null;
   created_at: string;
   updated_at: string;
+  /** Turn-level token/cache/cost summary (absent on legacy rows). */
+  usage?: AgentUsage | null;
+}
+
+/**
+ * Token/cache/cost summary for one turn's worth of work.
+ *
+ * ``input_tokens`` excludes cache traffic; the billed input shown to users
+ * is ``input_tokens + cache_creation_input_tokens + cache_read_input_tokens``.
+ * The turn aggregate is authoritative and is never the sum of the per-API-call
+ * ``usage`` events carrying ``scope: 'message'``.
+ */
+export interface AgentUsage {
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  cache_read_input_tokens?: number | null;
+  cache_creation_input_tokens?: number | null;
+  cost_usd?: number | null;
+  model?: string | null;
+  num_turns?: number | null;
+}
+
+/**
+ * One structured agent event. ``seq`` is monotonic per Step and
+ * ``text_offset`` is the length of the plain-text output at emit time, so a
+ * client can splice the event back into the text stream.
+ *
+ * Kind-specific fields (all optional):
+ * - ``thinking_*``        — ``block_id``, ``text`` (delta only)
+ * - ``tool_use_start``    — ``block_id``, ``tool_use_id``, ``name``
+ * - ``tool_use_end``      — ``block_id``, ``tool_use_id``, ``name``, ``input``
+ * - ``tool_result``       — ``tool_use_id``, ``content``, ``is_error``
+ * - ``usage``             — ``scope`` (``message`` | ``turn``) + AgentUsage
+ */
+export interface AgentEvent {
+  seq: number;
+  kind: string;
+  text_offset?: number;
+  [key: string]: unknown;
 }
 
 export type TaskStreamEvent =
-  | { type: 'snapshot'; status: string; stdout: string }
+  | {
+      type: 'snapshot';
+      status: string;
+      stdout: string;
+      /** Stored events replayed on (re)connect; may be empty. */
+      events?: AgentEvent[];
+      /** Highest replayed ``seq``; the server suppresses anything at or below. */
+      event_cursor?: number;
+      usage?: AgentUsage | null;
+    }
   | { type: 'delta'; chunk: string }
+  | { type: 'agent_events'; events: AgentEvent[] }
   | {
       type: 'done';
       status: string;
@@ -184,6 +260,8 @@ export type TaskStreamEvent =
       exit_code?: number | null;
       resume_rejected?: boolean | null;
       stderr?: string | null;
+      usage?: AgentUsage | null;
+      model?: string | null;
     };
 
 export type ServerState = 'unknown' | 'offline' | 'starting' | 'online';

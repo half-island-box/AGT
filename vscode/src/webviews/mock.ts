@@ -153,6 +153,8 @@ const chatRuns: RunInfo[] = [
     identity_did: 'did:agt:code-reviewer',
     daemon_id: 'dev-box-1',
     cwd: '/home/you/project',
+    template_path: null,
+    template_hash: null,
     title: 'Review the current diff',
     created_at: '2026-09-15 09:55:00',
     updated_at: '2026-09-15 10:00:00',
@@ -165,6 +167,8 @@ const chatRuns: RunInfo[] = [
     identity_did: null,
     daemon_id: 'dev-box-1',
     cwd: '/home/you/project',
+    template_path: null,
+    template_hash: null,
     title: 'Summarize this repository',
     created_at: '2026-09-14 18:15:00',
     updated_at: '2026-09-14 18:20:00',
@@ -177,6 +181,8 @@ const chatRuns: RunInfo[] = [
     identity_did: null,
     daemon_id: 'dev-box-2',
     cwd: '/remote/project',
+    template_path: null,
+    template_hash: null,
     title: 'Check Rust build',
     created_at: '2026-09-15 09:15:00',
     updated_at: '2026-09-15 09:20:00',
@@ -338,6 +344,7 @@ function toSopRunSummary(
     updatedAt: new Date(run.startedAt).toISOString(),
     startedAt: run.startedAt,
     stale: run.stale,
+    templatePath: sopPath,
     ...overrides,
   };
 }
@@ -345,18 +352,22 @@ function toSopRunSummary(
 function sopBoot(): Record<string, unknown> {
   const doc = sopPath ? sopDocs[sopPath] : null;
   const currentRun = toSopRunSummary(sopRun);
-  const serverRuns: Record<string, unknown>[] = [
-    {
-      rootJobId: 'job-sop-001',
-      name: 'review-fix',
-      status: 'done',
-      provider: 'claude',
-      daemonId: 'dev-box-1',
-      updatedAt: '2026-09-15T10:00:00.000Z',
-      startedAt: Date.parse('2026-09-15T09:55:00.000Z'),
-      stale: false,
-    },
-  ];
+  const serverRuns: Record<string, unknown>[] =
+    sopPath === '/home/you/project/pipelines/review-fix.sop.yaml'
+      ? [
+          {
+            rootJobId: 'job-sop-001',
+            name: 'review-fix',
+            status: 'done',
+            provider: 'claude',
+            daemonId: 'dev-box-1',
+            updatedAt: '2026-09-15T10:00:00.000Z',
+            startedAt: Date.parse('2026-09-15T09:55:00.000Z'),
+            stale: false,
+            templatePath: sopPath,
+          },
+        ]
+      : [];
   const runs: Record<string, unknown>[] = currentRun
     ? [currentRun, ...serverRuns]
     : serverRuns;
@@ -1018,23 +1029,125 @@ export async function mockCall<T>(_method: string, params?: Record<string, unkno
         sessions,
       } as T;
     }
+    case 'upload': {
+      const p = (params ?? {}) as { name?: string; mimeType?: string; contentB64?: string };
+      if (!p.contentB64) throw new Error('upload content is required');
+      const uploadId = `mock-${Math.random().toString(16).slice(2, 10)}`;
+      // base64 length → approximate byte size, enough for the mock chips.
+      const size = Math.floor((p.contentB64.length * 3) / 4);
+      return {
+        upload_id: uploadId,
+        name: p.name ?? 'attachment.bin',
+        mime_type: p.mimeType ?? 'application/octet-stream',
+        size,
+        sha256: '0'.repeat(64),
+        uri: `agt-upload://${uploadId}`,
+        source: 'mock',
+        created_at: new Date().toISOString(),
+        expires_at: null,
+      } as T;
+    }
+    case 'deleteUpload':
+      return { ok: true } as T;
     case 'send': {
       const p = (params ?? {}) as {
         prompt?: string;
         currentJobId?: string | null;
         daemonId?: string;
+        message?: { parts?: { type?: string; name?: string }[] };
       };
       const daemonId = p.daemonId ?? 'dev-box-1';
       const jobId = p.currentJobId ?? `job-${Math.random().toString(16).slice(2, 8)}`;
       const taskId = `task-${Math.random().toString(16).slice(2, 8)}`;
-      const answer = `Mock response\n\nYou said: ${p.prompt ?? ''}`;
+      const files = (p.message?.parts ?? [])
+        .filter((part) => part.type === 'file')
+        .map((part) => part.name ?? 'attachment');
+      const fileNote = files.length ? `\n\n(${files.length} attachment(s): ${files.join(', ')})` : '';
+      const answer = `Mock response\n\nYou said: ${p.prompt ?? ''}${fileNote}`;
+      const half = Math.ceil(answer.length / 2);
+      const usage = {
+        input_tokens: 1200,
+        output_tokens: 180,
+        cache_read_input_tokens: 900,
+        cache_creation_input_tokens: 60,
+        cost_usd: 0.0012,
+        model: 'mock-model',
+        num_turns: 1,
+      };
       return {
         accepted: true,
         events: [
           { kind: 'started', job_id: jobId, task_id: taskId, status: 'pending' },
-          { kind: 'snapshot', type: 'snapshot', status: 'pending', stdout: '' },
-          { kind: 'delta', type: 'delta', chunk: answer.slice(0, Math.ceil(answer.length / 2)) },
-          { kind: 'delta', type: 'delta', chunk: answer.slice(Math.ceil(answer.length / 2)) },
+          {
+            kind: 'snapshot',
+            type: 'snapshot',
+            status: 'pending',
+            stdout: '',
+            events: [],
+            event_cursor: 0,
+            usage: null,
+          },
+          {
+            kind: 'agent_events',
+            type: 'agent_events',
+            events: [
+              { seq: 1, kind: 'thinking_start', block_id: 'b0', text_offset: 0 },
+              {
+                seq: 2,
+                kind: 'thinking_delta',
+                block_id: 'b0',
+                text: '正在整理一个演示回答…',
+                text_offset: 0,
+              },
+              { seq: 3, kind: 'thinking_end', block_id: 'b0', text_offset: 0 },
+            ],
+          },
+          { kind: 'delta', type: 'delta', chunk: answer.slice(0, half) },
+          {
+            kind: 'agent_events',
+            type: 'agent_events',
+            events: [
+              {
+                seq: 4,
+                kind: 'tool_use_start',
+                block_id: 'b1',
+                tool_use_id: 'mock-tool-1',
+                name: 'Bash',
+                text_offset: half,
+              },
+              {
+                seq: 5,
+                kind: 'tool_use_end',
+                block_id: 'b1',
+                tool_use_id: 'mock-tool-1',
+                name: 'Bash',
+                input: { command: 'echo mock' },
+                text_offset: half,
+              },
+              {
+                seq: 6,
+                kind: 'tool_result',
+                tool_use_id: 'mock-tool-1',
+                content: 'mock\n',
+                is_error: false,
+                text_offset: half,
+              },
+            ],
+          },
+          { kind: 'delta', type: 'delta', chunk: answer.slice(half) },
+          {
+            kind: 'agent_events',
+            type: 'agent_events',
+            events: [
+              {
+                seq: 7,
+                kind: 'usage',
+                scope: 'turn',
+                ...usage,
+                text_offset: answer.length,
+              },
+            ],
+          },
           {
             kind: 'done',
             type: 'done',
@@ -1043,6 +1156,8 @@ export async function mockCall<T>(_method: string, params?: Record<string, unkno
             stderr: '',
             session_id: `mock-${Math.random().toString(16).slice(2, 10)}`,
             exit_code: 0,
+            usage,
+            model: usage.model,
           },
           {
             kind: 'settled',
