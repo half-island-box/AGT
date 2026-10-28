@@ -800,7 +800,7 @@ export async function browserCall<T>(
       const boot = await bootstrapContext();
       const project = await activeProject();
       const submitted = await api.submitSop({
-        spec: parsed.model,
+        spec: parsed.doc.toJS(),
         cwd: project?.path ?? projectPath(boot.bootstrap.default_project),
         localDaemonId: preferredDaemon(boot.daemons)?.daemon_id ?? null,
         templatePath: current.path,
