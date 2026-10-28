@@ -1790,6 +1790,8 @@ def server_status(pid_file: str | None) -> None:
         click.echo("Server is NOT running.")
         sys.exit(1)
     click.echo(f"Server is running, pid={pid}, pidfile={path}")
+    port = int(os.environ.get("AGT_SERVER_PORT", "8420"))
+    click.echo(f"Console: http://127.0.0.1:{port}/")
 
 
 def _resolve_server_pid_file(explicit: str | None) -> Path:

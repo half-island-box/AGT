@@ -454,6 +454,11 @@ class ConsoleDirectoryListResponse(BaseModel):
     directories: list[ConsoleDirectoryOut]
 
 
+class ConsoleSopRenameRequest(BaseModel):
+    path: str
+    new_name: str
+
+
 # ── Identity (Phase 4 Step 1) ───────────────────────────────────────
 
 
@@ -746,6 +751,7 @@ __all__ = [
     "ConsoleProjectListResponse",
     "ConsoleDirectoryOut",
     "ConsoleDirectoryListResponse",
+    "ConsoleDirectoryPickResponse",
     "IdentityCreate",
     "IdentityOut",
     "IdentityUpdate",

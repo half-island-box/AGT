@@ -124,12 +124,19 @@ class ServerConfig:
         default_factory=lambda: str(Path.home() / ".agt" / "daemons")
     )
     daemons: list[DaemonTarget] = field(default_factory=list)
-    # Browser-console project APIs. Like the future console shell, these
-    # endpoints expose local directory names and must stay loopback-only by
-    # default until console authentication exists.
+    # Browser console hosting. Loopback-only by default; non-loopback
+    # binds must opt in explicitly until the remote-console auth layer is
+    # implemented.
     console_enabled: bool = True
     console_allow_remote: bool = False
-    console_workspace_roots: list[str] = field(default_factory=list)
+    console_assets_dir: str = field(
+        default_factory=lambda: str(
+            Path(__file__).resolve().parent.parent / "web_console" / "assets"
+        )
+    )
+    console_workspace_roots: list[str] = field(
+        default_factory=lambda: [str(Path.home())]
+    )
 
     @classmethod
     def from_env(cls) -> "ServerConfig":
@@ -170,6 +177,10 @@ class ServerConfig:
             console_allow_remote=os.environ.get(
                 "AGT_CONSOLE_ALLOW_REMOTE", "0"
             ).strip().lower() in {"1", "true", "yes", "on"},
+            console_assets_dir=os.environ.get(
+                "AGT_CONSOLE_ASSETS",
+                str(Path(__file__).resolve().parent.parent / "web_console" / "assets"),
+            ),
             console_workspace_roots=workspace_roots,
         )
 

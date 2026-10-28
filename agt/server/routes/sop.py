@@ -38,6 +38,25 @@ class SopSubmitResponse(BaseModel):
     nodes: dict[str, str]
 
 
+class SopValidateRequest(BaseModel):
+    raw: str
+
+
+class SopValidateNode(BaseModel):
+    name: str
+    depends_on: list[str] = []
+    output: str | None = None
+    identity: str | None = None
+
+
+class SopValidateResponse(BaseModel):
+    ok: bool
+    name: str | None = None
+    nodes: list[SopValidateNode] = []
+    identities: list[str] = []
+    error: str | None = None
+
+
 class SopNodeStatus(BaseModel):
     name: str
     job_id: str
@@ -76,6 +95,31 @@ class SopNodeLogResponse(BaseModel):
     status: str
     provider: str | None = None
     steps: list[SopNodeLogStep] = []
+
+
+@router.post("/validate", response_model=SopValidateResponse)
+async def validate_sop(payload: SopValidateRequest) -> SopValidateResponse:
+    """Parse and statically validate a YAML SOP without submitting it."""
+    try:
+        spec = parse_sop(payload.raw)
+    except SOPError as exc:
+        return SopValidateResponse(ok=False, error=str(exc))
+    except Exception as exc:  # YAML syntax errors and unexpected parser input
+        return SopValidateResponse(ok=False, error=str(exc))
+    return SopValidateResponse(
+        ok=True,
+        name=spec.name,
+        identities=sorted(spec.identities),
+        nodes=[
+            SopValidateNode(
+                name=node.name,
+                depends_on=list(node.depends_on),
+                output=node.output,
+                identity=node.identity,
+            )
+            for node in spec.nodes
+        ],
+    )
 
 
 @router.post("/submit", response_model=SopSubmitResponse)

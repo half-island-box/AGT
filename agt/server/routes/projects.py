@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db
 from ..schemas import (
+    ConsoleDirectoryPickResponse,
     ConsoleDirectoryListResponse,
     ConsoleProjectCreate,
     ConsoleProjectListResponse,
     ConsoleProjectOut,
     ConsoleProjectUpdate,
+    ConsoleSopRenameRequest,
 )
 from ..services.project_service import (
     ProjectServiceError,
@@ -21,10 +26,18 @@ from ..services.project_service import (
     list_directories,
     list_projects,
     open_project,
+    resolve_project_path,
+    resolve_project_path,
     update_project,
+)
+from ..services.native_picker import (
+    NativePickerError,
+    native_picker_allowed_for_host,
+    pick_native_directory,
 )
 
 router = APIRouter(prefix="/api/console", tags=["console projects"])
+_SOP_NAME_RE = re.compile(r"^[^\0]+\.ya?ml$", re.IGNORECASE)
 
 
 def _error(exc: ProjectServiceError) -> HTTPException:
@@ -44,6 +57,47 @@ async def directories(
     except ProjectServiceError as exc:
         raise _error(exc) from None
     return ConsoleDirectoryListResponse(**result)
+
+
+@router.post("/sop/file/rename")
+async def rename_sop_file(
+    payload: ConsoleSopRenameRequest,
+    request: Request,
+) -> dict[str, str]:
+    try:
+        source = resolve_project_path(request.app.state.config, payload.path)
+    except ProjectServiceError as exc:
+        raise _error(exc) from None
+    if not _SOP_NAME_RE.match(source.name):
+        raise HTTPException(status_code=400, detail="only YAML files are supported")
+    if not source.is_file():
+        raise HTTPException(status_code=404, detail="SOP file not found")
+
+    new_name = payload.new_name.strip()
+    if (
+        not new_name
+        or new_name.startswith(".")
+        or Path(new_name).name != new_name
+        or "/" in new_name
+        or "\\" in new_name
+    ):
+        raise HTTPException(status_code=400, detail="invalid SOP filename")
+    if not _SOP_NAME_RE.match(new_name):
+        raise HTTPException(status_code=400, detail="only YAML files are supported")
+
+    destination = source.with_name(new_name)
+    if destination == source:
+        return {"path": str(source), "label": source.name}
+    if destination.exists():
+        raise HTTPException(status_code=409, detail="SOP filename already exists")
+    try:
+        source.rename(destination)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"cannot rename SOP file: {exc}",
+        ) from None
+    return {"path": str(destination), "label": destination.name}
 
 
 @router.get("/projects", response_model=ConsoleProjectListResponse)
