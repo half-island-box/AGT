@@ -206,6 +206,16 @@ class StepModel(Base):
     stdout: Mapped[str | None] = mapped_column(Text, nullable=True)
     stderr: Mapped[str | None] = mapped_column(Text, nullable=True)
     duration: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Per-turn token usage, taken verbatim from the provider's terminal
+    # ``result`` aggregate (never summed with per-call ``message`` usage).
+    # NULL for legacy rows / providers that report no usage.
+    input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cache_read_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cache_creation_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    num_turns: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Structured outcome reported by the daemon (or derived by the server
     # for legacy daemons). Values: done, needs_input, error, spawn_subjob.
     outcome: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -260,6 +270,31 @@ class StepModel(Base):
         back_populates="children",
         remote_side="StepModel.step_id",
     )
+
+
+class StepEventModel(Base):
+    """One structured agent event (thinking / tool / usage) for a Step.
+
+    Events are append-only and idempotent on ``(task_id, seq)`` — a
+    re-sent progress batch or a report tail can be written twice without
+    duplicating rows. ``payload_json`` holds the kind-specific fields;
+    ``kind`` / ``text_offset`` are promoted to columns because the SSE
+    replay and the UI filter on them.
+    """
+
+    __tablename__ = "step_events"
+
+    step_id: Mapped[str] = mapped_column(
+        "task_id",
+        String(64),
+        ForeignKey("tasks.task_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    seq: Mapped[int] = mapped_column(Integer, primary_key=True)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    text_offset: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    created_at: Mapped[str] = mapped_column(String(32), nullable=False)
 
 
 class SessionModel(Base):

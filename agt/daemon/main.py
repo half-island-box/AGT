@@ -480,32 +480,50 @@ async def _execute_one(
             # are swallowed inside ``report_task_progress_ws_first`` and the
             # executor sampler, so progress can never break the terminal
             # report path.
-            async def _progress_cb(stdout_prefix: str) -> None:
+            # Structured events: track the highest ``seq`` the Server has
+            # accepted so the terminal report only carries the unacked tail.
+            sent_event_seq = 0
+
+            async def _progress_cb(
+                stdout_prefix: str, events: list | None = None
+            ) -> None:
                 # Phase 3: length-preserving mask — spawn marker JSON must
                 # never leak through live SSE frames; removal would shrink
                 # the cumulative prefix and trip the server's shrink guard.
                 from ..task.spawn_intent import mask_spawn_lines
                 from ..task.spawn_intent import mask_context_lines
 
+                nonlocal sent_event_seq
+                pending = [
+                    event for event in (events or [])
+                    if int(event.get("seq", 0)) > sent_event_seq
+                ]
                 stdout_prefix = mask_context_lines(mask_spawn_lines(stdout_prefix))
                 cur_ws = (
                     _resolve_ws_source(ws_server) if ws_server is not None else None
                 )
                 if claim_state is not None:
-                    await report_task_progress_ws_first(
+                    ok = await report_task_progress_ws_first(
                         wsrpc=cur_ws,
                         http_client=client,
                         state=claim_state,
                         task_id=task_id,
                         stdout_prefix=stdout_prefix,
+                        events=pending,
                     )
                 else:
                     try:
-                        await client.report_progress(
-                            task_id=task_id, stdout_prefix=stdout_prefix,
+                        ok = await client.report_progress(
+                            task_id=task_id,
+                            stdout_prefix=stdout_prefix,
+                            events=pending,
                         )
                     except Exception:
-                        pass
+                        ok = False
+                if ok and pending:
+                    # Progress is best-effort; a failed sample leaves the
+                    # events in the report tail instead.
+                    sent_event_seq = int(pending[-1].get("seq", sent_event_seq))
 
             try:
                 result = await daemon.run(
@@ -579,6 +597,10 @@ async def _execute_one(
                                 exc,
                             )
 
+            pending_events = [
+                event for event in (getattr(result, "events", None) or [])
+                if int(event.get("seq", 0)) > sent_event_seq
+            ]
             await _safe_report(
                 client,
                 task_id=task_id,
@@ -595,6 +617,8 @@ async def _execute_one(
                 outcome=getattr(result, "outcome", None),
                 outcome_payload=getattr(result, "outcome_payload", None),
                 context_ops=getattr(result, "context_ops", None),
+                events=pending_events,
+                usage=getattr(result, "usage", None),
             )
 
         finally:
@@ -617,6 +641,8 @@ async def _safe_report(
     outcome: str | None = None,
     outcome_payload: dict | None = None,
     context_ops: list[dict] | None = None,
+    events: list | None = None,
+    usage: dict | None = None,
 ) -> None:
     """Best-effort result write. WS-first in reverse-dial mode; HTTP otherwise.
 
@@ -643,6 +669,8 @@ async def _safe_report(
                 outcome=outcome,
                 outcome_payload=outcome_payload,
                 context_ops=context_ops,
+                events=events,
+                usage=usage,
             )
         else:
             await client.report_task(
@@ -658,6 +686,8 @@ async def _safe_report(
                 outcome=outcome,
                 outcome_payload=outcome_payload,
                 context_ops=context_ops,
+                events=events,
+                usage=usage,
             )
     except Exception as exc:
         log.warning("report failed for task %s: %s", task_id, exc)

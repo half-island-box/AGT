@@ -133,6 +133,42 @@ class TaskPayload(BaseModel):
     outputs_subdir: str | None = None
 
 
+class UsageOut(BaseModel):
+    """Token/cost summary for one Step.
+
+    ``scope="turn"`` values come from the provider's terminal aggregate
+    (``result.usage``), which is authoritative. Per-call ``message`` usage
+    lives only in the event stream and is deliberately NOT summed here.
+    Billing input = ``input_tokens + cache_creation + cache_read``; the
+    cache counters are exposed separately so a UI can show hit rate.
+    """
+
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_read_input_tokens: int | None = None
+    cache_creation_input_tokens: int | None = None
+    cost_usd: float | None = None
+    model: str | None = None
+    num_turns: int | None = None
+
+
+class AgentEvent(BaseModel):
+    """One structured agent event (thinking / tool use / tool result / usage).
+
+    ``seq`` is globally monotonic per Step; ``text_offset`` is the length
+    of the cumulative plain text when the event was emitted. Kind-specific
+    fields (``block_id``, ``tool_use_id``, ``text``, ``input``, ``content``,
+    usage counters, …) are kept verbatim via ``extra="allow"`` so a new
+    provider event does not require a schema change.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    seq: int
+    kind: str
+    text_offset: int = 0
+
+
 class ReportRequest(BaseModel):
     daemon_id: str
     task_id: str
@@ -155,6 +191,13 @@ class ReportRequest(BaseModel):
     outcome_payload: dict | None = None
     # Shared-context marker operations captured during the subprocess run.
     context_ops: list[dict] = []
+    # Turn-level usage summary (``result.usage`` + cost/model/num_turns).
+    # Optional: legacy daemons omit it and the Step keeps NULL columns.
+    usage: UsageOut | None = None
+    # Structured events not acknowledged by a previous progress call (the
+    # daemon re-sends its tail here so a lost progress frame never loses
+    # an event). Idempotent on ``(task_id, seq)``.
+    agent_events: list[AgentEvent] = []
 
 
 class ReportResponse(BaseModel):
@@ -238,6 +281,9 @@ class ProgressRequest(BaseModel):
     daemon_id: str
     task_id: str
     stdout_prefix: str
+    # Structured events produced since the previous sample. Empty for
+    # legacy daemons; the stdout prefix contract is unchanged.
+    events: list[AgentEvent] = []
 
 
 # ── Input uploads (chat attachments) ────────────────────────────────
@@ -283,6 +329,9 @@ class UploadResolveOut(BaseModel):
 
 class ProgressResponse(BaseModel):
     recorded: bool
+    # Highest ``seq`` stored for this Step after the write. Only present
+    # when the request carried events (legacy responses stay ``{recorded}``).
+    last_seq: int | None = None
 
 
 class TaskStatusResponse(BaseModel):
@@ -310,6 +359,8 @@ class TaskStatusResponse(BaseModel):
     agent_cwd: str | None = None
     # Phase 2: declared deliverables of this Step (public metadata only).
     artifacts: list[ArtifactOut] = []
+    # Token/cost summary; None for legacy rows / providers without usage.
+    usage: UsageOut | None = None
 
 
 # ── Stream (SSE) events — Phase 5 remote streaming ──────────────────
@@ -320,11 +371,20 @@ class TaskStatusResponse(BaseModel):
 
 
 class StreamSnapshotEvent(BaseModel):
-    """Full cumulative stdout + status, sent immediately on subscribe."""
+    """Full cumulative stdout + status, sent immediately on subscribe.
+
+    ``events`` replays the structured events already stored for this Step
+    (so a reconnect never loses thinking/tool history), and ``event_cursor``
+    is the highest ``seq`` included — the hub suppresses anything at or
+    below it. ``usage`` may be ``None`` while the turn is still running.
+    """
 
     type: str = "snapshot"
     status: str
     stdout: str
+    events: list[dict] = []
+    event_cursor: int = 0
+    usage: UsageOut | None = None
 
 
 class StreamDeltaEvent(BaseModel):
@@ -332,6 +392,13 @@ class StreamDeltaEvent(BaseModel):
 
     type: str = "delta"
     chunk: str
+
+
+class StreamAgentEventsEvent(BaseModel):
+    """One batch of structured events not yet seen by this subscriber."""
+
+    type: str = "agent_events"
+    events: list[dict] = []
 
 
 class StreamDoneEvent(BaseModel):
@@ -346,6 +413,9 @@ class StreamDoneEvent(BaseModel):
     stderr: str | None = None
     # Phase 2: declared deliverables of this Step.
     artifacts: list[ArtifactOut] = []
+    # Token/cost summary and model name for the finished turn.
+    usage: UsageOut | None = None
+    model: str | None = None
 
 
 # ── Session ─────────────────────────────────────────────────────────

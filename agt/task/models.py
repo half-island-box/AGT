@@ -87,6 +87,13 @@ class TaskResult:
     outcome_payload: dict | None = None
     # Shared-context marker operations captured from AGT-CONTEXT lines.
     context_ops: list[dict] = field(default_factory=list)
+    # Structured agent events (thinking / tool use / tool result / usage)
+    # produced by the provider sink. Text stays in ``stdout``; these events
+    # are additive and empty for providers without a streaming sink.
+    events: list[dict] = field(default_factory=list)
+    # Turn-level token summary (``result.usage`` + cost/model/num_turns),
+    # or None when the provider reported no usage.
+    usage: dict | None = None
 
 
 __all__ = ["Task", "TaskResult"]

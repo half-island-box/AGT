@@ -544,6 +544,7 @@ def _chat_turn_local(
     first_prompt: str | None = None,
     turn_index: int = 1,
     files: tuple[Path, ...] = (),
+    event_printer: _AgentEventPrinter | None = None,
 ) -> None:
     """Run one chat turn against the local daemon.
 
@@ -551,6 +552,9 @@ def _chat_turn_local(
     already runs on this machine, so each attachment is passed as a
     zero-copy ``local_path`` hint and rendered to ``Input file: <path>``
     by the shared message renderer (same prompt shape as remote turns).
+
+    ``event_printer`` receives structured thinking/tool events live via
+    the executor's ``event_cb`` hook.
     """
     async def _run():
         effective_prompt = prompt
@@ -586,9 +590,12 @@ def _chat_turn_local(
             first_prompt=first_prompt,
             turn_index=turn_index,
             use_cwd_session_store=True,
+            event_cb=event_printer,
         )
 
     result = asyncio.run(_run())
+    if event_printer is not None:
+        event_printer.usage_from_done({"usage": result.usage})
     # Streaming (Phase 5): each text block is printed with
     # ``end=""``, so the terminal cursor may sit mid-line when the
     # turn ends. Make sure the next ``agt> `` prompt lands on a fresh
@@ -617,10 +624,119 @@ def _finish_stream_line(stdout: str) -> None:
         click.echo()
 
 
+class _AgentEventPrinter:
+    """Render structured agent events on the terminal during a chat turn.
+
+    Text still arrives through the plain-text stream; this only adds the
+    opt-in extras. Defaults are all-off so existing terminal output is
+    byte-identical to the pre-event behaviour.
+    """
+
+    def __init__(
+        self,
+        *,
+        show_tools: bool = False,
+        show_thinking: bool = False,
+        show_usage: bool = False,
+    ) -> None:
+        self.show_tools = show_tools
+        self.show_thinking = show_thinking
+        self.show_usage = show_usage
+        self._tool_names: dict[str, str] = {}
+        self._printed_usage = False
+
+    def __call__(self, event: dict) -> None:
+        if not isinstance(event, dict):
+            return
+        kind = event.get("kind")
+        if kind == "thinking_start" and self.show_thinking:
+            click.echo("\n💭 ", nl=False)
+        elif kind == "thinking_delta" and self.show_thinking:
+            text = event.get("text")
+            if isinstance(text, str) and text:
+                click.echo(text, nl=False)
+        elif kind == "thinking_end" and self.show_thinking:
+            click.echo()
+        elif kind == "tool_use_start" and self.show_tools:
+            name = event.get("name") or "tool"
+            tool_use_id = event.get("tool_use_id")
+            if isinstance(tool_use_id, str):
+                self._tool_names[tool_use_id] = name
+            click.echo(f"\n🔧 {name}", nl=False)
+        elif kind == "tool_use_end" and self.show_tools:
+            summary = _tool_input_summary(event.get("input"))
+            if summary:
+                click.echo(f": {summary}", nl=False)
+            click.echo()
+        elif kind == "tool_result" and self.show_tools:
+            content = str(event.get("content") or "")
+            first_line = content.strip().splitlines()[0] if content.strip() else ""
+            if len(first_line) > 120:
+                first_line = f"{first_line[:117]}…"
+            marker = "✗" if event.get("is_error") else "↳"
+            click.echo(f"   {marker} {first_line}")
+        elif (
+            kind == "usage"
+            and self.show_usage
+            and event.get("scope") == "turn"
+        ):
+            self._printed_usage = True
+            click.echo(f"\n{_format_usage_line(event)}")
+
+    def usage_from_done(self, done: dict) -> None:
+        """Print the usage summary off a ``done`` frame when no event had it.
+
+        Old servers push ``usage`` only on the terminal frame; new ones also
+        send a ``usage`` event. This keeps the footer exactly once.
+        """
+        if not self.show_usage or self._printed_usage:
+            return
+        usage = done.get("usage")
+        if not isinstance(usage, dict):
+            return
+        model = done.get("model")
+        if model and not usage.get("model"):
+            usage = {**usage, "model": model}
+        self._printed_usage = True
+        click.echo(f"\n{_format_usage_line(usage)}")
+
+
+def _tool_input_summary(value) -> str:
+    """One-line summary of a tool input (``command`` / ``path`` / …)."""
+    if not isinstance(value, dict):
+        return ""
+    for key in ("command", "file_path", "path", "pattern", "query", "url", "description"):
+        candidate = value.get(key)
+        if isinstance(candidate, str) and candidate:
+            candidate = candidate.strip().replace("\n", " ")
+            return f"{key}={candidate[:100]}"
+    return ""
+
+
+def _format_usage_line(usage: dict) -> str:
+    """``[tokens] in … · out … · cache hit …% · $…`` for one finished turn."""
+    input_tokens = int(usage.get("input_tokens") or 0)
+    output_tokens = int(usage.get("output_tokens") or 0)
+    cache_read = int(usage.get("cache_read_input_tokens") or 0)
+    cache_creation = int(usage.get("cache_creation_input_tokens") or 0)
+    billed_input = input_tokens + cache_read + cache_creation
+    parts = [f"in {billed_input:,}", f"out {output_tokens:,}"]
+    if cache_read or cache_creation:
+        hit = cache_read / billed_input * 100 if billed_input else 0.0
+        parts.append(f"cache hit {hit:.0f}%")
+    cost = usage.get("cost_usd")
+    if isinstance(cost, (int, float)):
+        parts.append(f"${cost:.4f}")
+    model = usage.get("model")
+    prefix = f"{model} · " if model else ""
+    return f"[usage] {prefix}{' · '.join(parts)}"
+
+
 async def _stream_and_wait(
     client: ServerClient,
     task_id: str,
     target_daemon_id: str,
+    event_printer: _AgentEventPrinter | None = None,
 ) -> dict | None:
     """Subscribe to the task's SSE stream and render it incrementally.
 
@@ -628,6 +744,9 @@ async def _stream_and_wait(
     delta and re-aligns on every ``snapshot`` / ``done``, so reconnects and
     fallbacks never re-print content the user has already seen (design
     decision 6).
+
+    ``agent_events`` frames are handed to ``event_printer`` (no-op when the
+    flags are off or the server is old and never sends them).
     """
     printed = 0
 
@@ -646,6 +765,10 @@ async def _stream_and_wait(
                     if chunk:
                         click.echo(chunk, nl=False)
                         printed += len(chunk)
+                elif etype == "agent_events":
+                    if event_printer is not None:
+                        for item in event.get("events") or []:
+                            event_printer(item)
                 elif etype == "done":
                     final = dict(event)
                     final_stdout = final.get("stdout") or ""
@@ -653,6 +776,8 @@ async def _stream_and_wait(
                     if tail:
                         click.echo(tail, nl=False)
                     _finish_stream_line(final_stdout)
+                    if event_printer is not None:
+                        event_printer.usage_from_done(final)
                     return final
             # Stream ended without a ``done`` frame (server closed early).
             break
@@ -663,7 +788,10 @@ async def _stream_and_wait(
                 continue
             break
 
-    return await _poll_fallback(client, task_id, target_daemon_id, printed)
+    data = await _poll_fallback(client, task_id, target_daemon_id, printed)
+    if data is not None and event_printer is not None:
+        event_printer.usage_from_done(data)
+    return data
 
 
 async def _poll_fallback(
@@ -699,6 +827,7 @@ def _chat_turn_remote(
     work_dir_str: str | None,
     identity_did: str | None = None,
     agent_cwd: Path | None = None,
+    event_printer: _AgentEventPrinter | None = None,
 ) -> None:
     """Run one chat turn pinned to a remote daemon via the Server.
 
@@ -713,7 +842,9 @@ def _chat_turn_remote(
     """
     async def _remote() -> dict | None:
         async with ServerClient(base_url=server_url, daemon_id="cli-direct") as client:
-            return await _stream_and_wait(client, step_id, target_daemon_id)
+            return await _stream_and_wait(
+                client, step_id, target_daemon_id, event_printer,
+            )
 
     try:
         asyncio.run(_remote())
@@ -806,6 +937,24 @@ def _chat_turn_remote(
          "With --daemon the file is uploaded to the Server first; local "
          "chat passes the path directly to the agent.",
 )
+@click.option(
+    "--show-tools",
+    is_flag=True,
+    help="Print tool calls and tool results as one-line annotations "
+         "while the turn streams (off by default).",
+)
+@click.option(
+    "--show-thinking",
+    is_flag=True,
+    help="Print the model's thinking stream while the turn runs "
+         "(off by default).",
+)
+@click.option(
+    "--usage",
+    "show_usage",
+    is_flag=True,
+    help="Print a token / cache / cost footer after each turn.",
+)
 def chat(
     provider: str | None,
     target_daemon_id: str | None,
@@ -818,6 +967,9 @@ def chat(
     identity_did: str | None,
     agent_cwd_override: Path | None,
     files: tuple[Path, ...],
+    show_tools: bool,
+    show_thinking: bool,
+    show_usage: bool,
 ) -> None:
     if identity_did is not None and target_daemon_id is None:
         click.echo(
@@ -1018,6 +1170,11 @@ def chat(
         identity_did=identity_did,
         agent_cwd=agent_cwd,
         files=files,
+        event_printer=_AgentEventPrinter(
+            show_tools=show_tools,
+            show_thinking=show_thinking,
+            show_usage=show_usage,
+        ),
     )
 
 
@@ -1039,6 +1196,7 @@ def _chat_loop(
     identity_did: str | None,
     agent_cwd: Path | None,
     files: tuple[Path, ...] = (),
+    event_printer: _AgentEventPrinter | None = None,
 ) -> None:
     """Read-eval-print loop.
 
@@ -1086,6 +1244,7 @@ def _chat_loop(
             identity_did=identity_did,
             agent_cwd=agent_cwd,
             files=files if is_first else (),
+            event_printer=event_printer,
         )
 
 
@@ -1204,6 +1363,7 @@ def _run_chat_turn(
     turn_index: int,
     identity_did: str | None,
     files: tuple[Path, ...] = (),
+    event_printer: _AgentEventPrinter | None = None,
 ) -> str | None:
     """Dispatch one chat turn to the local daemon or the remote Server.
 
@@ -1221,6 +1381,7 @@ def _run_chat_turn(
             first_prompt=first_prompt if is_first else None,
             turn_index=turn_index,
             files=files,
+            event_printer=event_printer,
         )
         return job_id
 
@@ -1244,6 +1405,7 @@ def _run_chat_turn(
         server_url, work_dir_str,
         identity_did=identity_did,
         agent_cwd=agent_cwd,
+        event_printer=event_printer,
     )
     return current_job_id
 

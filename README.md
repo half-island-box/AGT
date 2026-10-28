@@ -18,6 +18,9 @@ workflows, and a shared artifact registry.
 
 - **Provider-neutral execution** — run and chat through one CLI, with
   provider-native sessions and output streaming.
+- **Structured agent events** — chat forwards thinking, tool calls, and tool
+  results (server API, SSE, and CLI), and records per-turn token/cache/cost
+  usage.
 - **Goal orchestration** — a root agent decomposes an objective, spawns child
   agents within a global budget, and synthesizes their deliverables.
 - **Shared context** — Goal agents exchange versioned decisions, constraints,
@@ -71,6 +74,9 @@ agt chat --provider claude
 
 # Attach files to the first chat turn (repeatable, max 10)
 agt chat --file report.pdf --file notes.md
+
+# Show thinking, tool calls, and per-turn token/cost usage
+agt chat --show-thinking --show-tools --usage
 
 # Resume a persisted session
 agt chat --list

@@ -98,7 +98,9 @@ class TestDaemonHonorsAgentCwd:
         proj = tmp_path / "proj"
         proj.mkdir()
 
-        async def fake_execute(self, task, *, interactive=False, progress_cb=None):
+        async def fake_execute(
+            self, task, *, interactive=False, progress_cb=None, event_cb=None
+        ):
             from dataclasses import dataclass
             @dataclass
             class R:
@@ -152,7 +154,9 @@ class TestDaemonHonorsAgentCwd:
     def test_agent_cwd_root_slash_allows_anything(self, tmp_path) -> None:
         daemon = _daemon_with_allowlist([Path("/")])
 
-        async def fake_execute(self, task, *, interactive=False, progress_cb=None):
+        async def fake_execute(
+            self, task, *, interactive=False, progress_cb=None, event_cb=None
+        ):
             from dataclasses import dataclass
             @dataclass
             class R:

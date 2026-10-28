@@ -297,6 +297,8 @@ class ServerClient:
         artifacts: list[dict[str, Any]] | None = None,
         outcome_payload: dict | None = None,
         context_ops: list[dict[str, Any]] | None = None,
+        events: list[dict[str, Any]] | None = None,
+        usage: dict[str, Any] | None = None,
     ) -> bool:
         payload = {
             "daemon_id": self._daemon_id,
@@ -320,6 +322,12 @@ class ServerClient:
             payload["outcome_payload"] = outcome_payload
         if context_ops:
             payload["context_ops"] = context_ops
+        if events:
+            # ``agent_events`` (not ``events``) matches the report schema;
+            # progress uses the shorter ``events`` key.
+            payload["agent_events"] = events
+        if usage is not None:
+            payload["usage"] = usage
         resp = await self._post(f"/api/tasks/{task_id}/report", payload)
         return bool(resp.get("recorded", False))
 
@@ -497,18 +505,25 @@ class ServerClient:
             raise RPCRejected(resp.status_code, {"raw": resp.text})
         return resp.content
 
-    async def report_progress(self, task_id: str, stdout_prefix: str) -> bool:
-        """Report an incremental stdout prefix (Phase 5 remote streaming).
+    async def report_progress(
+        self,
+        task_id: str,
+        stdout_prefix: str,
+        events: list[dict[str, Any]] | None = None,
+    ) -> bool:
+        """Report an incremental stdout prefix + event batch.
 
         Best-effort: the caller treats failures as ignorable — the next
         sample supersedes this one, and the terminal ``report_task`` is the
-        authoritative write.
+        authoritative write (it also carries any unacknowledged events).
         """
         payload = {
             "daemon_id": self._daemon_id,
             "task_id": task_id,
             "stdout_prefix": stdout_prefix,
         }
+        if events:
+            payload["events"] = events
         resp = await self._post(f"/api/tasks/{task_id}/progress", payload)
         return bool(resp.get("recorded", False))
 
