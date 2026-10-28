@@ -93,6 +93,10 @@ class JobModel(Base):
     job_type: Mapped[str] = mapped_column(
         String(16), nullable=False, default="task", index=True
     )
+    # Chat history display title: the immutable first user prompt for a
+    # conversation. NULL on non-chat Jobs and legacy rows whose original
+    # prompt could not be recovered.
+    first_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Denormalized from the first Step for convenient querying.
     provider: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     identity_did: Mapped[str | None] = mapped_column(

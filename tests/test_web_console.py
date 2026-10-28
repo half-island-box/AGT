@@ -8,7 +8,7 @@ from pathlib import Path
 from starlette.testclient import TestClient
 
 from agt.server.config import ServerConfig
-from agt.server.database import make_engine
+from agt.server.database import make_engine, make_session_factory
 from agt.server.main import create_app
 from agt.server.models import Base
 
@@ -140,5 +140,60 @@ def test_sop_validate_endpoint_remains_browser_safe(tmp_path) -> None:
             assert response.status_code == 200
             assert response.json()["ok"] is True
             assert response.json()["nodes"][0]["name"] == "one"
+    finally:
+        asyncio.run(engine.dispose())
+
+
+def test_chat_runs_use_immutable_first_prompt_as_title(tmp_path) -> None:
+    app, engine, workspace = _app(tmp_path)
+    factory = make_session_factory(engine)
+    first_prompt = "first question\nwith additional detail"
+    try:
+        with TestClient(app) as client:
+            created = client.post(
+                "/api/jobs",
+                json={
+                    "prompt": first_prompt,
+                    "provider": "claude",
+                    "work_dir": str(workspace),
+                },
+            )
+            assert created.status_code == 201, created.text
+            job_id = created.json()["job_id"]
+
+            async def _seed_second_turn_and_session() -> None:
+                from agt.server.models import JobModel, SessionModel
+                from agt.server.services.job_service import append_step
+
+                async with factory() as session:
+                    job = await session.get(JobModel, job_id)
+                    assert job is not None
+                    assert job.first_prompt == first_prompt
+
+                    job.status = "waiting_input"
+                    await append_step(session, job_id, "second question")
+                    session.add(
+                        SessionModel(
+                            job_id=job_id,
+                            identity_did="",
+                            provider="claude",
+                            session_id=f"sess-{job_id}",
+                            cwd=str(workspace.resolve()),
+                            created_at="2026-10-28 00:00:00",
+                            updated_at="2026-10-28 00:00:00",
+                        )
+                    )
+                    await session.commit()
+
+            asyncio.run(_seed_second_turn_and_session())
+
+            listed = client.get(
+                "/api/runs",
+                params={"mode": "chat", "cwd": str(workspace.resolve())},
+            )
+            assert listed.status_code == 200, listed.text
+            runs = listed.json()["runs"]
+            assert len(runs) == 1
+            assert runs[0]["title"] == first_prompt
     finally:
         asyncio.run(engine.dispose())

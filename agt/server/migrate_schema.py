@@ -285,6 +285,34 @@ def ensure_schema(conn: Connection) -> None:
         )
         log.info("Migrated jobs table: added goal_meta column")
 
+    # Chat history title: preserve the immutable first user prompt on the
+    # conversation owner (Job), rather than duplicating it on every provider
+    # session pointer row.
+    if _table_exists(conn, "jobs") and "first_prompt" not in _column_names(conn, "jobs"):
+        conn.exec_driver_sql(
+            "ALTER TABLE jobs ADD COLUMN first_prompt TEXT"
+        )
+        log.info("Migrated jobs table: added first_prompt column")
+
+    jobs_columns = _column_names(conn, "jobs") if _table_exists(conn, "jobs") else set()
+    tasks_columns = _column_names(conn, "tasks") if _table_exists(conn, "tasks") else set()
+    if (
+        {"job_id", "job_type", "first_prompt"} <= jobs_columns
+        and {"job_id", "task_id", "prompt", "created_at"} <= tasks_columns
+    ):
+        conn.exec_driver_sql("""
+            UPDATE jobs
+            SET first_prompt = (
+                SELECT t.prompt
+                FROM tasks AS t
+                WHERE t.job_id = jobs.job_id
+                ORDER BY t.created_at ASC, t.task_id ASC
+                LIMIT 1
+            )
+            WHERE job_type = 'chat'
+              AND (first_prompt IS NULL OR first_prompt = '')
+        """)
+
     # Phase 6: unify run history by cwd and first-class job_type.
     if _table_exists(conn, "jobs") and "cwd" not in _column_names(conn, "jobs"):
         conn.exec_driver_sql(
