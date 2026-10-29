@@ -17,6 +17,7 @@ import type {
 } from '../core/types';
 import { SopCanvas } from './sop-canvas';
 import { bridge } from './bridge';
+import { openDirPicker } from './dir-picker';
 
 interface SopTemplateInfo {
   path: string;
@@ -1436,7 +1437,13 @@ function renderInspector(): string {
       <select class="agd-input agd-mono" id="agd-sop-node-provider">${providerOptions(node)}</select>
       <small class="agd-dim">${pinHint(node)}</small>
     </label>
-    <label class="agd-sop-field">${tr('sop.field.dir')}<input class="agd-input agd-mono" id="agd-sop-node-dir" value="${esc(node.dir)}"></label>
+    <div class="agd-sop-field">
+      <span>${tr('sop.field.dir')}</span>
+      <div class="agd-dir-input-row">
+        <input class="agd-input agd-mono" id="agd-sop-node-dir" value="${esc(node.dir)}" placeholder="/absolute/path">
+        ${bridge.canBrowseDirectories ? `<button type="button" class="agd-btn" id="agd-sop-node-browse-dir">${tr('projects.browse')}</button>` : ''}
+      </div>
+    </div>
     <div class="agd-sop-field">
       <span>${tr('sop.dependencies')}</span>
     <div class="agd-sop-deps">${deps}</div>
@@ -2064,6 +2071,22 @@ function wireInspector(): void {
     const element = document.getElementById(id) as HTMLInputElement | HTMLTextAreaElement | null;
     element?.addEventListener('change', () => commit(field, element.value));
   }
+  document.getElementById('agd-sop-node-browse-dir')?.addEventListener('click', () => {
+    const node = selectedNode();
+    if (!node) {
+      return;
+    }
+    // A local daemon shares the Server's filesystem, so browse it directly;
+    // ``projects.directories`` only understands remote daemon ids.
+    const remote = node.daemon && node.daemon !== boot?.localDaemonId ? node.daemon : null;
+    openDirPicker({
+      language: lang,
+      title: tr('sop.field.dir'),
+      daemonId: remote,
+      startPath: node.dir || null,
+      onSelect: (path) => commit('dir', path),
+    });
+  });
 
   const input = document.getElementById('agd-sop-node-input') as HTMLElement | null;
   const suggestions = document.getElementById('agd-sop-input-suggestions');

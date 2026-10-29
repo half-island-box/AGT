@@ -2,6 +2,7 @@ import './mode-switcher.css';
 import './markdown.css';
 import './chat.css';
 import { renderMarkdown } from './markdown';
+import { isLocalDaemon } from '../core/daemons';
 import { providerLogo } from '../core/icons';
 import { t, type MessageKey } from '../core/i18n';
 import type {
@@ -19,6 +20,7 @@ import type {
   UiLanguage,
 } from '../core/types';
 import { bridge } from './bridge';
+import { openDirPicker } from './dir-picker';
 
 interface ChatBoot {
   language: UiLanguage;
@@ -30,6 +32,7 @@ interface ChatBoot {
   workspaceFolders: string[];
   workspaceRoot: string;
   project?: ConsoleProjectInfo | null;
+  localDaemonId?: string | null;
   selection?: ChatSelection;
 }
 
@@ -320,9 +323,27 @@ function identitiesForSelection(): IdentityWithBindings[] {
     }));
 }
 
+/**
+ * Working directory for the selected daemon. A project's local path only
+ * exists on the Server machine, so a remote daemon defaults to the
+ * project's pinned remote path; any other remote daemon needs the user to
+ * pick one (returns '').
+ */
+function defaultCwdFor(daemonId: string | null): string {
+  const project = boot?.project;
+  if (!project || !daemonId) {
+    return boot?.workspaceRoot || boot?.workspaceFolders[0] || '';
+  }
+  if (project.remote_daemon_id && project.remote_path && daemonId === project.remote_daemon_id) {
+    return project.remote_path;
+  }
+  if (!boot?.localDaemonId || daemonId === boot.localDaemonId) return project.path;
+  return '';
+}
+
 function syncWorkspaceRoot(): void {
   if (activeSessionId || currentJob) return;
-  agentCwd = boot?.workspaceRoot || boot?.workspaceFolders[0] || '';
+  agentCwd = defaultCwdFor(selectedDaemonId);
 }
 
 function applyChatSelection(selection: ChatSelection): void {
@@ -348,6 +369,18 @@ function normalizeInitialSelection(): void {
   if (boot.selection) {
     selectedDaemonId = boot.selection.daemonId;
     selectedProvider = boot.selection.provider ?? null;
+    selectedIdentityDid = '';
+  }
+  // A project that pins a remote working directory defaults to that daemon,
+  // so the pinned directory is the working directory from the first turn.
+  const pinnedDaemonId = boot.project?.remote_daemon_id;
+  if (
+    pinnedDaemonId &&
+    !selectedDaemonId &&
+    (boot.daemons ?? []).some((daemon) => daemon.daemon_id === pinnedDaemonId && daemon.online)
+  ) {
+    selectedDaemonId = pinnedDaemonId;
+    selectedProvider = null;
     selectedIdentityDid = '';
   }
   const daemons = (boot.daemons ?? []).filter((daemon) => daemon.online);
@@ -395,10 +428,16 @@ function normalizeInitialSelection(): void {
 }
 
 function canSend(): boolean {
+  const daemon = selectedDaemon();
+  // A remote daemon needs an explicit directory (its default cwd is often
+  // unrelated to the project): the project's pinned remote path fills this
+  // automatically, otherwise the user has to pick one.
+  const needsCwd = Boolean(daemon && !isLocalDaemon(daemon));
   return Boolean(
     boot?.state === 'online' &&
-      selectedDaemon() &&
+      daemon &&
       selectedAgent() &&
+      (!needsCwd || agentCwd.trim() !== '') &&
       busy === 'idle' &&
       (!currentJob || currentJob.status === 'waiting_input'),
   );
@@ -588,6 +627,11 @@ function renderSidebar(): void {
     ${selectorHtml('agent')}
     <label class="agd-side-label">${tr('chat.identity')}</label>
     ${selectorHtml('identity')}
+    <label class="agd-side-label">${tr('chat.workingDir')}</label>
+    <div class="agd-cwd-row">
+      <span class="agd-cwd-path agd-mono" title="${esc(agentCwd)}">${esc(agentCwd || tr('chat.noWorkingDir'))}</span>
+      ${bridge.canBrowseDirectories ? `<button type="button" id="agd-chat-pick-dir" class="agd-cwd-pick" title="${tr('chat.pickDir')}">${tr('chat.pickDir')}</button>` : ''}
+    </div>
   </div>
   <div class="agd-side-section agd-side-sessions">
     <div class="agd-side-title">
@@ -1234,6 +1278,21 @@ function wireSidebar(): void {
   document.getElementById('agd-sessions-refresh')?.addEventListener('click', () => {
     void loadSessions();
   });
+  document.getElementById('agd-chat-pick-dir')?.addEventListener('click', () => {
+    const daemon = selectedDaemon();
+    if (!daemon) return;
+    openDirPicker({
+      language: lang,
+      title: tr('chat.pickDirTitle'),
+      daemonId: isLocalDaemon(daemon) ? null : daemon.daemon_id,
+      startPath: agentCwd || null,
+      onSelect: (path) => {
+        agentCwd = path;
+        renderSidebar();
+        renderControls();
+      },
+    });
+  });
 }
 
 function selectOption(kind: string, value: string): void {
@@ -1245,6 +1304,7 @@ function selectOption(kind: string, value: string): void {
     selectedIdentityDid = '';
     normalizeInitialSelection();
     clearConversation();
+    syncWorkspaceRoot();
     void loadSessions();
   } else if (kind === 'agent' && value !== selectedProvider) {
     selectedProvider = value;

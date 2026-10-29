@@ -7,6 +7,7 @@
  */
 
 import { AgtApi } from '../core/api';
+import { isLocalDaemon } from '../core/daemons';
 import type {
   ChatInputMessage,
   ChatSessionInfo,
@@ -104,9 +105,31 @@ function projectPath(bootstrapDefault: string): string {
   return storageGet(PROJECT_KEY)?.trim() || bootstrapDefault;
 }
 
-function isLocalDaemon(daemon: DaemonInfo): boolean {
-  const host = new URL(daemon.url ?? window.location.origin).hostname;
-  return ['127.0.0.1', 'localhost', '::1', window.location.hostname].includes(host);
+/**
+ * Working directory for a run dispatched to ``daemonId``.
+ *
+ * The project's local path only exists on the Server machine; when the
+ * project also pins a directory on the selected remote daemon, that
+ * directory is the default. ``null`` means the caller must pick one.
+ */
+function dirForDaemon(
+  project: ConsoleProjectInfo | null,
+  daemonId: string | null | undefined,
+  localDaemonIdValue: string | null,
+  fallback: string,
+): string {
+  if (
+    project?.remote_daemon_id &&
+    project.remote_path &&
+    daemonId === project.remote_daemon_id
+  ) {
+    return project.remote_path;
+  }
+  if (!project) return fallback;
+  if (!daemonId || daemonId === localDaemonIdValue) return project.path;
+  // A remote daemon that is not the project's pinned one cannot see the
+  // local project path; the caller must choose a directory on that machine.
+  return '';
 }
 
 function preferredDaemon(daemons: DaemonInfo[]): DaemonInfo | undefined {
@@ -261,6 +284,7 @@ async function chatBoot() {
     workspaceFolders: [projectPathValue],
     workspaceRoot: projectPathValue,
     project,
+    localDaemonId: preferredDaemon(daemons)?.daemon_id ?? null,
     capabilities: { lifecycleControl: false, console: true },
   };
 }
@@ -292,20 +316,29 @@ async function pollTask(taskId: string): Promise<TaskStatusInfo> {
 
 async function runChatTurn(
   params: Params,
-  project: string,
+  project: ConsoleProjectInfo | null,
+  fallbackProject: string,
   emit: Emit,
 ): Promise<void> {
+  const daemonId = params.daemonId ? String(params.daemonId) : null;
   try {
     const currentJobId = params.currentJobId ? String(params.currentJobId) : null;
-    const effectiveProject = params.agentCwd ? String(params.agentCwd) : project;
     const message = (params.message as ChatInputMessage | undefined) ?? null;
+    const effectiveProject = params.agentCwd
+      ? String(params.agentCwd)
+      : dirForDaemon(
+          project,
+          daemonId,
+          preferredDaemon((await bootstrapContext()).daemons)?.daemon_id ?? null,
+          fallbackProject,
+        );
     if (params.agentCwd) storageSet(PROJECT_KEY, effectiveProject);
     const job = currentJobId
       ? await api.appendChatInput(currentJobId, String(params.prompt ?? ''), message)
       : await api.createChatJob({
           prompt: String(params.prompt ?? ''),
           provider: String(params.provider ?? 'claude'),
-          targetDaemonId: String(params.daemonId ?? ''),
+          targetDaemonId: daemonId ?? '',
           identityDid: params.identityDid ? String(params.identityDid) : null,
           agentCwd: effectiveProject,
           message,
@@ -478,6 +511,27 @@ function projectFilePath(root: string, filename: string): string {
   return `${root.replace(/[\\/]+$/, '')}${separator}${filename}`;
 }
 
+/**
+ * Fill the project's pinned remote daemon/directory into SOP nodes that pin
+ * neither. A node with an explicit ``daemon`` or ``dir`` keeps the template
+ * author's intent; an unpinned node would otherwise inherit the local cwd,
+ * which a remote daemon cannot see.
+ */
+function applyProjectRemoteDefaults(
+  spec: Record<string, unknown>,
+  project: ConsoleProjectInfo | null,
+): void {
+  if (!project?.remote_daemon_id || !project.remote_path) return;
+  const tasks = Array.isArray(spec.tasks) ? spec.tasks : [];
+  for (const entry of tasks) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+    const task = entry as Record<string, unknown>;
+    if (task.daemon || task.dir) continue;
+    task.daemon = project.remote_daemon_id;
+    task.dir = project.remote_path;
+  }
+}
+
 export async function browserCall<T>(
   method: string,
   params: Params | undefined,
@@ -485,16 +539,28 @@ export async function browserCall<T>(
 ): Promise<T> {
   const p = params ?? {};
   switch (method) {
-    case 'projects.boot':
+    case 'projects.boot': {
+      const { daemons } = await bootstrapContext();
       return {
         language: language(),
         state: 'online',
         projects: await api.consoleProjects(),
+        // Only daemons the Server reverse-dials can be browsed for a remote
+        // working directory; a local daemon shares this machine's paths.
+        remoteDaemons: daemons
+          .filter((daemon) => !isLocalDaemon(daemon))
+          .map((daemon) => ({
+            id: daemon.daemon_id,
+            label: daemon.daemon_name || daemon.device_name || daemon.daemon_id,
+            online: daemon.online,
+          })),
         capabilities: { lifecycleControl: false, console: true },
       } as T;
+    }
     case 'projects.directories':
       return await api.consoleDirectories(
         p.path ? String(p.path) : null,
+        p.daemonId ? String(p.daemonId) : null,
       ) as ConsoleDirectoryListing as T;
     case 'projects.pickDirectory':
       return {
@@ -504,6 +570,8 @@ export async function browserCall<T>(
       const project = await api.createConsoleProject({
         path: String(p.path ?? ''),
         name: p.name ? String(p.name) : null,
+        remoteDaemonId: p.remoteDaemonId ? String(p.remoteDaemonId) : null,
+        remotePath: p.remotePath ? String(p.remotePath) : null,
       });
       return { project, projects: await api.consoleProjects() } as T;
     }
@@ -668,10 +736,17 @@ export async function browserCall<T>(
     case 'sessions': {
       const boot = await bootstrapContext();
       const project = await activeProject();
+      const daemonId = String(p.daemonId ?? '') || null;
+      const fallback = projectPath(boot.bootstrap.default_project);
       return {
         sessions: await chatSessions(
-          project?.path ?? projectPath(boot.bootstrap.default_project),
-          String(p.daemonId ?? '') || undefined,
+          dirForDaemon(
+            project,
+            daemonId,
+            preferredDaemon(boot.daemons)?.daemon_id ?? null,
+            fallback,
+          ) || fallback,
+          daemonId ?? undefined,
         ),
       } as T;
     }
@@ -697,6 +772,7 @@ export async function browserCall<T>(
       const project = await activeProject();
       void runChatTurn(
         p,
+        project,
         project?.path ?? projectPath(boot.bootstrap.default_project),
         emit,
       );
@@ -735,11 +811,18 @@ export async function browserCall<T>(
       });
       const boot = await bootstrapContext();
       const project = await activeProject();
+      const daemonId = String(p.daemonId ?? '') || null;
+      const fallback = projectPath(boot.bootstrap.default_project);
       return {
         deleted,
         sessions: await chatSessions(
-          project?.path ?? projectPath(boot.bootstrap.default_project),
-          String(p.daemonId ?? '') || undefined,
+          dirForDaemon(
+            project,
+            daemonId,
+            preferredDaemon(boot.daemons)?.daemon_id ?? null,
+            fallback,
+          ) || fallback,
+          daemonId ?? undefined,
         ),
       } as T;
     }
@@ -759,12 +842,19 @@ export async function browserCall<T>(
       const boot = await bootstrapContext();
       const project = await activeProject();
       const projectPathValue = project?.path ?? projectPath(boot.bootstrap.default_project);
+      const daemonId = p.daemonId ? String(p.daemonId) : null;
+      const defaultDir = dirForDaemon(
+        project,
+        daemonId,
+        preferredDaemon(boot.daemons)?.daemon_id ?? null,
+        projectPathValue,
+      );
       const submitted = await api.submitGoal({
         goal: String(p.goal ?? ''),
         identityDid: p.identityDid ? String(p.identityDid) : null,
         provider: p.provider ? String(p.provider) : null,
-        daemonId: p.daemonId ? String(p.daemonId) : null,
-        dir: p.dir ? String(p.dir) : projectPathValue,
+        daemonId,
+        dir: p.dir ? String(p.dir) : defaultDir || projectPathValue,
         cwd: projectPathValue,
         maxDepth: Number(p.maxDepth ?? 5),
         maxDescendants: Number(p.maxDescendants ?? 64),
@@ -855,8 +945,10 @@ export async function browserCall<T>(
       if (parsed.parseError) throw new Error(parsed.parseError);
       const boot = await bootstrapContext();
       const project = await activeProject();
+      const spec = parsed.doc.toJS() as Record<string, unknown>;
+      applyProjectRemoteDefaults(spec, project);
       const submitted = await api.submitSop({
-        spec: parsed.doc.toJS(),
+        spec,
         cwd: project?.path ?? projectPath(boot.bootstrap.default_project),
         localDaemonId: preferredDaemon(boot.daemons)?.daemon_id ?? null,
         templatePath: current.path,

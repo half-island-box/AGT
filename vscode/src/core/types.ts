@@ -105,6 +105,15 @@ export interface ConsoleProjectInfo {
   name: string;
   path: string;
   available: boolean;
+  /**
+   * Optional remote working directory. ``path`` above is always the
+   * mandatory local (Server-machine) directory; when these are set the
+   * project also pins one directory on one remote daemon, used as the
+   * default working directory for chat/SOP/Goal runs routed there.
+   */
+  remote_daemon_id: string | null;
+  remote_path: string | null;
+  remote: boolean;
   created_at: string;
   updated_at: string;
   last_opened_at: string | null;

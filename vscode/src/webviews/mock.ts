@@ -10,6 +10,7 @@ import type {
   ServerState,
   UiLanguage,
 } from '../core/types';
+import { isLocalDaemon } from '../core/daemons';
 import { applyIntentToModel } from '../core/sop/model-ops';
 import type { SopPoint } from '../core/sop/layout';
 import { issues as sopIssues } from '../core/sop/graph';
@@ -78,6 +79,9 @@ let consoleProjects: ConsoleProjectInfo[] = [
     name: 'agent-team',
     path: '/home/you/project',
     available: true,
+    remote_daemon_id: null,
+    remote_path: null,
+    remote: false,
     created_at: '2026-10-20T09:00:00Z',
     updated_at: '2026-10-20T09:00:00Z',
     last_opened_at: '2026-10-25T10:00:00Z',
@@ -88,6 +92,9 @@ let consoleProjects: ConsoleProjectInfo[] = [
     name: 'documentation',
     path: '/home/you/documentation',
     available: true,
+    remote_daemon_id: 'dev-box-2',
+    remote_path: '/srv/docs',
+    remote: true,
     created_at: '2026-10-18T09:00:00Z',
     updated_at: '2026-10-18T09:00:00Z',
     last_opened_at: null,
@@ -796,8 +803,28 @@ export async function mockCall<T>(_method: string, params?: Record<string, unkno
         language,
         state,
         projects: consoleProjects,
+        remoteDaemons: daemons
+          .filter((daemon) => !isLocalDaemon(daemon))
+          .map((daemon) => ({
+            id: daemon.daemon_id,
+            label: daemon.daemon_name || daemon.device_name || daemon.daemon_id,
+            online: daemon.online,
+          })),
       } as T;
-    case 'projects.directories':
+    case 'projects.directories': {
+      const remoteDaemon = params?.daemonId ? String(params.daemonId) : null;
+      if (remoteDaemon) {
+        const root = remoteDaemon === 'dev-box-2' ? '/srv/docs' : '/srv';
+        return {
+          roots: [root],
+          parent: root === '/srv' ? null : '/srv',
+          current: String(params?.path ?? root),
+          directories: [
+            { name: 'docs', path: '/srv/docs' },
+            { name: 'deploy', path: '/srv/deploy' },
+          ],
+        } as T;
+      }
       return {
         roots: ['/home/you'],
         parent: '/home/you',
@@ -808,11 +835,17 @@ export async function mockCall<T>(_method: string, params?: Record<string, unkno
           { name: 'sandbox', path: '/home/you/sandbox' },
         ],
       } as T;
+    }
     case 'projects.pickDirectory':
       return { path: '/home/you/project' } as T;
     case 'projects.create': {
       const path = String(params?.path ?? '');
       if (!path) throw new Error('project path is required');
+      const remoteDaemonId = params?.remoteDaemonId ? String(params.remoteDaemonId) : null;
+      const remotePath = params?.remotePath ? String(params.remotePath) : null;
+      if (remoteDaemonId && !remotePath) {
+        throw new Error('remote path is required for the selected daemon');
+      }
       const id = `project-${Math.random().toString(16).slice(2, 10)}`;
       const now = new Date().toISOString();
       const project: ConsoleProjectInfo = {
@@ -820,6 +853,9 @@ export async function mockCall<T>(_method: string, params?: Record<string, unkno
         name: String(params?.name || path.split('/').filter(Boolean).pop() || 'Project'),
         path,
         available: true,
+        remote_daemon_id: remoteDaemonId,
+        remote_path: remoteDaemonId ? remotePath : null,
+        remote: Boolean(remoteDaemonId && remotePath),
         created_at: now,
         updated_at: now,
         last_opened_at: null,

@@ -253,10 +253,17 @@ export class AgtApi {
   async createConsoleProject(input: {
     path: string;
     name?: string | null;
+    remoteDaemonId?: string | null;
+    remotePath?: string | null;
   }): Promise<ConsoleProjectInfo> {
     return this.post(
       '/api/console/projects',
-      { path: input.path, name: input.name || null },
+      {
+        path: input.path,
+        name: input.name || null,
+        remote_daemon_id: input.remoteDaemonId || null,
+        remote_path: input.remotePath || null,
+      },
       10_000,
     );
   }
@@ -287,9 +294,20 @@ export class AgtApi {
     );
   }
 
-  async consoleDirectories(path?: string | null): Promise<ConsoleDirectoryListing> {
-    const query = path ? `?${new URLSearchParams({ path })}` : '';
-    return this.request(`/api/console/directories${query}`, {}, 10_000);
+  /**
+   * List directories on the Server machine, or on a remote daemon when
+   * ``daemonId`` is given. Remote listing goes through that daemon's
+   * reverse-dial link and is bound by its ``agent_cwd_allowlist``.
+   */
+  async consoleDirectories(
+    path?: string | null,
+    daemonId?: string | null,
+  ): Promise<ConsoleDirectoryListing> {
+    const params = new URLSearchParams();
+    if (path) params.set('path', path);
+    if (daemonId) params.set('daemon_id', daemonId);
+    const query = params.toString() ? `?${params}` : '';
+    return this.request(`/api/console/directories${query}`, {}, 15_000);
   }
 
   async pickConsoleDirectory(): Promise<string | null> {

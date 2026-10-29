@@ -94,6 +94,13 @@ export const bridge = {
   /** True when running in a plain browser (npm run dev:web). */
   isMock: browserMock,
 
+  /**
+   * True when the host answers ``projects.directories`` (console + mock).
+   * The VSCode extension host has no such handler, so its webviews hide the
+   * browse buttons instead of failing the call.
+   */
+  canBrowseDirectories: browserConsole || browserMock,
+
   call<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T> {
     if (browserConsole) {
       return browserCall<T>(method, params, (event, payload) => {

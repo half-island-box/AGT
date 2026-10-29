@@ -31,6 +31,16 @@
 .agd-project-modal { width: min(720px, 100%); }
 .agd-project-path-input { display: flex; gap: 8px; margin-bottom: 10px; }
 .agd-project-path-input .agd-input { flex: 1; }
+.agd-project-remote {
+  margin: 4px 0 10px; padding: 10px 12px; border-radius: 8px;
+  border: 1px dashed var(--vscode-panel-border, #2e2e2e);
+  background: color-mix(in srgb, var(--vscode-sideBar-background, #202020) 60%, transparent);
+}
+.agd-project-remote-head { display: flex; flex-direction: column; gap: 3px; margin-bottom: 8px; }
+.agd-project-remote-head strong { font-size: 12px; }
+.agd-project-remote-head small { font-size: 10.5px; line-height: 1.45; }
+.agd-project-remote .agd-field { margin-bottom: 8px; }
+.agd-project-remote .agd-project-path-input { margin-bottom: 0; }
 .agd-project-delete-warning { padding: 10px; border-radius: 7px; background: color-mix(in srgb, var(--agd-color-error, #f85149) 10%, transparent); color: var(--vscode-foreground, #ccc); }
 @media (max-width: 680px) {
   .agd-projects-hero { align-items: stretch; flex-direction: column; }
