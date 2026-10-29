@@ -20,7 +20,9 @@ workflows, and a shared artifact registry.
   provider-native sessions and output streaming.
 - **Structured agent events** — chat forwards thinking, tool calls, and tool
   results (server API, SSE, and CLI), and records per-turn token/cache/cost
-  usage.
+  usage. Claude Code streams them over `stream-json`; Codex streams them over
+  the `codex app-server` JSON-RPC protocol (with automatic fallback to
+  `codex exec` on older CLIs).
 - **Goal orchestration** — a root agent decomposes an objective, spawns child
   agents within a global budget, and synthesizes their deliverables.
 - **Shared context** — Goal agents exchange versioned decisions, constraints,

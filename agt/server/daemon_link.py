@@ -654,17 +654,6 @@ class DaemonLink:
 
     async def _handle_tasks_report(self, body: dict) -> dict:
         """Record a daemon's task execution result over the reverse-dial link.
-
-        ``daemon_id`` comes from the configured target, never the body —
-        a misbehaving daemon can't report on behalf of another. This is
-        the reverse-dial counterpart to ``POST /api/tasks/{id}/report``;
-        both paths funnel through :func:`record_step_result_for_daemon`.
-
-        Business rejections (task missing / not owned) surface as
-        ``RPCRejected(404|403)`` so the daemon can tell the difference
-        between a permanent failure (don't retry) and a transport issue
-        (do retry via HTTP fallback). Other ``ValueError`` payloads fall
-        through to the link's generic ``validation_error`` shape.
         """
         required = (
             "task_id", "exit_code", "stdout", "stderr", "duration", "status",
@@ -689,15 +678,11 @@ class DaemonLink:
                     session_id=body.get("session_id"),
                     resume_rejected=bool(body.get("resume_rejected", False)),
                     outcome=body.get("outcome"),
-                    # Phase 2: declared deliverables ride the report body;
-                    # malformed items are dropped so the report always
-                    # goes through (best-effort by design).
+
                     artifacts=_parse_artifact_items(body.get("artifacts")),
                     outcome_payload=body.get("outcome_payload"),
                     context_ops=body.get("context_ops") or [],
-                    # Token usage + the event tail not acknowledged by a
-                    # progress call. Both optional; malformed events are
-                    # dropped inside the service.
+
                     usage=body.get("usage"),
                     agent_events=body.get("agent_events") or [],
                 )
@@ -716,13 +701,6 @@ class DaemonLink:
 
     async def _handle_tasks_progress(self, body: dict) -> dict:
         """Record an incremental stdout prefix over the reverse-dial link.
-
-        Reverse-dial counterpart to ``POST /api/tasks/{id}/progress``.
-        ``daemon_id`` comes from the configured target, never the body —
-        a misbehaving daemon can't post progress for another daemon's task.
-        Business rejections surface as ``RPCRejected(404|403)`` so the
-        daemon can tell permanent failure from a transport issue, exactly
-        like ``tasks.report``.
         """
         required = ("task_id", "stdout_prefix")
         for field_name in required:
@@ -754,9 +732,6 @@ class DaemonLink:
 
 def _parse_artifact_items(raw: Any) -> list:
     """Validate the optional ``artifacts`` list of a WS report body.
-
-    Malformed items are dropped (not fatal): the report itself must
-    always go through. Legacy daemons omit the field entirely.
     """
     if not raw:
         return []
