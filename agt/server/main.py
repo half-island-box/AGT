@@ -33,6 +33,7 @@ from .routes.daemons import router as daemons_router
 from .routes.heartbeat import router as heartbeat_router
 from .routes.identities import router as identities_router
 from .routes.jobs import router as jobs_router
+from .routes.pairing import router as pairing_router
 from .routes.projects import router as projects_router
 from .routes.artifacts import router as artifacts_router
 from .routes.context import router as context_router
@@ -222,6 +223,10 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     app.include_router(sessions_router)
     app.include_router(heartbeat_router)
     app.include_router(identities_router)
+    # Loopback-only: these return/handle the HMAC secret. Kept outside the
+    # console_enabled switch on purpose — the restriction is per-request,
+    # not "is the UI mounted".
+    app.include_router(pairing_router)
     if cfg.console_enabled:
         app.include_router(projects_router)
         app.include_router(console_router)

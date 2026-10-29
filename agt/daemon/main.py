@@ -24,7 +24,11 @@ from ..probe.scanner import AgentProbe
 from ..runtime.models import Runtime
 from ..server.services.auth_service import TaskToken
 from ..server_secret import default_server_secret_path
-from .config import DaemonConfig, DaemonConfigError
+from .config import (
+    DaemonConfig,
+    DaemonConfigError,
+    resolve_daemon_settings,
+)
 from .daemon import Daemon
 from .local_server import LocalResourceServer
 from .mcp_proxy import ProxyMcpServer
@@ -98,9 +102,10 @@ def _clear_pidfile() -> None:
 def _ensure_local_daemons_entry(ws_port: int) -> bool:
     """Append a local-machine entry to ``~/.agt/daemons`` if none exists.
 
-    The entry anchors this machine's daemon identity: ``_find_self_daemon``
-    matches it (port + local host) and ``_load_daemon_id`` derives a stable
-    uuid5 id from its URL. Written as ``local ws://0.0.0.0:<port>``.
+    The entry anchors this machine's daemon identity for installs that
+    have not been through ``agt daemon init``: ``_self_daemon_entry``
+    matches it (port + local host) and ``_load_daemon_id`` derives a
+    stable uuid5 id from its URL. Written as ``local ws://0.0.0.0:<port>``.
 
     Idempotent — an existing entry with a local host and the same port is
     reused, never duplicated. Best-effort: a read-only / root-owned
@@ -111,33 +116,26 @@ def _ensure_local_daemons_entry(ws_port: int) -> bool:
     Returns True if a local entry exists on return (pre-existing or just
     appended), False when the append was refused.
     """
+    from ..daemons_file import (
+        DaemonEntry,
+        DaemonsFileError,
+        daemons_file_path,
+        read_daemons_entries,
+        upsert_daemons_entry,
+    )
     from .config import _host_of_url, _is_local_host, _port_of_url
 
-    path = Path.home() / ".agt" / "daemons"
-    lines: list[str] = []
-    if path.exists():
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except OSError as exc:
-            log.warning("Could not read %s: %s", path, exc)
-            return False
-    for raw in lines:
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        parts = line.split(None, 1)
-        if len(parts) != 2:
-            continue
-        url = parts[1].strip()
-        if _port_of_url(url) == str(ws_port) and _is_local_host(
-            _host_of_url(url)
+    path = daemons_file_path()
+    for entry in read_daemons_entries(path):
+        if _port_of_url(entry.url) == str(ws_port) and _is_local_host(
+            _host_of_url(entry.url)
         ):
             return True  # local entry already present
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as fp:
-            fp.write(f"local ws://0.0.0.0:{ws_port}\n")
-    except OSError as exc:
+        upsert_daemons_entry(
+            DaemonEntry(name="local", url=f"ws://0.0.0.0:{ws_port}"), path
+        )
+    except (OSError, DaemonsFileError) as exc:
         log.warning(
             "Could not append local entry to %s (%s). Fix the file's "
             "ownership/permissions, otherwise `agt chat` cannot detect "
@@ -914,11 +912,22 @@ async def run_background(config: DaemonConfig) -> None:
 
 def cmd_start(args: argparse.Namespace) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s: %(message)s")
+    # Resolve the managed settings once: registering this machine's
+    # ``~/.agt/daemons`` entry needs the *effective* ws_port, which may now
+    # come from ``~/.agt/daemon.json`` (written by ``agt daemon init``)
+    # rather than the environment.
+    try:
+        resolved = resolve_daemon_settings()
+    except DaemonConfigError as exc:
+        print(f"Failed to load daemon configuration: {exc}", file=sys.stderr)
+        print(
+            "Fix or remove ~/.agt/daemon.json and restart the daemon.",
+            file=sys.stderr,
+        )
+        return 2
     # Register this machine in ~/.agt/daemons BEFORE from_env — the
     # identity derivation reads the file to find this daemon's entry.
-    _ensure_local_daemons_entry(
-        int(os.environ.get("AGT_DAEMON_WS_PORT", str(DaemonConfig().ws_listen_port)))
-    )
+    _ensure_local_daemons_entry(int(resolved["ws_port"].value))
     try:
         config = DaemonConfig.from_env()
     except DaemonConfigError as exc:

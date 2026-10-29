@@ -335,15 +335,33 @@ class TestServerInit:
 
 class TestMissingSecret:
     @pytest.mark.no_server_secret
-    def test_start_without_secret_shows_friendly_message(
+    def test_start_generates_secret_on_first_run(
         self, tmp_path, monkeypatch
     ) -> None:
+        """``server start`` bootstraps a secret instead of failing.
+
+        The old behaviour was "exit 1 and tell the user to run
+        ``agt server init``"; generating it here removes the one manual
+        step from a first run. The server itself is stubbed out — this
+        test only asserts the bootstrap message and the file.
+        """
+        from agt.server import main as server_main
+        import agt.server.pidfile as pidfile_mod
+
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.delenv("AGT_SERVER_SECRET", raising=False)
+        monkeypatch.setattr(pidfile_mod, "_read_pidfile", lambda _p: None)
+        monkeypatch.setattr(server_main, "cli_main", lambda _args: 0)
+
         result = _invoke(["start"])
-        assert result.exit_code == 1, result.output
-        assert "agt server init" in result.output
+        assert result.exit_code == 0, result.output
+        assert "Generated server secret" in result.output
         assert "Traceback" not in result.output
+
+        secret_path = tmp_path / ".agt" / "server.secret"
+        assert secret_path.exists()
+        assert secret_path.stat().st_mode & 0o777 == 0o600
+        assert secret_path.read_text(encoding="utf-8").strip()
 
     def test_config_reads_secret_file(self, tmp_path, monkeypatch) -> None:
         monkeypatch.setenv("HOME", str(tmp_path))
