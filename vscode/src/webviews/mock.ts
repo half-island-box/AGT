@@ -1270,6 +1270,42 @@ export async function mockCall<T>(_method: string, params?: Record<string, unkno
         ],
       } as T;
     }
+    case 'pairingState':
+      return {
+        secret_configured: true,
+        secret_source: 'file',
+        daemons: daemons.map((daemon) => ({
+          name: daemon.device_name,
+          url: daemon.url ?? 'ws://127.0.0.1:8422',
+          daemon_id: daemon.daemon_id,
+          capabilities: daemon.capabilities,
+          connected: daemon.online,
+        })),
+        daemons_path: '/home/you/.agt/daemons',
+      } as T;
+    case 'pairingSecret': {
+      const reveal = (params as { reveal?: boolean } | undefined)?.reveal === true;
+      return {
+        secret: reveal ? 'mock-server-secret-0123456789abcdef' : null,
+        masked: 'mock…cdef',
+        source: 'file',
+      } as T;
+    }
+    case 'pairingAddDaemon': {
+      const p = (params ?? {}) as { name?: string; url?: string; capabilities?: string };
+      const name = p.name || 'new-daemon';
+      const url = p.url || 'ws://192.168.1.30:8422';
+      const daemonId = `mock-${Math.random().toString(16).slice(2, 10)}`;
+      const code = `agt1.${btoa(JSON.stringify({ v: 1, url, id: daemonId, name })).replaceAll('=', '')}`;
+      return {
+        daemon_id: daemonId,
+        invite_code: code,
+        command: `agt daemon init ${code}`,
+        added: 'added',
+        daemons_path: '/home/you/.agt/daemons',
+        restart_required: true,
+      } as T;
+    }
     case 'addDaemon': {
       const p = (params ?? {}) as { name?: string; url?: string; capabilities?: string };
       const name = p.name ?? 'new-daemon';

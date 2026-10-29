@@ -27,6 +27,7 @@ export interface BootInfo {
     lifecycleControl?: boolean;
     daemonLifecycle?: boolean;
     addDaemon?: boolean;
+    pairing?: boolean;
     console?: boolean;
   };
 }

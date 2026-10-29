@@ -132,6 +132,7 @@ export class SettingsPanel {
         })),
         serverUrlHost(this.config().get<string>('serverUrl') ?? ''),
       ),
+      capabilities: { pairing: true },
     };
   }
 
@@ -285,6 +286,30 @@ export class SettingsPanel {
               `AGT_LISTEN_MODE=1 AGT_SERVER_URL=${shellServerUrl} agt daemon start --detach`,
             ].join('\n'),
           };
+          break;
+        }
+        case 'pairingState':
+          result = await this.ctx.lifecycle.api.pairingState();
+          break;
+        case 'pairingSecret':
+          result = await this.ctx.lifecycle.api.pairingSecret(
+            msg.params?.reveal === true,
+          );
+          break;
+        case 'pairingInvite':
+          result = await this.ctx.lifecycle.api.pairingInvite(
+            String(msg.params?.name ?? ''),
+            String(msg.params?.url ?? ''),
+            msg.params?.daemonId ? String(msg.params.daemonId) : null,
+          );
+          break;
+        case 'pairingAddDaemon': {
+          const p = msg.params ?? {};
+          result = await this.ctx.lifecycle.api.pairingAddDaemon({
+            name: String(p.name ?? '').trim(),
+            url: String(p.url ?? '').trim(),
+            capabilities: String(p.capabilities ?? '').trim() || null,
+          });
           break;
         }
         case 'daemonConfigShow': {

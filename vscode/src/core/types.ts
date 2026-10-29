@@ -20,6 +20,40 @@ export interface DaemonInfo {
   capabilities: string[];
 }
 
+/** One entry of ``~/.agt/daemons`` as seen by the pairing endpoints. */
+export interface PairingDaemonInfo {
+  name: string;
+  url: string;
+  daemon_id: string;
+  capabilities: string[];
+  connected: boolean;
+}
+
+export interface PairingStateInfo {
+  secret_configured: boolean;
+  secret_source: 'env' | 'file' | string;
+  daemons: PairingDaemonInfo[];
+  daemons_path: string;
+}
+
+export interface PairingSecretInfo {
+  secret: string | null;
+  masked: string;
+  source: string;
+}
+
+export interface PairingInviteInfo {
+  daemon_id: string;
+  invite_code: string;
+  command: string;
+}
+
+export interface PairingAddDaemonInfo extends PairingInviteInfo {
+  added: 'added' | 'updated' | 'unchanged' | string;
+  daemons_path: string;
+  restart_required: boolean;
+}
+
 export type DaemonConfigValue = number | string | string[];
 
 export interface DaemonConfigSetting {

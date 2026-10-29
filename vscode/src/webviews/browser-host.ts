@@ -223,6 +223,12 @@ async function settingsBoot() {
       lifecycleControl: false,
       daemonLifecycle: false,
       addDaemon: false,
+      // Pairing goes through /api/pairing/*, which the Server answers only
+      // for loopback peers. A remote browser therefore sees these controls
+      // and gets a 403 rendered as an error — hiding them would not be more
+      // truthful, since the browser cannot know the Server's view of its
+      // source address.
+      pairing: true,
       console: true,
     },
   };
@@ -553,6 +559,22 @@ export async function browserCall<T>(
     case 'stopDaemon':
     case 'addDaemon':
       throw new Error('Lifecycle and daemon-file management are CLI-only in the browser console');
+    case 'pairingState':
+      return await api.pairingState() as T;
+    case 'pairingSecret':
+      return await api.pairingSecret(p.reveal === true) as T;
+    case 'pairingInvite':
+      return await api.pairingInvite(
+        String(p.name ?? ''),
+        String(p.url ?? ''),
+        p.daemonId ? String(p.daemonId) : null,
+      ) as T;
+    case 'pairingAddDaemon':
+      return await api.pairingAddDaemon({
+        name: String(p.name ?? '').trim(),
+        url: String(p.url ?? '').trim(),
+        capabilities: String(p.capabilities ?? '').trim() || null,
+      }) as T;
     case 'daemonConfigShow':
       return await api.daemonConfig() as T;
     case 'daemonConfigSet':

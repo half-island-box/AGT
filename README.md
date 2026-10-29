@@ -164,6 +164,10 @@ agt daemon init agt1.…
 agt daemon start --detach
 ```
 
+The settings page in the VS Code client and the web console exposes the same
+flow under **Connection & pairing** (secret display/copy, invite generation),
+backed by loopback-only `/api/pairing/*` endpoints.
+
 An invite code embeds the server secret; treat it like an SSH private key.
 See [reverse-dial pairing](<docs/guide%20docs/quick_start.md#3-反向连接nat-穿透远程-daemon-推荐>).
 

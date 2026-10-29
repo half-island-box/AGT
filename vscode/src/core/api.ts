@@ -19,6 +19,10 @@ import type {
   JobLogInfo,
   JobInfo,
   JobStatusInfo,
+  PairingAddDaemonInfo,
+  PairingInviteInfo,
+  PairingSecretInfo,
+  PairingStateInfo,
   RuntimeInfo,
   RunListInfo,
   SessionHistoryInfo,
@@ -161,6 +165,46 @@ export class AgtApi {
         agent_timeout: input.agentTimeout,
         work_dir: input.workDir,
         agent_cwd_allowlist: input.agentCwdAllowlist,
+      },
+      10_000,
+    );
+  }
+
+  /**
+   * Loopback-only pairing endpoints (see ``agt/server/routes/pairing.py``).
+   * They return the Server's HMAC secret, so a remote console is refused
+   * with 403 by the Server itself — the UI surfaces that as an error.
+   */
+  async pairingState(): Promise<PairingStateInfo> {
+    return this.request<PairingStateInfo>('/api/pairing/state', {}, 10_000);
+  }
+
+  async pairingSecret(reveal = false): Promise<PairingSecretInfo> {
+    const query = reveal ? '?reveal=true' : '';
+    return this.request<PairingSecretInfo>(`/api/pairing/secret${query}`, {}, 10_000);
+  }
+
+  async pairingInvite(
+    name: string,
+    url: string,
+    daemonId?: string | null,
+  ): Promise<PairingInviteInfo> {
+    const params = new URLSearchParams({ name, url });
+    if (daemonId) params.set('daemon_id', daemonId);
+    return this.request<PairingInviteInfo>(`/api/pairing/invite?${params}`, {}, 10_000);
+  }
+
+  async pairingAddDaemon(input: {
+    name: string;
+    url: string;
+    capabilities?: string | null;
+  }): Promise<PairingAddDaemonInfo> {
+    return this.post<PairingAddDaemonInfo>(
+      '/api/pairing/daemons',
+      {
+        name: input.name,
+        url: input.url,
+        capabilities: input.capabilities ?? null,
       },
       10_000,
     );
