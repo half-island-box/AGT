@@ -209,6 +209,7 @@ async def console_bootstrap(request: Request) -> dict:
             "daemon_config": True,
             "identity_management": True,
             "sop_files": True,
+            "usage_dashboard": True,
         },
     }
 
