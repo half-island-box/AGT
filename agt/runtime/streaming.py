@@ -5,8 +5,9 @@ streaming registers a `StreamingSink` implementation; providers that do not
 register a `NoopSink` placeholder. `TaskExecutor` consumes JSON Lines from
 the agent subprocess via the sink and prints text deltas in real time.
 
-This module defines the protocol only — `ClaudeStreamSink` is the Phase A
-implementation. Codex (`Phase B`) will add its own sink in a follow-up change.
+`ClaudeStreamSink` consumes Claude Code's ``stream-json`` line stream;
+`CodexAppServerSink` drives ``codex app-server`` over JSON-RPC on stdio
+(see :class:`CodexAppServerSink`).
 
 Structured agent events (thinking / tool use / tool result / token usage)
 ride a second, provider-agnostic channel next to the plain-text stream. Each
@@ -164,6 +165,12 @@ class StreamingSink(ABC):
     working.
     """
 
+    #: True when this sink drives the subprocess over **stdin** (a request/
+    #: response protocol such as JSON-RPC) instead of only reading stdout.
+    #: The executor then spawns with a stdin pipe and calls :meth:`begin`
+    #: right after the spawn.
+    wants_stdin: bool = False
+
     def __init__(self) -> None:
         self.accumulated_text: list[str] = []
         # Length of the cumulative text, maintained incrementally so every
@@ -172,10 +179,55 @@ class StreamingSink(ABC):
         # Optional observer for structured events (local CLI rendering).
         # NEVER used for the remote path — that rides progress/report.
         self.on_event: Callable[[dict[str, Any]], None] | None = None
+        # Structured event buffer + monotonic sequence number. Shared by all
+        # sink implementations so the wire shape stays identical per provider.
+        self.events: deque[dict[str, Any]] = deque()
+        self._seq: int = 0
 
     @abstractmethod
     def consume(self, raw: dict[str, Any]) -> None:
         """Process one parsed JSON event from the agent subprocess."""
+
+    async def begin(self, stdin: Any, *, task: Any, work_dir: Any) -> None:
+        """Hook for sinks that speak a request/response protocol on stdin.
+
+        Called once after the subprocess spawns (and before stdout draining
+        starts). ``stdin`` is the asyncio ``StreamWriter`` of the child
+        process. The default implementation is a no-op.
+        """
+        return None
+
+    def _emit(self, kind: str, **fields: Any) -> None:
+        """Append one structured event and notify the optional observer."""
+        event: dict[str, Any] = {
+            "seq": self._seq,
+            "kind": kind,
+            "text_offset": self._text_len,
+        }
+        self._seq += 1
+        # Budget the detail fields so the *whole* serialized event (envelope
+        # included) stays under the cap; the envelope itself is tiny.
+        envelope = len(json.dumps(event, ensure_ascii=False).encode("utf-8"))
+        event.update(
+            _fit_fields(fields, limit=max(1024, MAX_EVENT_BYTES - envelope))
+        )
+        self.events.append(event)
+        self._evict_if_needed()
+        if self.on_event is not None:
+            try:
+                self.on_event(event)
+            except Exception:  # pragma: no cover - observer must not break streams
+                log.debug("on_event observer raised", exc_info=True)
+
+    def _evict_if_needed(self) -> None:
+        """Enforce :data:`MAX_EVENTS_PER_STEP`, evicting detail deltas first."""
+        while len(self.events) > MAX_EVENTS_PER_STEP:
+            for index, event in enumerate(self.events):
+                if event.get("kind") not in _KEEP_KINDS:
+                    del self.events[index]
+                    break
+            else:
+                self.events.popleft()
 
     def on_text_delta(self, text: str) -> None:
         """Default text-delta handler: append + flush to stdout.
@@ -243,8 +295,6 @@ class ClaudeStreamSink(StreamingSink):
         self._saw_text_delta: bool = False
 
         # ── Structured event state ────────────────────────────────
-        self.events: deque[dict[str, Any]] = deque()
-        self._seq: int = 0
         # Turn-level usage summary from the ``result`` aggregate.
         self.usage: dict[str, Any] | None = None
         self._model: str | None = None
@@ -270,40 +320,6 @@ class ClaudeStreamSink(StreamingSink):
             self._consume_stream_event(raw.get("event") or {})
         elif mtype == "result":
             self._consume_result(raw)
-
-    # ── Event emission ──────────────────────────────────────────
-
-    def _emit(self, kind: str, **fields: Any) -> None:
-        """Append one structured event and notify the optional observer."""
-        event: dict[str, Any] = {
-            "seq": self._seq,
-            "kind": kind,
-            "text_offset": self._text_len,
-        }
-        self._seq += 1
-        # Budget the detail fields so the *whole* serialized event (envelope
-        # included) stays under the cap; the envelope itself is tiny.
-        envelope = len(json.dumps(event, ensure_ascii=False).encode("utf-8"))
-        event.update(
-            _fit_fields(fields, limit=max(1024, MAX_EVENT_BYTES - envelope))
-        )
-        self.events.append(event)
-        self._evict_if_needed()
-        if self.on_event is not None:
-            try:
-                self.on_event(event)
-            except Exception:  # pragma: no cover - observer must not break streams
-                log.debug("on_event observer raised", exc_info=True)
-
-    def _evict_if_needed(self) -> None:
-        """Enforce :data:`MAX_EVENTS_PER_STEP`, evicting detail deltas first."""
-        while len(self.events) > MAX_EVENTS_PER_STEP:
-            for index, event in enumerate(self.events):
-                if event.get("kind") not in _KEEP_KINDS:
-                    del self.events[index]
-                    break
-            else:
-                self.events.popleft()
 
     # ── Streaming events ────────────────────────────────────────
 
@@ -594,6 +610,681 @@ class ClaudeStreamSink(StreamingSink):
         return list(self._errors)
 
 
+# ── Codex app-server (JSON-RPC 2.0 over stdio) ────────────────────────
+#
+# ``codex exec --json`` only emits block-level ``item.completed`` events
+# (no deltas, no reasoning). The interactive protocol used by codex's own
+# IDE clients is ``codex app-server``, a JSON-RPC v2 server whose
+# notifications stream reasoning text, agent-message deltas, command
+# output, per-call token usage, and typed ``ThreadItem`` lifecycles.
+#
+# The sink owns stdin: it performs the handshake (initialize /
+# initialized / thread start|resume / turn start) from inside
+# :meth:`consume` as responses arrive, then translates notifications into
+# the same flat event wire format ``ClaudeStreamSink`` produces.
+
+# Codex item types rendered as tool cards.
+_CODEX_TOOL_ITEM_TYPES = frozenset(
+    {
+        "commandExecution",
+        "fileChange",
+        "mcpToolCall",
+        "dynamicToolCall",
+        "webSearch",
+        "plan",
+        "collabAgentToolCall",
+    }
+)
+
+_CODEX_TOOL_NAMES = {
+    "commandExecution": "shell",
+    "fileChange": "apply_patch",
+    "webSearch": "web_search",
+    "plan": "update_plan",
+    "collabAgentToolCall": "agent",
+}
+
+# Server-initiated approval requests answered without a UI. Runs use
+# ``approvalsReviewer=auto_review`` so these normally never fire; declining
+# keeps a misconfigured run from hanging on a request nobody can answer.
+_CODEX_APPROVAL_DECLINES = {
+    "item/commandExecution/requestApproval": {"decision": "decline"},
+    "item/fileChange/requestApproval": {"decision": "decline"},
+}
+
+# Fixed handshake request ids. The executor runs one turn per process, so
+# ids never need to be recycled or correlated beyond these three steps.
+_CODEX_INIT_REQUEST_ID = 1
+_CODEX_THREAD_REQUEST_ID = 2
+_CODEX_TURN_REQUEST_ID = 3
+
+
+def _as_int(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _error_text(error: Any) -> str:
+    """Render a JSON-RPC ``error`` object / string as one message."""
+    if isinstance(error, dict):
+        message = error.get("message")
+        if isinstance(message, str) and message:
+            return message
+        return json.dumps(error, ensure_ascii=False)
+    if isinstance(error, str):
+        return error
+    return ""
+
+
+def _codex_usage_fields(breakdown: Any) -> dict[str, int]:
+    """Map codex's camelCase token counters onto AGT's usage keys.
+
+    Codex counts cached and cache-write input tokens *inside*
+    ``inputTokens``; AGT stores billing-relevant non-cached input
+    separately, so both cache buckets are subtracted.
+    ``reasoningOutputTokens`` is already part of ``outputTokens`` and is
+    not added twice.
+    """
+    if not isinstance(breakdown, dict):
+        return {}
+    cached = _as_int(breakdown.get("cachedInputTokens"))
+    cache_write = _as_int(breakdown.get("cacheWriteInputTokens"))
+    return {
+        "input_tokens": max(
+            0, _as_int(breakdown.get("inputTokens")) - cached - cache_write
+        ),
+        "output_tokens": _as_int(breakdown.get("outputTokens")),
+        "cache_read_input_tokens": cached,
+        "cache_creation_input_tokens": cache_write,
+    }
+
+
+def _reasoning_text(item: dict[str, Any]) -> str:
+    """Full reasoning text from a completed ``reasoning`` item."""
+    for key in ("content", "summary"):
+        parts = item.get(key)
+        if not isinstance(parts, list):
+            continue
+        text = "\n".join(str(part) for part in parts if part)
+        if text:
+            return text
+    return ""
+
+
+class CodexAppServerSink(StreamingSink):
+    """Drive ``codex app-server --listen stdio://`` for one turn.
+
+    Observed notifications (codex-cli 0.160.0, v2 protocol):
+
+    - ``item/started`` / ``item/completed`` (``ThreadItem``) — lifecycle
+    - ``item/agentMessage/delta`` — streamed assistant text
+    - ``item/reasoning/textDelta`` / ``summaryTextDelta`` — thinking
+    - ``item/commandExecution/outputDelta`` — live command output
+    - ``thread/tokenUsage/updated`` — ``{total, last}`` per API call
+    - ``turn/completed`` — terminal status (carries **no** usage)
+
+    Text deltas are appended to :attr:`accumulated_text`; thinking, tool
+    calls, tool results, and usage are emitted as structured events.
+    ``turn/completed`` closes stdin so the app-server process exits and
+    the executor's drain loop ends.
+    """
+
+    wants_stdin = True
+
+    def __init__(
+        self,
+        *,
+        sandbox: str = "workspace-write",
+        approval_policy: str = "on-request",
+        approvals_reviewer: str | None = "auto_review",
+    ) -> None:
+        super().__init__()
+        # ``--approve-for-me`` parity: workspace-write sandbox plus
+        # automatic review of approval requests. The reviewer runs on the
+        # codex side, so a non-interactive run never waits on a TTY.
+        self._sandbox = sandbox
+        self._approval_policy = approval_policy
+        self._approvals_reviewer = approvals_reviewer
+
+        self._stdin: Any = None
+        self._prompt = ""
+        self._cwd = ""
+        self._resume_id: str | None = None
+        self._thread_id: str | None = None
+        self._turn_id: str | None = None
+        self._model: str | None = None
+        self._resume_rejected = False
+        self._is_error = False
+        self._turn_status: str | None = None
+        self._error_message: str | None = None
+        self._finished = False
+        self._retried_thread_setup = False
+        self._exclude_turns = True
+
+        self.usage: dict[str, Any] | None = None
+        self._usage_totals = {key: 0 for key in _USAGE_KEYS}
+        self._usage_calls = 0
+        self._usage_emitted = False
+
+        # Open tool cards keyed by item id (latest item payload).
+        self._open_tools: dict[str, dict[str, Any]] = {}
+        # Reasoning item ids with a rendered thinking block.
+        self._thinking_started: set[str] = set()
+        # item id -> "text" | "summary": the first delta channel wins so a
+        # reasoning item is never rendered twice.
+        self._reasoning_channel: dict[str, str] = {}
+        # agentMessage item ids with text already appended.
+        self._text_items: set[str] = set()
+        self._emitted_text = False
+
+    # ── Handshake (stdin side) ──────────────────────────────────
+
+    async def begin(self, stdin: Any, *, task: Any, work_dir: Any) -> None:
+        """Send ``initialize``/``initialized``; the rest follows responses."""
+        self._stdin = stdin
+        self._prompt = task.prompt
+        self._resume_id = task.resume_session_id
+        self._cwd = str(work_dir)
+        self._send(
+            {
+                "jsonrpc": "2.0",
+                "id": _CODEX_INIT_REQUEST_ID,
+                "method": "initialize",
+                "params": {
+                    "clientInfo": {
+                        "name": "agt",
+                        "title": "agt",
+                        "version": "0.1",
+                    },
+                    "capabilities": None,
+                },
+            }
+        )
+        self._send({"jsonrpc": "2.0", "method": "initialized"})
+        try:
+            await stdin.drain()
+        except Exception:  # pragma: no cover - transport already gone
+            log.debug("codex app-server stdin drain failed", exc_info=True)
+
+    def _send(self, payload: dict[str, Any]) -> None:
+        if self._stdin is None or self._finished:
+            return
+        try:
+            self._stdin.write(
+                (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+            )
+        except (BrokenPipeError, ConnectionResetError, RuntimeError) as exc:
+            log.warning("codex app-server stdin write failed: %s", exc)
+            self._is_error = True
+            self._finished = True
+
+    def _send_thread_setup(self) -> None:
+        params: dict[str, Any] = {
+            "cwd": self._cwd,
+            "sandbox": self._sandbox,
+            "approvalPolicy": self._approval_policy,
+        }
+        if self._approvals_reviewer:
+            params["approvalsReviewer"] = self._approvals_reviewer
+        if self._resume_id:
+            # ``excludeTurns`` keeps a long thread's history out of the
+            # response; the daemon only needs the thread id + model.
+            params["threadId"] = self._resume_id
+            if self._exclude_turns:
+                params["excludeTurns"] = True
+            method = "thread/resume"
+        else:
+            method = "thread/start"
+        self._send(
+            {
+                "jsonrpc": "2.0",
+                "id": _CODEX_THREAD_REQUEST_ID,
+                "method": method,
+                "params": params,
+            }
+        )
+
+    def _send_turn_start(self) -> None:
+        self._send(
+            {
+                "jsonrpc": "2.0",
+                "id": _CODEX_TURN_REQUEST_ID,
+                "method": "turn/start",
+                "params": {
+                    "threadId": self._thread_id,
+                    "input": [
+                        {
+                            "type": "text",
+                            "text": self._prompt,
+                            "text_elements": [],
+                        }
+                    ],
+                },
+            }
+        )
+
+    # ── Public dispatch ─────────────────────────────────────────
+
+    def consume(self, raw: dict[str, Any]) -> None:
+        """Dispatch one JSON-RPC response, notification, or request."""
+        method = raw.get("method")
+        if isinstance(method, str):
+            if "id" in raw:
+                self._on_server_request(raw)
+            else:
+                self._on_notification(method, raw.get("params") or {})
+            return
+        if "id" in raw:
+            self._on_response(raw)
+
+    def _on_server_request(self, raw: dict[str, Any]) -> None:
+        """Answer a server->client request without a UI.
+
+        Approvals are declined; anything else (tool call, auth refresh)
+        is rejected with a JSON-RPC error so the turn fails instead of
+        hanging.
+        """
+        method = raw.get("method")
+        reply: dict[str, Any] = {"jsonrpc": "2.0", "id": raw.get("id")}
+        decline = _CODEX_APPROVAL_DECLINES.get(method)
+        if decline is not None:
+            reply["result"] = decline
+        else:
+            reply["error"] = {
+                "code": -32601,
+                "message": f"agt does not support {method}",
+            }
+        log.info("codex app-server request %s answered without a UI", method)
+        self._send(reply)
+
+    def _on_response(self, raw: dict[str, Any]) -> None:
+        request_id = raw.get("id")
+        error = raw.get("error")
+        result = raw.get("result") or {}
+        if request_id == _CODEX_INIT_REQUEST_ID:
+            if error:
+                self._fail(f"initialize failed: {_error_text(error)}")
+                return
+            self._send_thread_setup()
+        elif request_id == _CODEX_THREAD_REQUEST_ID:
+            if error:
+                if self._maybe_retry_thread_setup(error):
+                    return
+                if self._resume_id:
+                    self._resume_rejected = True
+                self._fail(f"thread setup failed: {_error_text(error)}")
+                return
+            thread = result.get("thread") or {}
+            thread_id = thread.get("id")
+            if isinstance(thread_id, str):
+                self._thread_id = thread_id
+            model = result.get("model") or thread.get("model")
+            if isinstance(model, str) and model:
+                self._model = model
+            self._send_turn_start()
+        elif request_id == _CODEX_TURN_REQUEST_ID:
+            if error:
+                self._fail(f"turn/start failed: {_error_text(error)}")
+                return
+            turn = result.get("turn") or {}
+            turn_id = turn.get("id")
+            if isinstance(turn_id, str) and not self._turn_id:
+                self._turn_id = turn_id
+
+    def _maybe_retry_thread_setup(self, error: Any) -> bool:
+        """Retry once with only the baseline fields for older servers.
+
+        ``approvalsReviewer`` and ``excludeTurns`` are newer than the v2
+        protocol itself. A server that rejects them keeps working with an
+        explicit ``never`` policy (approvals are refused rather than
+        auto-reviewed) and full-history resume.
+        """
+        if self._retried_thread_setup:
+            return False
+        message = _error_text(error).lower()
+        unsupported = (
+            "approval",
+            "excludeturns",
+            "exclude_turns",
+            "unknown variant",
+            "unknown field",
+            "unexpected",
+        )
+        if not any(token in message for token in unsupported):
+            return False
+        self._retried_thread_setup = True
+        self._approvals_reviewer = None
+        self._approval_policy = "never"
+        self._exclude_turns = False
+        self._send_thread_setup()
+        return True
+
+    # ── Notifications ───────────────────────────────────────────
+
+    def _on_notification(self, method: str, params: dict[str, Any]) -> None:
+        if method == "turn/started":
+            turn = params.get("turn") or {}
+            turn_id = turn.get("id")
+            if isinstance(turn_id, str) and not self._turn_id:
+                self._turn_id = turn_id
+        elif method == "item/started":
+            self._on_item_started(params.get("item"))
+        elif method == "item/completed":
+            self._on_item_completed(params.get("item"))
+        elif method == "item/agentMessage/delta":
+            self._on_agent_delta(params)
+        elif method == "item/reasoning/textDelta":
+            self._on_reasoning_delta(params, "text")
+        elif method == "item/reasoning/summaryTextDelta":
+            self._on_reasoning_delta(params, "summary")
+        elif method == "thread/tokenUsage/updated":
+            self._on_token_usage(params)
+        elif method == "turn/completed":
+            self._on_turn_completed(params)
+        elif method == "error":
+            self._on_error(params)
+        elif method in ("thread/started", "warning", "configWarning"):
+            return
+        else:
+            log.debug("codex app-server notification ignored: %s", method)
+
+    def _on_error(self, params: dict[str, Any]) -> None:
+        message = _error_text(params.get("error"))
+        if message:
+            self._error_message = message
+        if not params.get("willRetry"):
+            self._is_error = True
+        log.warning(
+            "codex app-server error%s: %s",
+            " (retrying)" if params.get("willRetry") else "",
+            message,
+        )
+
+    # ── Items ───────────────────────────────────────────────────
+
+    def _on_item_started(self, item: Any) -> None:
+        if not isinstance(item, dict):
+            return
+        item_id = item.get("id")
+        if not isinstance(item_id, str):
+            return
+        item_type = item.get("type")
+        if item_type == "reasoning":
+            self._thinking_started.add(item_id)
+            self._emit("thinking_start", block_id=item_id)
+        elif item_type in _CODEX_TOOL_ITEM_TYPES:
+            self._open_tools[item_id] = item
+            self._emit(
+                "tool_use_start",
+                block_id=item_id,
+                tool_use_id=item_id,
+                name=self._tool_name(item),
+            )
+
+    def _on_item_completed(self, item: Any) -> None:
+        if not isinstance(item, dict):
+            return
+        item_id = item.get("id")
+        if not isinstance(item_id, str):
+            return
+        item_type = item.get("type")
+        if item_type == "reasoning":
+            self._complete_reasoning(item)
+        elif item_type in _CODEX_TOOL_ITEM_TYPES:
+            self._complete_tool(item)
+        elif item_type == "agentMessage":
+            text = item.get("text")
+            if isinstance(text, str) and text and item_id not in self._text_items:
+                self._text_items.add(item_id)
+                self._begin_message_text()
+                self.on_text_delta(text)
+
+    def _complete_reasoning(self, item: dict[str, Any]) -> None:
+        item_id = item["id"]
+        if item_id not in self._thinking_started:
+            text = _reasoning_text(item)
+            if text:
+                self._thinking_started.add(item_id)
+                self._emit("thinking_start", block_id=item_id)
+                self._emit("thinking_delta", block_id=item_id, text=text)
+        if item_id in self._thinking_started:
+            self._emit("thinking_end", block_id=item_id)
+            self._thinking_started.discard(item_id)
+
+    def _complete_tool(self, item: dict[str, Any]) -> None:
+        item_id = item["id"]
+        name = self._tool_name(item)
+        if self._open_tools.pop(item_id, None) is None:
+            # Completion without a start notification (older servers or a
+            # resumed turn replaying items): emit the opening card now.
+            self._emit(
+                "tool_use_start",
+                block_id=item_id,
+                tool_use_id=item_id,
+                name=name,
+            )
+        self._emit(
+            "tool_use_end",
+            block_id=item_id,
+            tool_use_id=item_id,
+            name=name,
+            input=self._tool_input(item),
+        )
+        content, is_error = self._tool_result(item)
+        self._emit(
+            "tool_result",
+            tool_use_id=item_id,
+            content=content,
+            is_error=is_error,
+        )
+
+    def _on_agent_delta(self, params: dict[str, Any]) -> None:
+        delta = params.get("delta")
+        if not isinstance(delta, str) or not delta:
+            return
+        item_id = params.get("itemId")
+        if isinstance(item_id, str) and item_id not in self._text_items:
+            self._text_items.add(item_id)
+            self._begin_message_text()
+        self.on_text_delta(delta)
+
+    def _begin_message_text(self) -> None:
+        """Insert a paragraph break between successive agent messages."""
+        if self._emitted_text:
+            self.on_text_delta("\n\n")
+        self._emitted_text = True
+
+    def _on_reasoning_delta(self, params: dict[str, Any], channel: str) -> None:
+        item_id = params.get("itemId")
+        delta = params.get("delta")
+        if not isinstance(item_id, str) or not isinstance(delta, str) or not delta:
+            return
+        seen = self._reasoning_channel.setdefault(item_id, channel)
+        if seen != channel:
+            return
+        if item_id not in self._thinking_started:
+            self._thinking_started.add(item_id)
+            self._emit("thinking_start", block_id=item_id)
+        self._emit("thinking_delta", block_id=item_id, text=delta)
+
+    # ── Usage ───────────────────────────────────────────────────
+
+    def _on_token_usage(self, params: dict[str, Any]) -> None:
+        # On resume the server first replays the *previous* turn's usage;
+        # only notifications stamped with this turn's id belong to us.
+        if not self._turn_id or params.get("turnId") != self._turn_id:
+            return
+        breakdown = (params.get("tokenUsage") or {}).get("last") or {}
+        fields = _codex_usage_fields(breakdown)
+        if not fields:
+            return
+        self._usage_calls += 1
+        for key, value in fields.items():
+            self._usage_totals[key] += value
+        fields["scope"] = "message"
+        if self._model:
+            fields["model"] = self._model
+        self._emit("usage", **fields)
+
+    def _emit_turn_usage(self) -> None:
+        if self._usage_emitted or not self._usage_calls:
+            return
+        self._usage_emitted = True
+        summary: dict[str, Any] = dict(self._usage_totals)
+        summary["scope"] = "turn"
+        summary["num_turns"] = self._usage_calls
+        if self._model:
+            summary["model"] = self._model
+        self.usage = summary
+        self._emit("usage", **summary)
+
+    # ── Turn lifecycle ──────────────────────────────────────────
+
+    def _on_turn_completed(self, params: dict[str, Any]) -> None:
+        turn = params.get("turn") or {}
+        self._turn_status = turn.get("status")
+        if self._turn_status != "completed":
+            self._is_error = True
+            message = _error_text(turn.get("error"))
+            if message:
+                self._error_message = message
+                log.warning("codex turn %s: %s", self._turn_status, message)
+        self._emit_turn_usage()
+        self._finish()
+
+    def _fail(self, message: str) -> None:
+        self._error_message = message
+        self._is_error = True
+        log.warning("codex app-server: %s", message)
+        self._emit_turn_usage()
+        self._finish()
+
+    def _finish(self) -> None:
+        """Close stdin so the app-server process exits after the turn."""
+        if self._finished:
+            return
+        self._finished = True
+        if self._stdin is not None:
+            try:
+                self._stdin.close()
+            except Exception:  # pragma: no cover - transport already gone
+                log.debug("codex app-server stdin close failed", exc_info=True)
+
+    def _close_open_items(self) -> None:
+        for item_id in list(self._thinking_started):
+            self._emit("thinking_end", block_id=item_id)
+        self._thinking_started.clear()
+        for item_id, item in list(self._open_tools.items()):
+            name = self._tool_name(item)
+            self._emit(
+                "tool_use_end",
+                block_id=item_id,
+                tool_use_id=item_id,
+                name=name,
+                input=self._tool_input(item),
+            )
+            self._emit(
+                "tool_result",
+                tool_use_id=item_id,
+                content="",
+                is_error=True,
+            )
+        self._open_tools.clear()
+
+    # ── Item → event mapping ────────────────────────────────────
+
+    @staticmethod
+    def _tool_name(item: dict[str, Any]) -> str:
+        item_type = item.get("type")
+        if item_type == "mcpToolCall":
+            return f"mcp:{item.get('server') or '?'}:{item.get('tool') or '?'}"
+        if item_type == "dynamicToolCall":
+            tool = item.get("tool") or "tool"
+            namespace = item.get("namespace")
+            return f"{namespace}:{tool}" if namespace else str(tool)
+        return _CODEX_TOOL_NAMES.get(item_type, str(item_type))
+
+    @staticmethod
+    def _tool_input(item: dict[str, Any]) -> Any:
+        item_type = item.get("type")
+        if item_type == "commandExecution":
+            return {"command": item.get("command"), "cwd": item.get("cwd")}
+        if item_type == "fileChange":
+            return {"changes": item.get("changes") or []}
+        if item_type in ("mcpToolCall", "dynamicToolCall"):
+            arguments = item.get("arguments")
+            return arguments if isinstance(arguments, dict) else {
+                "arguments": arguments
+            }
+        if item_type == "webSearch":
+            return {"query": item.get("query"), "action": item.get("action")}
+        if item_type == "plan":
+            return {"plan": item.get("text")}
+        if item_type == "collabAgentToolCall":
+            return {"tool": item.get("tool"), "prompt": item.get("prompt")}
+        return {}
+
+    @staticmethod
+    def _tool_result(item: dict[str, Any]) -> tuple[str, bool]:
+        item_type = item.get("type")
+        if item_type == "commandExecution":
+            status = item.get("status")
+            exit_code = item.get("exitCode")
+            is_error = status in ("failed", "declined") or (
+                status == "completed"
+                and isinstance(exit_code, int)
+                and exit_code != 0
+            )
+            return item.get("aggregatedOutput") or "", is_error
+        if item_type == "fileChange":
+            lines = []
+            for change in item.get("changes") or []:
+                if not isinstance(change, dict):
+                    continue
+                kind = change.get("kind")
+                if isinstance(kind, dict):
+                    kind = kind.get("type")
+                header = f"{kind or 'update'}: {change.get('path')}"
+                diff = change.get("diff")
+                lines.append(
+                    f"{header}\n{diff}"
+                    if isinstance(diff, str) and diff
+                    else header
+                )
+            return "\n".join(lines), item.get("status") in ("failed", "declined")
+        if item_type == "mcpToolCall":
+            if item.get("error"):
+                return _content_text(item.get("error")), True
+            return _content_text(item.get("result")), item.get("status") == "failed"
+        if item_type == "dynamicToolCall":
+            is_error = item.get("success") is False or item.get("status") == "failed"
+            return _content_text(item.get("contentItems")), is_error
+        if item_type == "webSearch":
+            return _content_text(item.get("results")), False
+        return "", False
+
+    # ── Terminal result ─────────────────────────────────────────
+
+    def finalize(self) -> SinkResult:
+        self._emit_turn_usage()
+        self._close_open_items()
+        return SinkResult(
+            session_id=self._thread_id,
+            is_error=self._is_error,
+            resume_rejected=self._resume_rejected,
+            text="".join(self.accumulated_text),
+            events=list(self.events),
+            usage=dict(self.usage) if self.usage else None,
+        )
+
+    @property
+    def subtype(self) -> str | None:
+        return self._turn_status
+
+    @property
+    def errors(self) -> list[str]:
+        return [self._error_message] if self._error_message else []
+
+
 __all__ = [
     "MAX_EVENT_BYTES",
     "MAX_EVENTS_PER_STEP",
@@ -601,4 +1292,5 @@ __all__ = [
     "StreamingSink",
     "NoopSink",
     "ClaudeStreamSink",
+    "CodexAppServerSink",
 ]

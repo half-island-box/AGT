@@ -47,9 +47,8 @@ class ClaudeCommandBuilder(CommandBuilder):
 class CodexCommandBuilder(CommandBuilder):
     """Build ``<bin> exec --skip-git-repo-check [cli_args...] [resume <sid> --all] <prompt>``.
 
-    Phase 5 leaves Codex on the legacy pipe-text path; this builder exists so
-    the adapter layer is complete and Phase B can flip a single registry
-    entry to enable it without touching the executor.
+    Legacy pipe-text shape, used when ``codex app-server`` is unavailable
+    (old CLI, or ``AGT_CODEX_TRANSPORT=exec``).
     """
 
     def build(
@@ -70,8 +69,27 @@ class CodexCommandBuilder(CommandBuilder):
         return cmd
 
 
+class CodexAppServerCommandBuilder(CommandBuilder):
+    """Build ``<bin> app-server --listen stdio://``.
+
+    The prompt, resume target, and sandbox policy travel through the
+    JSON-RPC handshake instead of argv (see
+    :class:`agt.runtime.streaming.CodexAppServerSink`), so ``cli_args`` is
+    normally empty.
+    """
+
+    def build(
+        self,
+        binary: Path,
+        task: Task,
+        cli_args: list[str],
+    ) -> list[str]:
+        return [str(binary), "app-server", "--listen", "stdio://", *cli_args]
+
+
 __all__ = [
     "CommandBuilder",
     "ClaudeCommandBuilder",
     "CodexCommandBuilder",
+    "CodexAppServerCommandBuilder",
 ]

@@ -338,3 +338,269 @@ def test_claude_sink_legacy_no_delta_path_still_works():
     )
     result = sink.finalize()
     assert result.text == "legacy full message"
+
+# ── Codex app-server sink ─────────────────────────────────────────────
+
+
+class _FakeStdin:
+    """Minimal asyncio StreamWriter stand-in (write/drain/close only)."""
+
+    def __init__(self) -> None:
+        self.chunks: list[str] = []
+        self.closed = False
+        self.drains = 0
+
+    def write(self, data: bytes) -> None:
+        self.chunks.append(data.decode("utf-8"))
+
+    async def drain(self) -> None:
+        self.drains += 1
+
+    def close(self) -> None:
+        self.closed = True
+
+    def sent(self) -> list[dict]:
+        return [json.loads(line) for line in self.chunks if line.strip()]
+
+
+def _codex_task(prompt: str = "hello", resume_session_id: str | None = None):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(prompt=prompt, resume_session_id=resume_session_id)
+
+
+def _start_codex_sink(prompt: str = "hello", resume_session_id: str | None = None):
+    import asyncio
+
+    from agt.runtime.streaming import CodexAppServerSink
+
+    sink = CodexAppServerSink()
+    stdin = _FakeStdin()
+    asyncio.run(
+        sink.begin(
+            stdin,
+            task=_codex_task(prompt, resume_session_id),
+            work_dir=Path("/tmp/agt-test"),
+        )
+    )
+    return sink, stdin
+
+
+def _kinds(result: SinkResult) -> list[str]:
+    return [event["kind"] for event in result.events]
+
+
+def test_codex_sink_handshake_then_streams_events():
+    """One full turn: handshake, reasoning, tool call, text, usage, close."""
+    sink, stdin = _start_codex_sink()
+    sent = stdin.sent()
+    assert sent[0]["method"] == "initialize"
+    assert sent[1]["method"] == "initialized"
+
+    sink.consume({"jsonrpc": "2.0", "id": 1, "result": {"userAgent": "x"}})
+    thread_request = stdin.sent()[-1]
+    assert thread_request["method"] == "thread/start"
+    assert thread_request["params"]["cwd"] == "/tmp/agt-test"
+    assert thread_request["params"]["sandbox"] == "workspace-write"
+
+    sink.consume(
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {"thread": {"id": "thread-1"}, "model": "gpt-test"},
+        }
+    )
+    turn_request = stdin.sent()[-1]
+    assert turn_request["method"] == "turn/start"
+    assert turn_request["params"]["threadId"] == "thread-1"
+    assert turn_request["params"]["input"] == [
+        {"type": "text", "text": "hello", "text_elements": []}
+    ]
+
+    sink.consume(
+        {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "result": {"turn": {"id": "turn-1", "status": "inProgress"}},
+        }
+    )
+
+    # Reasoning deltas → one thinking block.
+    sink.consume(
+        {
+            "method": "item/started",
+            "params": {
+                "item": {"type": "reasoning", "id": "r1", "summary": [], "content": []}
+            },
+        }
+    )
+    sink.consume(
+        {
+            "method": "item/reasoning/textDelta",
+            "params": {"itemId": "r1", "delta": "thinking"},
+        }
+    )
+    sink.consume(
+        {
+            "method": "item/completed",
+            "params": {
+                "item": {
+                    "type": "reasoning",
+                    "id": "r1",
+                    "summary": [],
+                    "content": ["thinking"],
+                }
+            },
+        }
+    )
+
+    # Command execution → tool start / end / result.
+    command = {
+        "type": "commandExecution",
+        "id": "c1",
+        "command": "ls",
+        "cwd": "/tmp",
+        "status": "completed",
+        "aggregatedOutput": "a.txt\n",
+        "exitCode": 0,
+    }
+    sink.consume({"method": "item/started", "params": {"item": command}})
+    sink.consume({"method": "item/completed", "params": {"item": command}})
+
+    # Assistant text.
+    sink.consume(
+        {
+            "method": "item/agentMessage/delta",
+            "params": {"itemId": "m1", "delta": "Hi"},
+        }
+    )
+    sink.consume(
+        {
+            "method": "item/agentMessage/delta",
+            "params": {"itemId": "m1", "delta": " there"},
+        }
+    )
+
+    # Usage: one pre-turn notification (old turn) must be ignored.
+    sink.consume(
+        {
+            "method": "thread/tokenUsage/updated",
+            "params": {
+                "threadId": "thread-1",
+                "turnId": "turn-old",
+                "tokenUsage": {
+                    "total": {},
+                    "last": {
+                        "inputTokens": 100,
+                        "cachedInputTokens": 0,
+                        "cacheWriteInputTokens": 0,
+                        "outputTokens": 10,
+                    },
+                },
+            },
+        }
+    )
+    assert "usage" not in [event["kind"] for event in sink.events]
+
+    sink.consume(
+        {
+            "method": "thread/tokenUsage/updated",
+            "params": {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "tokenUsage": {
+                    "total": {},
+                    "last": {
+                        "inputTokens": 100,
+                        "cachedInputTokens": 80,
+                        "cacheWriteInputTokens": 5,
+                        "outputTokens": 10,
+                        "reasoningOutputTokens": 4,
+                    },
+                },
+            },
+        }
+    )
+    sink.consume(
+        {
+            "method": "turn/completed",
+            "params": {"turn": {"id": "turn-1", "status": "completed"}},
+        }
+    )
+
+    result = sink.finalize()
+    assert result.session_id == "thread-1"
+    assert result.is_error is False
+    assert result.text == "Hi there"
+    assert stdin.closed is True
+
+    kinds = _kinds(result)
+    assert kinds.count("thinking_start") == 1
+    assert kinds.count("thinking_delta") == 1
+    assert kinds.count("thinking_end") == 1
+    assert kinds.count("tool_use_start") == 1
+    assert kinds.count("tool_use_end") == 1
+    assert kinds.count("tool_result") == 1
+    assert kinds.count("usage") == 2  # message + turn
+
+    tool_start = next(e for e in result.events if e["kind"] == "tool_use_start")
+    assert tool_start["name"] == "shell"
+    tool_result = next(e for e in result.events if e["kind"] == "tool_result")
+    assert tool_result["content"] == "a.txt\n"
+    assert tool_result["is_error"] is False
+
+    # Non-cached input = 100 - 80 - 5; output stays as reported.
+    assert result.usage is not None
+    assert result.usage["input_tokens"] == 15
+    assert result.usage["cache_read_input_tokens"] == 80
+    assert result.usage["cache_creation_input_tokens"] == 5
+    assert result.usage["output_tokens"] == 10
+    assert result.usage["model"] == "gpt-test"
+    assert result.usage["scope"] == "turn"
+    assert result.usage["num_turns"] == 1
+
+
+def test_codex_sink_resume_rejection_is_reported():
+    """A failed ``thread/resume`` sets ``resume_rejected`` and stops the run."""
+    sink, stdin = _start_codex_sink(resume_session_id="gone")
+    sink.consume({"jsonrpc": "2.0", "id": 1, "result": {}})
+    request = stdin.sent()[-1]
+    assert request["method"] == "thread/resume"
+    assert request["params"]["threadId"] == "gone"
+
+    sink.consume(
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "error": {"code": -32000, "message": "thread not found"},
+        }
+    )
+    result = sink.finalize()
+    assert result.resume_rejected is True
+    assert result.is_error is True
+    assert stdin.closed is True
+
+
+def test_codex_sink_declines_approval_requests():
+    """Server-initiated approvals get a decline instead of hanging."""
+    sink, stdin = _start_codex_sink()
+    sink.consume(
+        {
+            "jsonrpc": "2.0",
+            "id": 99,
+            "method": "item/commandExecution/requestApproval",
+            "params": {"itemId": "c1"},
+        }
+    )
+    reply = stdin.sent()[-1]
+    assert reply["id"] == 99
+    assert reply["result"] == {"decision": "decline"}
+
+
+def test_codex_sink_separates_successive_agent_messages():
+    """Two agent messages are separated by a paragraph break."""
+    sink, _ = _start_codex_sink()
+    sink.consume({"method": "item/agentMessage/delta", "params": {"itemId": "m1", "delta": "A"}})
+    sink.consume({"method": "item/agentMessage/delta", "params": {"itemId": "m2", "delta": "B"}})
+    result = sink.finalize()
+    assert result.text == "A\n\nB"

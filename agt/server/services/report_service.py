@@ -263,44 +263,15 @@ async def record_step_result_for_daemon(
     agent_events: list | None = None,
 ) -> dict:
     """Record execution results on a claimed Step.
-
-    ``daemon_id`` semantics differ by caller:
-    - HTTP path passes ``payload.daemon_id`` (backward compat).
-    - WS path passes the configured ``self.daemon_id`` (body value
-      ignored, so a misbehaving daemon can't spoof another daemon's
-      report).
-
-    Phase 1: ``outcome`` drives the parent Job state machine. Legacy
-    daemons that don't send ``outcome`` have it derived from
-    ``exit_code`` (0 -> done, otherwise error).
-
-    Phase 2: ``artifacts`` (optional ``ArtifactReportItem`` list) is
-    persisted via ``register_step_artifacts`` AFTER the ownership check —
-    only the daemon that claimed this Step can register its deliverables.
-    Registration failures never fail the report (best-effort by design).
-
-    Phase 3: ``outcome_payload`` persists to the Step's sidecar column,
-    then drives two same-transaction hooks (spawn materialization +
-    parent wakeup).
-
-    On success returns ``{"recorded": True}``. On business failure
-    raises ``ValueError({"type": "task_not_found"|"task_not_owned",
-    ...})``.
     """
     step = await db.get(StepModel, step_id)
     if step is None:
         raise ValueError({"type": "task_not_found", "message": step_id})
-    # ``step.daemon_id`` is None for never-claimed Steps; we treat that
-    # the same as a foreign-daemon mismatch (403) — a daemon can't
-    # report on a Step it didn't claim.
+
     if step.daemon_id != daemon_id:
         raise ValueError({"type": "task_not_owned", "message": step_id})
 
-    # Phase 4 (review fix #4/#8): protect a cancelled Step from late
-    # reports. A non-cancelled report arriving after the server already
-    # cancelled must not resurrect the step — gentle no-op (not 409,
-    # which would trigger the daemon's WS→HTTP report retry storm).
-    # Cancelled reports stay idempotently accepted.
+
     if step.status == "cancelled" and status != "cancelled":
         return {
             "recorded": False,
@@ -308,10 +279,7 @@ async def record_step_result_for_daemon(
             "artifacts": [],
         }
 
-    # A spawn Step is immutable once its first report materialized the
-    # batch. Replaying that report after synthesis starts must not move
-    # the parent Job back to waiting_children or append a second
-    # synthesis Step.
+
     if (
         step.status in _TERMINAL_STEP_STATUSES
         and await spawn_batches_for_step(db, step_id)
@@ -341,14 +309,10 @@ async def record_step_result_for_daemon(
     step.duration = duration
     step.status = status
     step.resume_rejected = resume_rejected
-    # Turn-level usage (``result.usage``) — never summed with the per-call
-    # ``message`` usage events; the two have different semantics.
+
     _apply_usage(step, usage)
 
-    # Derive outcome for legacy daemons. Chat jobs stay in waiting_input
-    # after a clean exit so the user can submit the next turn; task Jobs
-    # complete on a clean exit. Query the parent Job explicitly to avoid
-    # lazy-loading the ORM relationship inside an async session.
+
     if outcome is None:
         job_type = "task"
         if step.job_id is not None:
@@ -377,22 +341,15 @@ async def record_step_result_for_daemon(
         items=artifacts or [],
     )
 
-    # Structured events: the report tail carries anything the daemon could
-    # not acknowledge over progress. Idempotent on ``(task_id, seq)``, so a
-    # tail overlapping an acknowledged batch is harmless.
+
     new_events = await _insert_agent_events(
         db, step_id, normalize_agent_events(agent_events)
     )
 
-    # Phase 1: session rows are keyed by (job_id, identity_did, provider).
-    # ``identity_did`` normalizes to "" for identity-less Steps so the
-    # session pointer matches the empty-string sentinel the model uses.
     ctx = step.identity_did or ""
     job_id = step.job_id
 
     if resume_rejected:
-        # Drop the session pointer — the agent refused to resume, so
-        # the next claim on this Step should start a fresh session.
         if job_id is not None:
             await db.execute(
                 SessionModel.__table__.delete().where(
@@ -405,8 +362,6 @@ async def record_step_result_for_daemon(
     elif session_id:
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         if job_id is None:
-            # Should not happen for new Steps, but tolerate legacy rows
-            # that weren't backfilled by writing no session pointer.
             step.session_id = session_id
         else:
             job = await db.get(JobModel, job_id)
@@ -445,9 +400,6 @@ async def record_step_result_for_daemon(
         await children_for_step(db, step_id) if job_id is not None else []
     )
 
-    # MCP spawn creates children while the parent Step is still running.
-    # Marker spawns are materialized here for legacy daemons. Both paths
-    # converge on the same Step outcome and parent state transition.
     if outcome == "spawn_subjob" and not spawned_children:
         marker_children: list[dict] = []
         if isinstance(outcome_payload, dict):
@@ -474,8 +426,6 @@ async def record_step_result_for_daemon(
             step.stderr = f"{step.stderr}\n{message}".strip()
     elif spawned_children:
         if outcome == "error":
-            # A failed/timed-out parent cannot synthesize. Cancel its
-            # descendants locally so late reports are rejected cleanly.
             from .job_service import cancel_job
 
             for child in spawned_children:
@@ -501,9 +451,6 @@ async def record_step_result_for_daemon(
         if outcome == "spawn_subjob" and spawned_children:
             await on_child_done(db, job_id, synthesis_daemon_id=daemon_id)
 
-        # Phase 3 hook B: this Step's Job may itself be a child — its
-        # terminal report wakes the parent's wakeup check (synthesis
-        # spawns inline when all siblings are terminal).
         current_job = await db.get(JobModel, job_id)
         if current_job is not None and current_job.parent_job_id is not None:
             await on_child_done(
@@ -511,12 +458,6 @@ async def record_step_result_for_daemon(
                 current_job.parent_job_id,
                 synthesis_daemon_id=daemon_id,
             )
-
-        # Phase 5 hook C (SOP): a terminal Job wakes its dependency-gated
-        # downstream. No-op for jobs with no DAG dependents (the common
-        # case), so this fires liberally on every terminal report — SOP
-        # nodes have no spawn parent_job_id, hooks A/B never touch them;
-        # this hook is their ONLY online wake trigger (review G1).
         if current_job is not None and current_job.status in (
             "done", "failed", "cancelled"
         ):
@@ -525,12 +466,6 @@ async def record_step_result_for_daemon(
     await db.commit()
 
     # Publish the authoritative terminal payload to any SSE subscriber.
-    # Read back from ``step`` (not the parameters) so the fields reflect
-    # the resume-rejected cleanup (session_id cleared) and are the exact
-    # values a fresh ``/status`` read would see.
-    #
-    # Events go first: a client that renders the transcript in order must
-    # have the tail events before the terminal frame closes the stream.
     if new_events:
         default_hub.publish(
             step_id, {"type": "agent_events", "events": new_events}

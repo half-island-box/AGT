@@ -23,11 +23,17 @@ No change to ``executor.py`` / ``cli/main.py`` / ``daemon/*`` is required.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import asyncio
+import contextlib
+import logging
+import os
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 from .command_builders import (
     ClaudeCommandBuilder,
+    CodexAppServerCommandBuilder,
     CodexCommandBuilder,
     CommandBuilder,
 )
@@ -48,9 +54,12 @@ from .session_locators import (
 )
 from .streaming import (
     ClaudeStreamSink,
+    CodexAppServerSink,
     NoopSink,
     StreamingSink,
 )
+
+log = logging.getLogger(__name__)
 
 
 # Claude Code-specific argv additions so the spawned headless ``-p``
@@ -89,9 +98,16 @@ class ProviderAdapter:
 
     ``permission_args`` are provider-specific CLI flags spliced into the
     spawned argv ahead of ``stream_args``. Claude carries its permission
-    gate bypass and Codex its sandbox policy; other providers leave it
-    empty (their flags differ). The executor composes
+    gate bypass and Codex's legacy exec path its sandbox policy; other
+    providers leave it empty (their flags differ). The executor composes
     ``[*permission_args, *stream_args]`` without inspecting names.
+
+    ``stream_args`` are the provider's streaming CLI flags (Claude's
+    ``--output-format stream-json ...``) and ``stream_transport_probe``
+    optionally checks — once, cached — whether the installed binary
+    supports the selected transport. When the probe says no and
+    ``pipe_text_fallback`` is set, the executor reruns that adapter's
+    legacy path instead.
     """
 
     command_builder: CommandBuilder
@@ -99,9 +115,64 @@ class ProviderAdapter:
     stream_sink_factory: Callable[[], StreamingSink]
     resume_rejection_detector: ResumeRejectionDetector
     permission_args: tuple[str, ...] = ()
+    stream_args: tuple[str, ...] = ()
+    stream_transport_probe: Callable[[Path], Awaitable[bool]] | None = None
+    pipe_text_fallback: ProviderAdapter | None = None
     # Phase B: how this provider discovers the AGT MCP server (or
     # None when it has no supported MCP-config mechanism).
     mcp_profile: McpConfigProfile | None = None
+
+
+# Cache of ``<bin> app-server --help`` probes keyed by (path, mtime) so a
+# cached task does not pay a subprocess per Step, while a codex upgrade
+# (new mtime) is picked up without restarting the daemon.
+_APP_SERVER_PROBES: dict[tuple[str, float], bool] = {}
+
+
+async def _codex_app_server_available(binary: Path) -> bool:
+    """Whether the installed codex can host ``codex app-server``.
+
+    ``AGT_CODEX_TRANSPORT`` overrides the probe: ``exec`` forces the
+    legacy pipe-text path, ``app-server`` skips the check. The probe
+    itself is a cheap ``app-server --help`` (exit code 0) cached per
+    binary version.
+    """
+    mode = os.environ.get("AGT_CODEX_TRANSPORT", "auto").strip().lower()
+    if mode in ("exec", "pipe", "legacy"):
+        return False
+    if mode == "app-server":
+        return True
+    try:
+        key = (str(binary), binary.stat().st_mtime)
+    except OSError:
+        return False
+    cached = _APP_SERVER_PROBES.get(key)
+    if cached is not None:
+        return cached
+    available = False
+    try:
+        process = await asyncio.create_subprocess_exec(
+            str(binary),
+            "app-server",
+            "--help",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        returncode = await asyncio.wait_for(process.wait(), timeout=5)
+        available = returncode == 0
+    except asyncio.TimeoutError:
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
+        available = False
+    except OSError:
+        available = False
+    _APP_SERVER_PROBES[key] = available
+    if not available:
+        log.warning(
+            "`codex app-server` unavailable; falling back to `codex exec` "
+            "pipe-text (set AGT_CODEX_TRANSPORT=app-server to override)"
+        )
+    return available
 
 
 # Built-in adapters. New providers should be added here.
@@ -112,19 +183,43 @@ def _claude_adapter() -> ProviderAdapter:
         stream_sink_factory=ClaudeStreamSink,
         resume_rejection_detector=ClaudeResumeRejectionDetector(),
         permission_args=CLAUDE_BYPASS_PERMISSION_ARGS,
+        # ``--include-partial-messages`` enables Anthropic Messages
+        # streaming events (text/thinking deltas) instead of one buffered
+        # ``assistant`` event at the end; ``--verbose`` is required for
+        # ``stream-json`` under ``-p``.
+        stream_args=(
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--include-partial-messages",
+        ),
         mcp_profile=ProjectJsonMcpConfig(".mcp.json"),
+    )
+
+
+def _codex_legacy_adapter() -> ProviderAdapter:
+    """Legacy ``codex exec`` pipe-text path (fallback when app-server is absent)."""
+    return ProviderAdapter(
+        command_builder=CodexCommandBuilder(),
+        session_locator=codex_session_locator(),
+        stream_sink_factory=NoopSink,
+        resume_rejection_detector=GenericResumeRejectionDetector(),
+        permission_args=CODEX_SANDBOX_ARGS,
+        mcp_profile=GlobalTomlMcpConfig(),
     )
 
 
 def _codex_adapter() -> ProviderAdapter:
     return ProviderAdapter(
-        command_builder=CodexCommandBuilder(),
+        command_builder=CodexAppServerCommandBuilder(),
         session_locator=codex_session_locator(),
-        # Phase 5 leaves Codex on the legacy pipe-text path; flip the
-        # factory to CodexStreamSink in Phase B once that sink lands.
-        stream_sink_factory=NoopSink,
+        # Codex's streaming transport is the JSON-RPC app-server, not a
+        # JSON-lines stdout mode: `codex exec --json` buffers whole items
+        # and never emits reasoning/deltas.
+        stream_sink_factory=CodexAppServerSink,
         resume_rejection_detector=GenericResumeRejectionDetector(),
-        permission_args=CODEX_SANDBOX_ARGS,
+        stream_transport_probe=_codex_app_server_available,
+        pipe_text_fallback=_codex_legacy_adapter(),
         mcp_profile=GlobalTomlMcpConfig(),
     )
 
