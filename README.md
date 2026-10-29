@@ -35,7 +35,10 @@ workflows, and a shared artifact registry.
 - **Identity routing** — assign roles such as reviewer or tester and route them
   by provider, daemon affinity, and runtime availability.
 - **Console projects** — persist user-selected directory projects and browse
-  allowed directories through loopback-only server APIs.
+  allowed directories through loopback-only server APIs. A project always has
+  a local (Server-machine) directory and may optionally pin one remote
+  daemon directory, browsable over the reverse-dial link and used as the
+  default working directory for chat, SOP, and Goal runs on that daemon.
 - **MCP and editor integration** — expose sub-agent spawning to MCP-capable
   agents and use the early VS Code extension for chat, Goals, and SOP editing.
 - **Browser console** — the FastAPI server hosts a project browser plus the
@@ -143,8 +146,12 @@ agt task submit --prompt "Say hello in three words"
 The server listens on `127.0.0.1:8420` by default. OpenAPI documentation is at
 `http://127.0.0.1:8420/docs`. The server also provides loopback-only console
 project APIs for creating, renaming, opening, and listing directory-backed
-projects; directory browsing is constrained by
-`AGT_CONSOLE_WORKSPACE_ROOTS`. See the
+projects; local directory browsing is constrained by
+`AGT_CONSOLE_WORKSPACE_ROOTS`. A project may additionally pin a directory on one
+remote daemon (`remote_daemon_id` + `remote_path`): listing it goes over the
+reverse-dial link (`GET /api/console/directories?daemon_id=…`) and is bounded by
+that daemon's `AGT_AGENT_CWD_ALLOWLIST`, so every selectable directory is also
+runnable. See the
 [quick-start guide](<docs/guide%20docs/quick_start.md>) for deployment
 topologies and configuration.
 
@@ -220,7 +227,9 @@ environment variables, and exit codes.
   HTTP/SSE APIs as the VS Code client.
 - **Server** owns coordination, persistence, routing, MCP, and artifacts.
 - **Console projects** are persistent directory pointers; run history remains
-  scoped by the project path in `jobs.cwd`.
+  scoped by the project path in `jobs.cwd`. A project's local path is
+  mandatory; its optional `(remote_daemon_id, remote_path)` pair supplies the
+  default working directory for chat/SOP/Goal runs routed to that daemon.
 - **Daemon** owns local process execution, concurrency, and heartbeats.
 - **Agent CLIs** run as fresh subprocesses; sessions remain provider-native.
 - **SQLite** is the source of truth for all Server-managed runs.

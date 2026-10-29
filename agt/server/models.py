@@ -586,11 +586,32 @@ class ConsoleProjectModel(Base):
     __tablename__ = "console_projects"
     __table_args__ = (
         UniqueConstraint("path", name="ux_console_projects_path"),
+        # A project may carry an OPTIONAL remote working directory for one
+        # daemon. The pair is all-or-nothing (enforced in the service); when
+        # present it must be unique per daemon+path so two projects cannot
+        # point the same remote machine at the same directory.
+        Index(
+            "ux_console_projects_remote",
+            "remote_daemon_id",
+            "remote_path",
+            unique=True,
+            sqlite_where=text(
+                "remote_daemon_id IS NOT NULL AND remote_path IS NOT NULL"
+            ),
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     path: Mapped[str] = mapped_column(String(1024), nullable=False, unique=True)
+    # Optional remote working directory. ``path`` above is always the local
+    # (Server-machine) directory and is mandatory; these two are only set
+    # when the user also picked a directory on a remote daemon. Both NULL or
+    # both set.
+    remote_daemon_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
+    )
+    remote_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     created_at: Mapped[str] = mapped_column(String(32), nullable=False)
     updated_at: Mapped[str] = mapped_column(String(32), nullable=False)
     last_opened_at: Mapped[str | None] = mapped_column(

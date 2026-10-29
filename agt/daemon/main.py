@@ -840,6 +840,9 @@ async def run_background(config: DaemonConfig) -> None:
             daemon_id=config.daemon_id,
             url=daemon_url,
             on_connect=_push_snapshot_on_connect,
+            # Remote console directory browsing uses the same roots as the
+            # execution allowlist: anything browsable is runnable.
+            allowlist=config.agent_cwd_allowlist,
         )
         await ws_server.start()
         log.info(
