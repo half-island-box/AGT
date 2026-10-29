@@ -1947,9 +1947,27 @@ def server_start(
     ``--detach``: fork a child running uvicorn; parent exits immediately.
     """
     # Validate configuration before importing the server module or spawning
-    # a detached child. This produces a friendly CLI message instead of a
-    # raw traceback when AGT_SERVER_SECRET is missing.
+    # a detached child. On a first run we generate the secret here rather
+    # than failing: `agt server start` is the first command most users run,
+    # and the value is auto-discovered by both the Server and any local
+    # daemon, so there is nothing to export.
     from ..server.config import ServerConfig, ServerConfigError
+    from ..server_secret import (
+        default_server_secret_path,
+        ensure_server_secret,
+    )
+
+    secret_path = default_server_secret_path()
+    had_secret = bool(secret_path.exists()) or bool(
+        os.environ.get("AGT_SERVER_SECRET", "").strip()
+    )
+    try:
+        created_secret = ensure_server_secret()
+    except OSError as exc:
+        click.echo(f"Error: cannot create {secret_path}: {exc}", err=True)
+        sys.exit(1)
+    if not had_secret and created_secret:
+        click.echo(f"Generated server secret at {secret_path}")
 
     try:
         ServerConfig.from_env()
@@ -3015,6 +3033,331 @@ def daemon_status() -> None:
     sys.exit(cmd_status(args))
 
 
+def _ws_port_from_url(url: str, fallback: int = 8422) -> int:
+    """Best-effort port extraction for the invite payload."""
+    from ..daemon.config import _port_of_url
+
+    raw = _port_of_url(url)
+    try:
+        return int(raw) if raw else fallback
+    except ValueError:
+        return fallback
+
+
+@daemon.command("invite")
+@click.option("--name", default=None, help="Daemon label (e.g. cloud-01).")
+@click.option("--url", "url", default=None, help="Daemon's public ws:// URL.")
+@click.option(
+    "--existing",
+    default=None,
+    help="Re-use an entry already present in ~/.agt/daemons (by name).",
+)
+@click.option(
+    "--daemon-id",
+    "daemon_id",
+    default=None,
+    help="Explicit daemon id. Defaults to the existing entry's id or a new uuid4.",
+)
+@click.option(
+    "--add",
+    "add_entry",
+    is_flag=True,
+    help="Register the target in this machine's ~/.agt/daemons.",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Allow replacing a name that is already registered with another URL.",
+)
+@click.option(
+    "--server-url",
+    default=None,
+    help="Server base URL to embed (only needed by HTTP-mode daemons).",
+)
+def daemon_invite(
+    name: str | None,
+    url: str | None,
+    existing: str | None,
+    daemon_id: str | None,
+    add_entry: bool,
+    force: bool,
+    server_url: str | None,
+) -> None:
+    """Generate a one-paste invite code for a remote daemon.
+
+    The code carries the server secret, the daemon's public URL, its
+    daemon id and listen port. Run the printed ``agt daemon init``
+    command on the daemon machine; nothing else needs to be copied.
+
+    Treat the code like an SSH private key: anyone holding it can
+    connect to this Server as that daemon.
+    """
+    from ..daemons_file import (
+        DaemonEntry,
+        DaemonsFileError,
+        daemons_file_path,
+        read_daemons_entries,
+        upsert_daemons_entry,
+    )
+    from ..invite import InviteError, encode_invite
+    from ..server_secret import load_server_secret
+
+    secret = load_server_secret()
+    if not secret:
+        click.echo(
+            "Error: no server secret configured. Start the server once "
+            "(`agt server start`) or run `agt server init`.",
+            err=True,
+        )
+        sys.exit(1)
+
+    if existing:
+        match = next(
+            (e for e in read_daemons_entries() if e.name == existing), None
+        )
+        if match is None:
+            click.echo(
+                f"Error: no entry named '{existing}' in {daemons_file_path()}",
+                err=True,
+            )
+            sys.exit(1)
+        name = match.name
+        url = url or match.url
+        daemon_id = daemon_id or match.daemon_id
+
+    if not name:
+        click.echo("Error: --name is required.", err=True)
+        sys.exit(2)
+    if not url:
+        click.echo("Error: --url is required (or use --existing).", err=True)
+        sys.exit(2)
+
+    try:
+        from ..daemons_file import validate_daemon_id, validate_name, validate_url
+
+        validate_name(name)
+        validate_url(url)
+        if daemon_id:
+            daemon_id = validate_daemon_id(daemon_id)
+    except ValueError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(2)
+
+    daemon_id = daemon_id or str(uuid.uuid4())
+    ws_port = _ws_port_from_url(url)
+
+    if add_entry:
+        try:
+            outcome = upsert_daemons_entry(
+                DaemonEntry(name=name, url=url, daemon_id=daemon_id),
+                replace_name=force,
+            )
+        except DaemonsFileError as exc:
+            click.echo(f"Error: {exc}", err=True)
+            sys.exit(1)
+        click.echo(
+            f"{outcome.capitalize()} {name} {url} (id={daemon_id}) "
+            f"in {daemons_file_path()}"
+        )
+
+    try:
+        code = encode_invite(
+            secret=secret,
+            url=url,
+            daemon_id=daemon_id,
+            name=name,
+            ws_port=ws_port,
+            server_url=server_url,
+        )
+    except InviteError as exc:  # pragma: no cover — defensive
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    click.echo()
+    click.echo("Run this on the daemon machine:")
+    click.echo()
+    click.echo(f"    agt daemon init {code}")
+    click.echo()
+    click.echo(
+        "The code embeds your server secret. Treat it like an SSH private key."
+    )
+
+
+@daemon.command("init")
+@click.argument("invite_code", required=False, metavar="[INVITE_CODE]")
+@click.option(
+    "--token",
+    default=None,
+    help="Server secret. Required when no INVITE_CODE is given.",
+)
+@click.option("--url", "url", default=None, help="This daemon's public ws:// URL.")
+@click.option("--name", default=None, help="Daemon label.")
+@click.option(
+    "--daemon-id",
+    "daemon_id",
+    default=None,
+    help="Explicit daemon id. Defaults to uuid5(url) when omitted.",
+)
+@click.option("--ws-port", type=int, default=None, help="Listen port (default 8422).")
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Overwrite an existing server secret that differs from the new one.",
+)
+@click.option(
+    "--start",
+    "start_after",
+    is_flag=True,
+    help="Start the daemon in the background after configuring it.",
+)
+@click.pass_context
+def daemon_init(
+    ctx: click.Context,
+    invite_code: str | None,
+    token: str | None,
+    url: str | None,
+    name: str | None,
+    daemon_id: str | None,
+    ws_port: int | None,
+    force: bool,
+    start_after: bool,
+) -> None:
+    """Configure this machine as a reverse-dial daemon.
+
+    With an INVITE_CODE (from ``agt daemon invite`` on the Server) this
+    writes the server secret, the daemon identity/URL and the listen
+    settings in one step. Without one, pass ``--token`` and ``--url``
+    explicitly.
+    """
+    import socket as _socket
+
+    from ..daemon.config import (
+        DaemonConfigError,
+        update_daemon_config_file,
+    )
+    from ..daemons_file import (
+        DaemonEntry,
+        DaemonsFileError,
+        daemons_file_path,
+        upsert_daemons_entry,
+    )
+    from ..ids import daemon_id_from_url
+    from ..invite import InviteError, decode_invite
+    from ..server_secret import default_server_secret_path
+
+    payload: dict = {}
+    server_url: str | None = None
+    if invite_code:
+        try:
+            payload = decode_invite(invite_code)
+        except InviteError as exc:
+            click.echo(f"Error: {exc}", err=True)
+            sys.exit(2)
+        secret = payload["secret"]
+        url = payload["url"]
+        daemon_id = payload["id"]
+        name = payload.get("name") or name or _socket.gethostname()
+        ws_port = payload.get("ws_port") or ws_port
+        server_url = payload.get("server_url")
+    else:
+        if not token:
+            click.echo(
+                "Error: --token is required when no INVITE_CODE is given.",
+                err=True,
+            )
+            sys.exit(2)
+        if not url:
+            click.echo("Error: --url is required.", err=True)
+            sys.exit(2)
+        secret = token
+        daemon_id = daemon_id or daemon_id_from_url(url)
+        name = name or _socket.gethostname()
+
+    # The daemons file only accepts a UUID as ``id=``; catching a bad
+    # value here beats writing an entry whose identity is silently
+    # demoted to a capability later.
+    try:
+        from ..daemons_file import validate_daemon_id
+
+        daemon_id = validate_daemon_id(daemon_id)
+    except ValueError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(2)
+
+    ws_port = ws_port or _ws_port_from_url(url or "")
+    if url is None:
+        click.echo("Error: no daemon URL configured.", err=True)
+        sys.exit(2)
+
+    # 1. Shared secret. Never clobber a different one by accident: that
+    #    would silently disconnect a machine that is already paired.
+    secret_path = default_server_secret_path()
+    existing_secret = ""
+    if secret_path.exists():
+        try:
+            existing_secret = secret_path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            click.echo(f"Error: cannot read {secret_path}: {exc}", err=True)
+            sys.exit(1)
+    if existing_secret and existing_secret != secret and not force:
+        click.echo(
+            f"Error: {secret_path} already holds a different server secret.\n"
+            "Re-run with --force to replace it (this machine will then only "
+            "be able to talk to the new Server).",
+            err=True,
+        )
+        sys.exit(1)
+    if existing_secret != secret:
+        try:
+            secret_path.parent.mkdir(parents=True, exist_ok=True)
+            secret_path.write_text(secret, encoding="utf-8")
+            secret_path.chmod(0o600)
+        except OSError as exc:
+            click.echo(f"Error: cannot write {secret_path}: {exc}", err=True)
+            sys.exit(1)
+        click.echo(f"Wrote server secret to {secret_path}")
+
+    # 2. Persisted daemon identity + listen settings.
+    updates: dict = {
+        "daemon_id": daemon_id,
+        "daemon_url": url,
+        "listen_mode": True,
+        "ws_port": ws_port,
+    }
+    if server_url:
+        updates["server_url"] = server_url
+    try:
+        update_daemon_config_file(updates)
+    except DaemonConfigError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(2)
+
+    # 3. This machine's own entry, so `agt daemon status` / CLI helpers can
+    #    still resolve the local daemon.
+    try:
+        upsert_daemons_entry(
+            DaemonEntry(name=name, url=url, daemon_id=daemon_id),
+            replace_name=force,
+        )
+    except DaemonsFileError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    click.echo(
+        f"Configured {name} ({url}, id={daemon_id}) in {daemons_file_path()}"
+    )
+
+    if start_after:
+        ctx.invoke(daemon_start, server_url=None, detach=True, log_file=None)
+        return
+
+    click.echo()
+    click.echo("Next: agt daemon start --detach")
+    click.echo(
+        f"Make sure this machine's port {ws_port} is reachable from the Server."
+    )
+
+
 @daemon.command("list")
 @click.option(
     "--server-url",
@@ -3189,12 +3532,24 @@ def daemon_config_show() -> None:
         "agent_timeout": "agent timeout (seconds)",
         "work_dir": "work directory",
         "agent_cwd_allowlist": "agent cwd allowlist",
+        "listen_mode": "listen mode (reverse-dial)",
+        "ws_port": "ws listen port",
+        "daemon_id": "daemon id",
+        "daemon_url": "daemon url",
+        "server_url": "server url",
     }
+    # Identity/URL keys are usually unset; printing four "source: default"
+    # lines for them would bury the four settings this command existed for.
+    optional_keys = {"daemon_id", "daemon_url", "server_url"}
 
     for key, label in defaults.items():
         rs = settings[key]
+        if key in optional_keys and rs.source == "default":
+            continue
         value = rs.value
-        if isinstance(value, list):
+        if isinstance(value, bool):
+            display = "yes" if value else "no"
+        elif isinstance(value, list):
             display = ":".join(str(p) for p in value)
         elif isinstance(value, Path):
             display = str(value)
@@ -3214,11 +3569,17 @@ def daemon_config_show() -> None:
             else:
                 saved = str(rs.file_value)
             parts.append(f"saved: {saved}")
-        if rs.default_value is not None and source != "default":
+        if (
+            rs.default_value is not None
+            and rs.default_value != ""
+            and source != "default"
+        ):
             if isinstance(rs.default_value, list):
                 default = ":".join(str(p) for p in rs.default_value)
             elif isinstance(rs.default_value, Path):
                 default = str(rs.default_value)
+            elif isinstance(rs.default_value, bool):
+                default = "yes" if rs.default_value else "no"
             else:
                 default = str(rs.default_value)
             parts.append(f"default: {default}")
@@ -3242,11 +3603,25 @@ def daemon_config_show() -> None:
     default=None,
     help="Absolute allowed agent-cwd root (repeatable).",
 )
+@click.option(
+    "--listen-mode/--no-listen-mode",
+    "listen_mode",
+    default=None,
+    help="Listen for the Server to dial in (reverse-dial) instead of dialing it.",
+)
+@click.option(
+    "--ws-port",
+    type=int,
+    default=None,
+    help="Reverse-dial listen port (default 8422).",
+)
 def daemon_config_set(
     max_concurrent: int | None,
     agent_timeout: int | None,
     work_dir: str | None,
     agent_cwd_allowlist: tuple[str, ...] | None,
+    listen_mode: bool | None,
+    ws_port: int | None,
 ) -> None:
     """Persist one or more Daemon execution-resource settings."""
     from ..daemon.config import (
@@ -3267,6 +3642,10 @@ def daemon_config_set(
         updates["work_dir"] = work_dir
     if agent_cwd_allowlist:
         updates["agent_cwd_allowlist"] = list(agent_cwd_allowlist)
+    if listen_mode is not None:
+        updates["listen_mode"] = listen_mode
+    if ws_port is not None:
+        updates["ws_port"] = ws_port
 
     if not updates:
         click.echo("Error: at least one setting is required.", err=True)
@@ -3322,11 +3701,21 @@ def daemon_config_set(
 @click.option(
     "--agent-cwd-allowlist", is_flag=True, help="Remove agent_cwd_allowlist from the file."
 )
+@click.option("--listen-mode", is_flag=True, help="Remove listen_mode from the file.")
+@click.option("--ws-port", is_flag=True, help="Remove ws_port from the file.")
+@click.option("--daemon-id", is_flag=True, help="Remove daemon_id from the file.")
+@click.option("--daemon-url", is_flag=True, help="Remove daemon_url from the file.")
+@click.option("--server-url", is_flag=True, help="Remove server_url from the file.")
 def daemon_config_unset(
     max_concurrent: bool,
     agent_timeout: bool,
     work_dir: bool,
     agent_cwd_allowlist: bool,
+    listen_mode: bool,
+    ws_port: bool,
+    daemon_id: bool,
+    daemon_url: bool,
+    server_url: bool,
 ) -> None:
     """Remove persisted Daemon execution-resource settings."""
     from ..daemon.config import (
@@ -3342,6 +3731,11 @@ def daemon_config_unset(
             "agent_timeout": agent_timeout,
             "work_dir": work_dir,
             "agent_cwd_allowlist": agent_cwd_allowlist,
+            "listen_mode": listen_mode,
+            "ws_port": ws_port,
+            "daemon_id": daemon_id,
+            "daemon_url": daemon_url,
+            "server_url": server_url,
         }.items()
         if flag
     ]

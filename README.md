@@ -135,8 +135,7 @@ Use server mode for queued execution, remote workers, shared history, and
 multi-machine orchestration.
 
 ```bash
-agt server init
-agt server start --detach
+agt server start --detach          # first run generates ~/.agt/server.secret
 agt daemon start --detach
 agt task submit --prompt "Say hello in three words"
 ```
@@ -148,6 +147,25 @@ projects; directory browsing is constrained by
 `AGT_CONSOLE_WORKSPACE_ROOTS`. See the
 [quick-start guide](<docs/guide%20docs/quick_start.md>) for deployment
 topologies and configuration.
+
+### Connect a remote daemon
+
+A daemon behind NAT listens on a fixed port and the server dials out to it.
+Pairing is one command on each side — the invite code carries the shared
+secret, the daemon's public URL and its id, so nothing is copied by hand:
+
+```bash
+# server machine
+agt daemon invite --name cloud-01 --url ws://1.2.3.4:8422 --add
+#   → run the printed `agt daemon init agt1.…` on the daemon machine
+
+# daemon machine
+agt daemon init agt1.…
+agt daemon start --detach
+```
+
+An invite code embeds the server secret; treat it like an SSH private key.
+See [reverse-dial pairing](<docs/guide%20docs/quick_start.md#3-反向连接nat-穿透远程-daemon-推荐>).
 
 ## CLI
 
