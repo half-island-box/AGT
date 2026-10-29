@@ -526,6 +526,11 @@ class HealthResponse(BaseModel):
 class ConsoleProjectCreate(BaseModel):
     path: str
     name: str | None = None
+    # Optional remote working directory. ``path`` is always the mandatory
+    # local directory; these two are the pair "daemon + directory on that
+    # daemon" the user optionally picked at creation time.
+    remote_daemon_id: str | None = None
+    remote_path: str | None = None
 
 
 class ConsoleProjectUpdate(BaseModel):
@@ -543,6 +548,11 @@ class ConsoleProjectOut(BaseModel):
     name: str
     path: str
     available: bool
+    # Both None for local-only projects; both set when the project also
+    # carries a remote working directory.
+    remote_daemon_id: str | None = None
+    remote_path: str | None = None
+    remote: bool = False
     created_at: str
     updated_at: str
     last_opened_at: str | None = None

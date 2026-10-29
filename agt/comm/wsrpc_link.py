@@ -40,6 +40,7 @@ class WsRpcLink:
         on_request: OnRequest | None = None,
         grace: float = 2.0,
         generation: int = 0,
+        rpc_v1: bool = False,
     ) -> None:
         self._ws = ws
         self._on_request = on_request
@@ -48,7 +49,10 @@ class WsRpcLink:
         self._pending: dict[str, asyncio.Future[dict]] = {} # {rid, Future}
         # 连接版本号，每次close后 generation+=1
         self._generation = generation
-        self._rpc_v1_supported = False
+        # ``rpc_v1`` pre-seeds the capability for links whose peer hello was
+        # already consumed during an out-of-band handshake (the Server dialing
+        # a daemon verifies it with ``recv()`` before building the link).
+        self._rpc_v1_supported = rpc_v1
         self._read_task: asyncio.Task | None = None
         self._closed = False
 

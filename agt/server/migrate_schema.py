@@ -401,6 +401,31 @@ def ensure_schema(conn: Connection) -> None:
         )
         log.info("Migrated sessions table: added cwd column")
 
+    # Console projects: optional remote working directory on one daemon.
+    # ``path`` stays the mandatory Server-machine directory. Existing DB
+    # files predate these columns, so create_all alone leaves them out.
+    if _table_exists(conn, "console_projects"):
+        project_columns = _column_names(conn, "console_projects")
+        if "remote_daemon_id" not in project_columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE console_projects ADD COLUMN remote_daemon_id VARCHAR(64)"
+            )
+            log.info("Migrated console_projects table: added remote_daemon_id column")
+        if "remote_path" not in project_columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE console_projects ADD COLUMN remote_path VARCHAR(1024)"
+            )
+            log.info("Migrated console_projects table: added remote_path column")
+        conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_console_projects_remote_daemon_id "
+            "ON console_projects (remote_daemon_id)"
+        )
+        conn.exec_driver_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_console_projects_remote "
+            "ON console_projects (remote_daemon_id, remote_path) "
+            "WHERE remote_daemon_id IS NOT NULL AND remote_path IS NOT NULL"
+        )
+
     # Backfill cwd from the best available directory column.
     if (
         _table_exists(conn, "jobs")

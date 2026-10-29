@@ -124,6 +124,9 @@ def _project_dict(
         "name": project.name,
         "path": project.path,
         "available": _is_available(Path(project.path)),
+        "remote_daemon_id": project.remote_daemon_id,
+        "remote_path": project.remote_path,
+        "remote": bool(project.remote_daemon_id and project.remote_path),
         "created_at": project.created_at,
         "updated_at": project.updated_at,
         "last_opened_at": project.last_opened_at,
@@ -157,17 +160,50 @@ async def get_project(
     return _project_dict(project, counts.get(project.path))
 
 
+def _clean_remote_path(value: str | None) -> str | None:
+    """Normalize an optional remote working directory.
+
+    The path belongs to another machine, so it is *not* resolved or checked
+    against this Server's filesystem. Structural checks only — absolute,
+    bounded length; existence/allowlist enforcement happens on the daemon.
+    """
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    if not raw.startswith("/") and not (len(raw) > 2 and raw[1] == ":"):
+        raise ProjectServiceError(
+            "remote_path_not_absolute",
+            "remote working directory must be an absolute path",
+        )
+    if len(raw) > 1024:
+        raise ProjectServiceError(
+            "remote_path_too_long",
+            "remote working directory must be at most 1024 characters",
+        )
+    return raw
+
+
 async def create_project(
     db: AsyncSession,
     config: ServerConfig,
     *,
     raw_path: str,
     raw_name: str | None,
+    remote_daemon_id: str | None = None,
+    raw_remote_path: str | None = None,
 ) -> dict[str, Any]:
     path = resolve_project_path(config, raw_path)
     if not _is_available(path):
         raise ProjectServiceError(
             "path_not_directory", "project path must be an existing directory"
+        )
+
+    remote_daemon = (remote_daemon_id or "").strip() or None
+    remote_path = _clean_remote_path(raw_remote_path)
+    if (remote_daemon is None) != (remote_path is None):
+        raise ProjectServiceError(
+            "remote_pair_incomplete",
+            "remote_daemon_id and remote_path must be provided together",
         )
 
     duplicate = await db.execute(
@@ -180,11 +216,27 @@ async def create_project(
             status_code=409,
         )
 
+    if remote_daemon is not None and remote_path is not None:
+        remote_duplicate = await db.execute(
+            select(ConsoleProjectModel).where(
+                ConsoleProjectModel.remote_daemon_id == remote_daemon,
+                ConsoleProjectModel.remote_path == remote_path,
+            )
+        )
+        if remote_duplicate.scalar_one_or_none() is not None:
+            raise ProjectServiceError(
+                "remote_project_already_exists",
+                f"a project already uses {remote_path} on daemon {remote_daemon}",
+                status_code=409,
+            )
+
     now = _utcnow()
     project = ConsoleProjectModel(
         id=f"project-{uuid.uuid4().hex[:12]}",
         name=_clean_name(raw_name, path.name),
         path=str(path),
+        remote_daemon_id=remote_daemon,
+        remote_path=remote_path,
         created_at=now,
         updated_at=now,
     )

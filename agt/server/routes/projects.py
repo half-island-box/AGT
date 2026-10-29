@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ...comm.errors import RPCRejected, WSRPCUnavailable, WSRPCUncertain
 from ..database import get_db
 from ..models import JobModel
 from ..schemas import (
@@ -48,11 +49,75 @@ def _error(exc: ProjectServiceError) -> HTTPException:
     )
 
 
+def _remote_link(request: Request, daemon_id: str):
+    """Return the live ``DaemonLink`` for a configured remote target.
+
+    Local daemons have no reverse-dial link, so a ``daemon_id`` that is not
+    in ``app.state.daemon_links`` is either local (the console omits the
+    parameter for those) or unknown — both are rejected here.
+    """
+    links = getattr(request.app.state, "daemon_links", {}) or {}
+    link = links.get(daemon_id)
+    if link is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "type": "unknown_remote_daemon",
+                "message": f"'{daemon_id}' is not a configured remote daemon",
+            },
+        )
+    return link
+
+
+def _rpc_error(exc: Exception) -> HTTPException:
+    """Map a reverse-dial failure onto a console-facing HTTP error."""
+    if isinstance(exc, WSRPCUnavailable):
+        return HTTPException(
+            status_code=503,
+            detail={"type": "daemon_offline", "message": "daemon is offline"},
+        )
+    if isinstance(exc, WSRPCUncertain):
+        return HTTPException(
+            status_code=504,
+            detail={"type": "daemon_timeout", "message": "daemon did not answer in time"},
+        )
+    body = exc.body if isinstance(exc, RPCRejected) and isinstance(exc.body, dict) else {}
+    error_type = str(body.get("type") or "daemon_rejected")
+    message = str(body.get("message") or "daemon rejected the request")
+    # ``path_error`` / ``validation_error`` are user-input problems → 400.
+    # ``unknown_method`` means an older daemon without ``fs.list`` → 502.
+    status_code = 400 if error_type in {"path_error", "validation_error"} else 502
+    return HTTPException(
+        status_code=status_code,
+        detail={"type": error_type, "message": message},
+    )
+
+
+async def _list_remote_directories(
+    request: Request, daemon_id: str, path: str | None
+) -> dict:
+    link = _remote_link(request, daemon_id)
+    try:
+        return await link.list_directory(path)
+    except (WSRPCUnavailable, WSRPCUncertain, RPCRejected) as exc:
+        raise _rpc_error(exc) from None
+
+
 @router.get("/directories", response_model=ConsoleDirectoryListResponse)
 async def directories(
     request: Request,
     path: str | None = Query(None),
+    daemon_id: str | None = Query(
+        None,
+        description=(
+            "Remote daemon whose filesystem to browse. Omit (or leave empty) "
+            "to browse the Server machine."
+        ),
+    ),
 ) -> ConsoleDirectoryListResponse:
+    if daemon_id:
+        result = await _list_remote_directories(request, daemon_id, path)
+        return ConsoleDirectoryListResponse(**result)
     try:
         result = await list_directories(request.app.state.config, path)
     except ProjectServiceError as exc:
@@ -167,12 +232,35 @@ async def create_project_route(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> ConsoleProjectOut:
+    remote_daemon = (payload.remote_daemon_id or "").strip() or None
+    remote_path = (payload.remote_path or "").strip() or None
+    if (remote_daemon is None) != (remote_path is None):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "type": "remote_pair_incomplete",
+                "message": "remote_daemon_id and remote_path must be provided together",
+            },
+        )
+    if remote_daemon is not None and remote_path is not None:
+        # Validate against the daemon's own filesystem/allowlist. An offline
+        # daemon is tolerated (the project is stored and validated on first
+        # use) so a project can be created before the machine comes up.
+        link = _remote_link(request, remote_daemon)
+        try:
+            await link.list_directory(remote_path)
+        except WSRPCUnavailable:
+            pass
+        except (WSRPCUncertain, RPCRejected) as exc:
+            raise _rpc_error(exc) from None
     try:
         row = await create_project(
             db,
             request.app.state.config,
             raw_path=payload.path,
             raw_name=payload.name,
+            remote_daemon_id=remote_daemon,
+            raw_remote_path=remote_path,
         )
     except ProjectServiceError as exc:
         raise _error(exc) from None

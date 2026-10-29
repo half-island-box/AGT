@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from websockets.asyncio.server import ServerConnection, serve
@@ -21,11 +22,16 @@ from ..agent_history import (
 from ..comm.errors import WSRPCUnavailable
 from ..comm.wsrpc_link import WsRpcLink
 from ..server.services.auth_service import TaskToken
+from .config import _is_path_under
 
 log = logging.getLogger("agt.daemon.ws")
 
+# Same cap as the Server-side console browser: a directory with more
+# entries than this is truncated rather than streamed.
+_MAX_DIRECTORY_ENTRIES = 1000
+
 # Hook called once per inbound server connection, after the link is
-# exposed as ``current_link`` and ready to issue RPC. 
+# exposed as ``current_link`` and ready to issue RPC.
 OnConnectHook = Callable[[WsRpcLink], Awaitable[None]]
 
 
@@ -40,6 +46,7 @@ class DaemonWsServer:
         url: str,
         *,
         on_connect: OnConnectHook | None = None,
+        allowlist: list[Path] | None = None,
     ) -> None:
         self._port = port
         self._secret = secret
@@ -49,6 +56,11 @@ class DaemonWsServer:
         self.current_link: WsRpcLink | None = None
         self._link_lock = asyncio.Lock()
         self._on_connect = on_connect
+        # Roots the remote console may browse (``fs.list``). Kept identical
+        # to the execution allowlist so "browsable" always implies
+        # "runnable": a path the Server can show the user is a path
+        # ``Daemon.run`` will accept.
+        self._allowlist = list(allowlist) if allowlist else None
         # Woken by an inbound ``tasks.available`` notify from the Server.
         self.claim_wakeup = asyncio.Event()
 
@@ -162,7 +174,117 @@ class DaemonWsServer:
             return await self._handle_session_delete(body)
         if method == "artifacts.fetch":
             return await self._handle_artifacts_fetch(body)
+        if method == "fs.list":
+            return await self._handle_fs_list(body)
         raise ValueError({"type": "unknown_method", "message": method})
+
+    async def _handle_fs_list(self, body: dict) -> dict:
+        """List directories on THIS machine for the console's project picker.
+
+        The remote console cannot stat a path on this daemon, so the picker
+        asks us. Roots are the same ``agent_cwd_allowlist`` used by
+        ``Daemon.run`` — anything the user can pick here is therefore also
+        a path the daemon will accept as ``agent_cwd``.
+
+        Runs in a worker thread: ``iterdir`` on a network mount can block.
+        """
+        raw = body.get("path")
+        if raw is not None and not isinstance(raw, str):
+            raise ValueError({
+                "type": "validation_error",
+                "message": "fs.list path must be a string",
+            })
+        return await asyncio.to_thread(self._list_directory, raw)
+
+    def _browse_roots(self) -> list[Path]:
+        raw = self._allowlist or [Path.home()]
+        roots: list[Path] = []
+        for item in raw:
+            try:
+                roots.append(Path(item).expanduser().resolve(strict=False))
+            except (OSError, RuntimeError):
+                continue
+        return roots or [Path.home().resolve()]
+
+    def _list_directory(self, raw_path: str | None) -> dict:
+        """Synchronous body of ``fs.list`` (see ``_handle_fs_list``)."""
+        roots = self._browse_roots()
+        if raw_path:
+            text = raw_path.strip()
+            if not text:
+                raise ValueError({
+                    "type": "path_error",
+                    "reason": "path_required",
+                    "message": "path cannot be blank",
+                })
+            candidate = Path(text).expanduser()
+            if not candidate.is_absolute():
+                raise ValueError({
+                    "type": "path_error",
+                    "reason": "relative_path",
+                    "message": "path must be absolute",
+                })
+            try:
+                current = candidate.resolve(strict=False)
+            except (OSError, RuntimeError) as exc:
+                raise ValueError({
+                    "type": "path_error",
+                    "reason": "invalid_path",
+                    "message": f"cannot resolve path: {exc}",
+                }) from None
+            if not any(_is_path_under(current, root) for root in roots):
+                raise ValueError({
+                    "type": "path_error",
+                    "reason": "path_outside_roots",
+                    "message": "path is outside the daemon's agent_cwd_allowlist",
+                })
+        else:
+            current = roots[0]
+
+        try:
+            if not current.is_dir():
+                raise ValueError({
+                    "type": "path_error",
+                    "reason": "not_a_directory",
+                    "message": "path is not a readable directory",
+                })
+            candidates = list(current.iterdir())
+        except OSError as exc:
+            raise ValueError({
+                "type": "path_error",
+                "reason": "directory_not_readable",
+                "message": f"cannot read directory: {exc}",
+            }) from None
+
+        parent: Path | None = None
+        try:
+            candidate_parent = current.parent
+            if any(_is_path_under(candidate_parent, root) for root in roots):
+                parent = candidate_parent
+        except (OSError, RuntimeError):
+            parent = None
+
+        directories: list[dict[str, str]] = []
+        for child in candidates:
+            if len(directories) >= _MAX_DIRECTORY_ENTRIES:
+                break
+            try:
+                resolved = child.resolve(strict=False)
+                if not resolved.is_dir():
+                    continue
+                if not any(_is_path_under(resolved, root) for root in roots):
+                    continue
+            except OSError:
+                continue
+            directories.append({"name": child.name, "path": str(resolved)})
+        directories.sort(key=lambda item: item["name"].lower())
+
+        return {
+            "roots": [str(root) for root in roots],
+            "parent": str(parent) if parent is not None else None,
+            "current": str(current),
+            "directories": directories,
+        }
 
     async def _handle_artifacts_fetch(self, body: dict) -> dict:
         """Serve one artifact's bytes from this daemon's local disk.
