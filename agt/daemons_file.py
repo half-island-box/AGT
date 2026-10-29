@@ -251,6 +251,59 @@ def upsert_daemons_entry(
     return "updated" if changed else "added"
 
 
+def remove_daemons_entry(
+    *,
+    name: str | None = None,
+    url: str | None = None,
+    daemon_id: str | None = None,
+    path: str | Path | None = None,
+) -> DaemonEntry:
+    """Delete the first entry matching any selector, keeping the rest.
+
+    Selectors are matched independently — the first line matching any of
+    them is removed. Pass exactly one in practice; ``name`` and ``url``
+    are unique per file anyway.
+
+    Raises :class:`DaemonsFileError` with ``code`` ``bad-selector`` when no
+    selector is given and ``not-found`` when nothing matches.
+    """
+    if not (name or url or daemon_id):
+        raise DaemonsFileError(
+            "bad-selector", "one of name, url or daemon_id is required"
+        )
+    target = Path(path).expanduser() if path is not None else daemons_file_path()
+    if not target.exists():
+        raise DaemonsFileError("not-found", f"{target} does not exist")
+
+    try:
+        lines = target.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise DaemonsFileError("unreadable", f"cannot read {target}: {exc}") from exc
+
+    out: list[str] = []
+    removed: DaemonEntry | None = None
+    for raw in lines:
+        entry = parse_daemons_line(raw)
+        if entry is None:
+            out.append(raw)
+            continue
+        if removed is None and (
+            (url is not None and entry.url == url)
+            or (name is not None and entry.name == name)
+            or (daemon_id is not None and entry.daemon_id == daemon_id)
+        ):
+            removed = entry
+            continue
+        out.append(raw)
+
+    if removed is None:
+        selector = url or name or daemon_id
+        raise DaemonsFileError("not-found", f"no entry matches {selector!r} in {target}")
+
+    _atomic_write(target, out)
+    return removed
+
+
 __all__ = [
     "DaemonEntry",
     "DaemonsFileError",
@@ -258,6 +311,7 @@ __all__ = [
     "format_daemons_entry",
     "parse_daemons_line",
     "read_daemons_entries",
+    "remove_daemons_entry",
     "upsert_daemons_entry",
     "validate_daemon_id",
     "validate_name",

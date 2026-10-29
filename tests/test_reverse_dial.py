@@ -270,6 +270,50 @@ def test_daemon_link_rejects_daemon_with_wrong_identity() -> None:
     asyncio.run(_run())
 
 
+def test_daemon_link_stop_ends_run_loop() -> None:
+    """``DaemonLink.stop()`` drops the socket and ends the reconnect loop.
+
+    Used when a target is removed from ``~/.agt/daemons`` at runtime: the
+    removed daemon must stop receiving work immediately, not after the
+    next Server restart.
+    """
+
+    async def _run() -> None:
+        port = _free_port()
+        ws_server = DaemonWsServer(
+            port=port,
+            secret=SECRET,
+            daemon_id="stopped-daemon",
+            url=f"ws://127.0.0.1:{port}",
+        )
+        await ws_server.start()
+        try:
+            from agt.server.daemon_link import DaemonLink
+
+            shutdown = asyncio.Event()
+            link = DaemonLink(
+                daemon_id="stopped-daemon",
+                url=f"ws://127.0.0.1:{port}",
+                secret=SECRET,
+                session_factory=None,
+            )
+            link_task = asyncio.create_task(link.run(shutdown))
+            for _ in range(100):
+                if link.connected:
+                    break
+                await asyncio.sleep(0.05)
+            assert link.connected, "link should connect to the local daemon"
+
+            await link.stop()
+            await asyncio.wait_for(link_task, timeout=5)
+            assert link_task.done()
+            assert not link.connected
+        finally:
+            await ws_server.stop()
+
+    asyncio.run(_run())
+
+
 # ── 7.4 end-to-end: DaemonWsServer ⇄ DaemonLink claim ───────────
 
 

@@ -26,6 +26,7 @@ from ...daemons_file import (
     DaemonsFileError,
     daemons_file_path,
     read_daemons_entries,
+    remove_daemons_entry,
     upsert_daemons_entry,
 )
 from ...invite import InviteError, encode_invite
@@ -104,6 +105,16 @@ class AddDaemonIn(BaseModel):
 class AddDaemonOut(InviteOut):
     added: str
     daemons_path: str
+    restart_required: bool
+
+
+class RemoveDaemonOut(BaseModel):
+    removed: bool
+    name: str
+    url: str
+    daemon_id: str
+    daemons_path: str
+    disconnected: bool
     restart_required: bool
 
 
@@ -261,6 +272,55 @@ async def pairing_add_daemon(request: Request, body: AddDaemonIn) -> AddDaemonOu
         added=outcome,
         daemons_path=_daemons_path(request),
         restart_required=not already_live,
+    )
+
+
+@router.delete(
+    "/daemons",
+    response_model=RemoveDaemonOut,
+    dependencies=[Depends(require_loopback)],
+)
+async def pairing_remove_daemon(
+    request: Request,
+    name: str | None = None,
+    url: str | None = None,
+    daemon_id: str | None = None,
+) -> RemoveDaemonOut:
+    """Remove a target from the daemons file and stop dialing it.
+
+    The file is the source of truth for which daemons this Server
+    reverse-dials. The in-memory ``ServerConfig.daemons`` snapshot is
+    only rebuilt on start, so the removed target lingers in API listings
+    until a restart — hence ``restart_required``. Its live link is
+    stopped immediately so no further work is claimed there.
+    """
+    try:
+        entry = remove_daemons_entry(
+            name=name,
+            url=url,
+            daemon_id=daemon_id,
+            path=_daemons_path(request),
+        )
+    except DaemonsFileError as exc:
+        status = 404 if exc.code == "not-found" else 400
+        raise HTTPException(status_code=status, detail=str(exc)) from None
+
+    effective_id = _effective_id(entry)
+    links = getattr(request.app.state, "daemon_links", {}) or {}
+    link = links.pop(effective_id, None)
+    disconnected = False
+    if link is not None:
+        await link.stop()
+        disconnected = True
+
+    return RemoveDaemonOut(
+        removed=True,
+        name=entry.name,
+        url=entry.url,
+        daemon_id=effective_id,
+        daemons_path=_daemons_path(request),
+        disconnected=disconnected,
+        restart_required=True,
     )
 
 

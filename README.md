@@ -162,11 +162,17 @@ agt daemon invite --name cloud-01 --url ws://1.2.3.4:8422 --add
 # daemon machine
 agt daemon init agt1.…
 agt daemon start --detach
+
+# server machine — retire a remote daemon and drop its target entry
+agt daemon remove cloud-01
 ```
 
-The settings page in the VS Code client and the web console exposes the same
-flow under **Connection & pairing** (secret display/copy, invite generation),
-backed by loopback-only `/api/pairing/*` endpoints.
+`agt daemon remove` deletes the target's line from `~/.agt/daemons` (comments and
+other entries untouched); the server stops dialing it after a restart. The
+settings page in the VS Code client and the web console exposes the same flow
+under **Connection & pairing** (secret display/copy, invite generation, target
+removal), backed by loopback-only `/api/pairing/*` endpoints — removing there
+additionally stops the live `DaemonLink` immediately.
 
 An invite code embeds the server secret; treat it like an SSH private key.
 See [reverse-dial pairing](<docs/guide%20docs/quick_start.md#3-反向连接nat-穿透远程-daemon-推荐>).
