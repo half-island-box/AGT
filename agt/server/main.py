@@ -43,6 +43,7 @@ from .routes.runs import router as runs_router
 from .routes.sessions import router as sessions_router
 from .routes.tasks import router as tasks_router
 from .routes.uploads import router as uploads_router
+from .routes.usage import router as usage_router
 from .services.input_service import sweep_expired_uploads
 from .services.runtime_service import prune_stale_runtimes
 
@@ -211,6 +212,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     app.include_router(daemons_router)
     app.include_router(tasks_router)
     app.include_router(uploads_router)
+    app.include_router(usage_router)
     app.include_router(jobs_router)
     app.include_router(artifacts_router)
     app.include_router(context_router)
