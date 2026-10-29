@@ -37,3 +37,72 @@
   .agd-project-card { grid-template-columns: 34px minmax(0, 1fr); }
   .agd-project-actions { grid-column: 1 / -1; justify-content: flex-start; }
 }
+
+/* ── Usage dashboard ─────────────────────────────────────────────── */
+.agd-usage-dashboard {
+  margin-top: 24px;
+  border: 1px solid var(--vscode-panel-border, #2e2e2e); border-radius: 10px;
+  background: var(--vscode-sideBar-background, #202020);
+  padding: 16px;
+}
+.agd-usage-head {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  flex-wrap: wrap; gap: 12px; margin-bottom: 14px;
+}
+.agd-usage-head h2 { margin: 0; font-size: 15px; }
+.agd-usage-filters { display: flex; flex-wrap: wrap; gap: 10px; }
+.agd-usage-filter { display: flex; align-items: center; gap: 7px; font-size: 11.5px; color: var(--vscode-descriptionForeground, #8b8b8b); }
+.agd-usage-filter .agd-input { height: 27px; min-width: 108px; }
+
+.agd-usage-cards {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px; margin-bottom: 16px;
+}
+.agd-usage-stat {
+  display: flex; align-items: center; gap: 10px; padding: 11px 12px;
+  border: 1px solid var(--vscode-panel-border, #2e2e2e); border-radius: 9px;
+  background: var(--vscode-editor-background, #1e1e1e);
+}
+.agd-usage-stat-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; flex: none; border-radius: 7px;
+  background: color-mix(in srgb, var(--agd-color-info, #3794ff) 16%, transparent);
+  color: var(--agd-color-info, #3794ff); font-size: 14px;
+}
+.agd-usage-stat-body { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.agd-usage-stat-label { font-size: 10.5px; color: var(--vscode-descriptionForeground, #8b8b8b); }
+.agd-usage-stat-value { font-size: 14px; font-weight: 600; color: var(--vscode-foreground, #cccccc); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.agd-usage-chart-wrap { margin-bottom: 16px; }
+.agd-usage-chart-wrap h4, .agd-usage-breakdown h4 {
+  margin: 0 0 8px; font-size: 12px; font-weight: 700; letter-spacing: 0.02em;
+  color: var(--vscode-foreground, #cccccc);
+}
+.agd-usage-chart { display: block; width: 100%; height: auto; }
+.agd-usage-bar { fill: var(--agd-color-info, #3794ff); }
+.agd-usage-grid { stroke: var(--vscode-panel-border, #2e2e2e); stroke-width: 1; }
+.agd-usage-axis { fill: var(--vscode-descriptionForeground, #8b8b8b); font-size: 10px; }
+
+.agd-usage-table-wrap { overflow-x: auto; }
+.agd-usage-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.agd-usage-table th, .agd-usage-table td {
+  padding: 7px 9px; text-align: left; border-bottom: 1px solid var(--vscode-panel-border, #2e2e2e);
+  white-space: nowrap;
+}
+.agd-usage-table thead th {
+  color: var(--vscode-descriptionForeground, #8b8b8b); font-weight: 600; font-size: 10.5px;
+  position: sticky; top: 0; background: var(--vscode-sideBar-background, #202020);
+}
+.agd-usage-table tbody tr:last-child td { border-bottom: none; }
+.agd-num { text-align: right; font-variant-numeric: tabular-nums; }
+
+.agd-usage-empty {
+  padding: 28px 16px; text-align: center;
+  color: var(--vscode-descriptionForeground, #8b8b8b); font-size: 12px;
+}
+.agd-usage-empty .agd-spinner { vertical-align: middle; }
+.agd-usage-error { color: var(--agd-color-error, #f85149); }
+
+@media (max-width: 680px) {
+  .agd-usage-head { flex-direction: column; }
+}

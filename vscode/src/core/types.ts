@@ -450,3 +450,43 @@ export interface JobLogInfo {
   status: string;
   steps: SopNodeLogStep[];
 }
+
+export interface UsageTotals {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
+  cost_usd: number;
+  steps: number;
+  turns: number;
+}
+
+export interface UsageSeriesPoint {
+  bucket: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
+  cost_usd: number;
+  steps: number;
+}
+
+export interface UsageBreakdownItem {
+  daemon_id: string | null;
+  agent: string;
+  model: string | null;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
+  cost_usd: number;
+  steps: number;
+}
+
+export interface UsageSummary {
+  from: string;
+  to: string;
+  totals: UsageTotals;
+  series: UsageSeriesPoint[];
+  breakdown: UsageBreakdownItem[];
+}

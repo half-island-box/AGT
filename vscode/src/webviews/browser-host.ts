@@ -513,6 +513,14 @@ export async function browserCall<T>(
       return { projects: await api.consoleProjects() } as T;
     case 'projects.open':
       return await api.openConsoleProject(String(p.projectId ?? '')) as T;
+    case 'projects.usage':
+      return await api.usageSummary({
+        agent: p.agent ? String(p.agent) : null,
+        daemonId: p.daemonId ? String(p.daemonId) : null,
+        from: String(p.from ?? ''),
+        to: String(p.to ?? ''),
+        bucket: (p.bucket as 'hour' | 'day' | 'month') || 'day',
+      }) as T;
     case 'openProjects':
       window.location.href = '/console/projects';
       return { ok: true } as T;

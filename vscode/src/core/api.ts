@@ -29,6 +29,7 @@ import type {
   SopValidation,
   TaskStatusInfo,
   TaskStreamEvent,
+  UsageSummary,
 } from './types';
 
 const DEFAULT_TIMEOUT_MS = 4000;
@@ -529,6 +530,24 @@ export class AgtApi {
     if (input.provider) params.set('provider', input.provider);
     if (input.templatePath) params.set('template_path', input.templatePath);
     return this.request<RunListInfo>(`/api/runs?${params}`);
+  }
+
+  /**
+   * Aggregate token/cost usage for the console dashboard: totals, a
+   * time series, and a daemon × agent × model breakdown.
+   */
+  async usageSummary(input: {
+    agent?: string | null;
+    daemonId?: string | null;
+    from: string;
+    to: string;
+    bucket?: 'hour' | 'day' | 'month';
+  }): Promise<UsageSummary> {
+    const params = new URLSearchParams({ from: input.from, to: input.to });
+    if (input.agent) params.set('agent', input.agent);
+    if (input.daemonId) params.set('daemon_id', input.daemonId);
+    if (input.bucket) params.set('bucket', input.bucket);
+    return this.request<UsageSummary>(`/api/usage/summary?${params}`, {}, 10_000);
   }
 
   async jobTree(jobId: string): Promise<{ root_job_id: string; goal: GoalRunInfo['meta'] | null; node: GoalJobTreeNode }> {

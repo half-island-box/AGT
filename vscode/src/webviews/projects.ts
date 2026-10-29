@@ -6,6 +6,7 @@ import type {
   ConsoleProjectInfo,
   ServerState,
   UiLanguage,
+  UsageSummary,
 } from '../core/types';
 import { bridge } from './bridge';
 
@@ -30,6 +31,33 @@ let boot: ProjectsBoot | null = null;
 let lang: UiLanguage = 'zh';
 let modal: ProjectModal | null = null;
 let openingProjectId: string | null = null;
+
+type UsageRange = 'today' | '7d' | '30d' | '90d' | 'all';
+
+interface DashboardState {
+  agent: string; // 'all' or a provider key
+  range: UsageRange;
+  loading: boolean;
+  error: string | null;
+  data: UsageSummary | null;
+}
+
+const AGENT_LABELS: Record<string, string> = {
+  claude: 'Claude Code',
+  codex: 'Codex',
+  'cursor-agent': 'Cursor',
+  copilot: 'Copilot',
+  qwen: 'Qwen',
+};
+const AGENT_KEYS = Object.keys(AGENT_LABELS);
+
+let dashboard: DashboardState = {
+  agent: 'all',
+  range: '30d',
+  loading: false,
+  error: null,
+  data: null,
+};
 
 function tr(key: MessageKey, vars?: Record<string, string | number>): string {
   return t(lang, key, vars);
@@ -107,6 +135,229 @@ function renderProjects(): string {
   return `<div class="agd-project-list">${projects.map(renderProject).join('')}</div>`;
 }
 
+function fmtNum(value: number): string {
+  return value.toLocaleString();
+}
+
+function fmtTokens(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
+  return String(value);
+}
+
+function fmtCost(value: number): string {
+  return `$${value.toFixed(4)}`;
+}
+
+function pad2(n: number): string {
+  return String(n).padStart(2, '0');
+}
+
+function fmtTs(d: Date): string {
+  return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())} `
+    + `${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}:${pad2(d.getUTCSeconds())}`;
+}
+
+function usageWindow(range: UsageRange): {
+  from: string;
+  to: string;
+  bucket: 'hour' | 'day' | 'month';
+} {
+  const to = new Date();
+  let from = new Date(to);
+  let bucket: 'hour' | 'day' | 'month' = 'day';
+  switch (range) {
+    case 'today':
+      from.setUTCHours(0, 0, 0, 0);
+      bucket = 'hour';
+      break;
+    case '7d':
+      from.setUTCDate(from.getUTCDate() - 7);
+      break;
+    case '30d':
+      from.setUTCDate(from.getUTCDate() - 30);
+      break;
+    case '90d':
+      from.setUTCDate(from.getUTCDate() - 90);
+      break;
+    case 'all':
+      from = new Date(0);
+      bucket = 'month';
+      break;
+  }
+  return { from: fmtTs(from), to: fmtTs(to), bucket };
+}
+
+function agentLabel(agent: string): string {
+  return AGENT_LABELS[agent] ?? agent;
+}
+
+function renderStatCard(label: string, value: string, icon: string): string {
+  return `
+    <div class="agd-usage-stat">
+      <div class="agd-usage-stat-icon">${icon}</div>
+      <div class="agd-usage-stat-body">
+        <span class="agd-usage-stat-label">${esc(label)}</span>
+        <strong class="agd-usage-stat-value">${esc(value)}</strong>
+      </div>
+    </div>`;
+}
+
+function renderUsageChart(series: UsageSummary['series']): string {
+  if (!series.length) return '';
+  const W = 640;
+  const H = 180;
+  const padX = 6;
+  const padTop = 10;
+  const padBottom = 22;
+  const innerW = W - padX * 2;
+  const innerH = H - padTop - padBottom;
+  const max = Math.max(1, ...series.map((p) => p.input_tokens));
+  const step = innerW / series.length;
+  const barW = Math.max(1.5, step * 0.6);
+  const bars = series.map((p, i) => {
+    const h = (p.input_tokens / max) * innerH;
+    const x = padX + i * step + (step - barW) / 2;
+    const y = padTop + innerH - h;
+    return `<rect class="agd-usage-bar" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${Math.max(h, 0.5).toFixed(1)}" rx="1.5"><title>${esc(p.bucket)} · ${fmtNum(p.input_tokens)} tokens</title></rect>`;
+  }).join('');
+  return `
+    <svg class="agd-usage-chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(tr('projects.usage.trend'))}">
+      <line class="agd-usage-grid" x1="${padX}" y1="${padTop}" x2="${W - padX}" y2="${padTop}"/>
+      <line class="agd-usage-grid" x1="${padX}" y1="${padTop + innerH / 2}" x2="${W - padX}" y2="${padTop + innerH / 2}"/>
+      <line class="agd-usage-grid" x1="${padX}" y1="${padTop + innerH}" x2="${W - padX}" y2="${padTop + innerH}"/>
+      <text class="agd-usage-axis" x="${padX}" y="${padTop - 3}">${fmtTokens(max)}</text>
+      <text class="agd-usage-axis" x="${padX}" y="${H - 7}">${esc(series[0].bucket)}</text>
+      <text class="agd-usage-axis" x="${W - padX}" y="${H - 7}" text-anchor="end">${esc(series[series.length - 1].bucket)}</text>
+      ${bars}
+    </svg>`;
+}
+
+function renderBreakdown(items: UsageSummary['breakdown']): string {
+  if (!items.length) return '';
+  const rows = items.map((item) => `
+    <tr>
+      <td class="agd-mono">${esc(item.daemon_id ?? tr('projects.usage.unknownDaemon'))}</td>
+      <td>${esc(agentLabel(item.agent))}</td>
+      <td class="agd-mono">${esc(item.model ?? '—')}</td>
+      <td class="agd-num">${fmtNum(item.input_tokens)}</td>
+      <td class="agd-num">${fmtNum(item.output_tokens)}</td>
+      <td class="agd-num">${fmtNum(item.cache_read_input_tokens)}</td>
+      <td class="agd-num">${fmtNum(item.cache_creation_input_tokens)}</td>
+      <td class="agd-num">${fmtCost(item.cost_usd)}</td>
+      <td class="agd-num">${fmtNum(item.steps)}</td>
+    </tr>`).join('');
+  return `
+    <div class="agd-usage-table-wrap">
+      <table class="agd-usage-table">
+        <thead>
+          <tr>
+            <th>${esc(tr('projects.usage.daemon'))}</th>
+            <th>${esc(tr('projects.usage.agent'))}</th>
+            <th>${esc(tr('projects.usage.model'))}</th>
+            <th class="agd-num">${esc(tr('projects.usage.input'))}</th>
+            <th class="agd-num">${esc(tr('projects.usage.output'))}</th>
+            <th class="agd-num">${esc(tr('projects.usage.cacheRead'))}</th>
+            <th class="agd-num">${esc(tr('projects.usage.cacheWrite'))}</th>
+            <th class="agd-num">${esc(tr('projects.usage.cost'))}</th>
+            <th class="agd-num">${esc(tr('projects.usage.steps'))}</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
+function renderDashboard(): string {
+  const agentOptions = [tr('projects.usage.agentAll'), ...AGENT_KEYS.map(agentLabel)]
+    .map((label, i) => {
+      const value = i === 0 ? 'all' : AGENT_KEYS[i - 1];
+      const selected = dashboard.agent === value ? ' selected' : '';
+      return `<option value="${esc(value)}"${selected}>${esc(label)}</option>`;
+    }).join('');
+
+  const ranges: Array<{ value: UsageRange; label: string }> = [
+    { value: 'today', label: tr('projects.usage.rangeToday') },
+    { value: '7d', label: tr('projects.usage.range7d') },
+    { value: '30d', label: tr('projects.usage.range30d') },
+    { value: '90d', label: tr('projects.usage.range90d') },
+    { value: 'all', label: tr('projects.usage.rangeAll') },
+  ];
+  const rangeOptions = ranges.map((r) => {
+    const selected = dashboard.range === r.value ? ' selected' : '';
+    return `<option value="${r.value}"${selected}>${esc(r.label)}</option>`;
+  }).join('');
+
+  let body: string;
+  if (dashboard.loading) {
+    body = `<div class="agd-usage-empty">${spinner()} ${esc(tr('projects.usage.loading'))}</div>`;
+  } else if (dashboard.error) {
+    body = `<div class="agd-usage-empty agd-usage-error">${esc(dashboard.error)}</div>`;
+  } else if (!dashboard.data || dashboard.data.totals.steps === 0) {
+    body = `<div class="agd-usage-empty">${esc(tr('projects.usage.empty'))}</div>`;
+  } else {
+    const totals = dashboard.data.totals;
+    const cards = [
+      renderStatCard(tr('projects.usage.input'), fmtNum(totals.input_tokens), '↓'),
+      renderStatCard(tr('projects.usage.output'), fmtNum(totals.output_tokens), '↑'),
+      renderStatCard(tr('projects.usage.cacheRead'), fmtNum(totals.cache_read_input_tokens), '↻'),
+      renderStatCard(tr('projects.usage.cacheWrite'), fmtNum(totals.cache_creation_input_tokens), '＋'),
+      renderStatCard(tr('projects.usage.cost'), fmtCost(totals.cost_usd), '$'),
+      renderStatCard(tr('projects.usage.steps'), fmtNum(totals.steps), '#'),
+    ].join('');
+    body = `
+      <div class="agd-usage-cards">${cards}</div>
+      <div class="agd-usage-chart-wrap">
+        <h4>${esc(tr('projects.usage.trend'))}</h4>
+        ${renderUsageChart(dashboard.data.series)}
+      </div>
+      <div class="agd-usage-breakdown">
+        <h4>${esc(tr('projects.usage.breakdown'))}</h4>
+        ${renderBreakdown(dashboard.data.breakdown)}
+      </div>`;
+  }
+
+  return `
+    <section class="agd-usage-dashboard">
+      <header class="agd-usage-head">
+        <h2>${esc(tr('projects.usage.title'))}</h2>
+        <div class="agd-usage-filters">
+          <label class="agd-usage-filter">
+            <span>${esc(tr('projects.usage.agent'))}</span>
+            <select id="agd-usage-agent" class="agd-input">${agentOptions}</select>
+          </label>
+          <label class="agd-usage-filter">
+            <span>${esc(tr('projects.usage.range'))}</span>
+            <select id="agd-usage-range" class="agd-input">${rangeOptions}</select>
+          </label>
+        </div>
+      </header>
+      ${body}
+    </section>`;
+}
+
+async function loadUsage(): Promise<void> {
+  if (bridge.isMock) return;
+  dashboard.loading = true;
+  dashboard.error = null;
+  render();
+  const { from, to, bucket } = usageWindow(dashboard.range);
+  try {
+    const data = await bridge.call<UsageSummary>('projects.usage', {
+      agent: dashboard.agent,
+      from,
+      to,
+      bucket,
+    });
+    dashboard.data = data;
+  } catch (err) {
+    dashboard.error = cleanError(err);
+  } finally {
+    dashboard.loading = false;
+    render();
+  }
+}
+
 function renderModal(): string {
   if (!modal) return '';
   const project = boot?.projects.find((item) => item.id === modal?.projectId);
@@ -178,6 +429,7 @@ function render(): void {
       <button type="button" class="agd-btn agd-btn-primary" id="agd-project-add">${tr('projects.add')}</button>
     </div>
     ${renderProjects()}
+    ${renderDashboard()}
     ${bridge.isMock ? `<p class="agd-mock-note">browser preview · mock data</p>` : ''}
   </div>
   ${renderModal()}`;
@@ -352,10 +604,19 @@ function wireEvents(): void {
   document.getElementById('agd-project-rename-name')?.addEventListener('input', (event) => { if (modal) modal.name = (event.target as HTMLInputElement).value; });
   document.getElementById('agd-project-rename-save')?.addEventListener('click', () => void renameProject());
   document.getElementById('agd-project-delete-confirm')?.addEventListener('click', () => void deleteProject());
+  document.getElementById('agd-usage-agent')?.addEventListener('change', () => {
+    dashboard.agent = (document.getElementById('agd-usage-agent') as HTMLSelectElement).value;
+    void loadUsage();
+  });
+  document.getElementById('agd-usage-range')?.addEventListener('change', () => {
+    dashboard.range = (document.getElementById('agd-usage-range') as HTMLSelectElement).value as UsageRange;
+    void loadUsage();
+  });
 }
 
 async function main(): Promise<void> {
   await refresh();
+  void loadUsage();
 }
 
 void main();
