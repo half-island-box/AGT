@@ -575,6 +575,12 @@ export async function browserCall<T>(
         url: String(p.url ?? '').trim(),
         capabilities: String(p.capabilities ?? '').trim() || null,
       }) as T;
+    case 'pairingRemoveDaemon':
+      return await api.pairingRemoveDaemon({
+        name: p.name ? String(p.name) : undefined,
+        url: p.url ? String(p.url) : undefined,
+        daemonId: p.daemonId ? String(p.daemonId) : undefined,
+      }) as T;
     case 'daemonConfigShow':
       return await api.daemonConfig() as T;
     case 'daemonConfigSet':

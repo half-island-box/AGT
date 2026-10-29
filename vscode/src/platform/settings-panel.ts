@@ -312,6 +312,15 @@ export class SettingsPanel {
           });
           break;
         }
+        case 'pairingRemoveDaemon': {
+          const p = msg.params ?? {};
+          result = await this.ctx.lifecycle.api.pairingRemoveDaemon({
+            name: p.name ? String(p.name) : undefined,
+            url: p.url ? String(p.url) : undefined,
+            daemonId: p.daemonId ? String(p.daemonId) : undefined,
+          });
+          break;
+        }
         case 'daemonConfigShow': {
           const daemonId = String(msg.params?.daemonId ?? '');
           if (!daemonId) {

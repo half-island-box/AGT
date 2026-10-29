@@ -152,6 +152,9 @@ body {
   background: color-mix(in srgb, var(--vscode-list-hoverBackground, #2a2d2e) 70%, transparent);
 }
 .agd-table-action { width: 44px; text-align: right; }
+.agd-table-actions { text-align: right; white-space: nowrap; }
+.agd-table-actions .agd-btn { height: 24px; padding: 0 9px; font-size: 11px; }
+.agd-table-actions .agd-btn + .agd-btn { margin-left: 6px; }
 .agd-identity-view {
   height: 24px;
   padding: 0 9px;

@@ -21,6 +21,7 @@ import type {
   JobStatusInfo,
   PairingAddDaemonInfo,
   PairingInviteInfo,
+  PairingRemoveInfo,
   PairingSecretInfo,
   PairingStateInfo,
   RuntimeInfo,
@@ -206,6 +207,27 @@ export class AgtApi {
         url: input.url,
         capabilities: input.capabilities ?? null,
       },
+      10_000,
+    );
+  }
+
+  /**
+   * Remove a registered target: deletes its ``~/.agt/daemons`` entry and
+   * stops the Server's live link to it. The in-memory catalog still lists
+   * it until the next Server restart (``restart_required``).
+   */
+  async pairingRemoveDaemon(input: {
+    name?: string;
+    url?: string;
+    daemonId?: string;
+  }): Promise<PairingRemoveInfo> {
+    const params = new URLSearchParams();
+    if (input.name) params.set('name', input.name);
+    if (input.url) params.set('url', input.url);
+    if (input.daemonId) params.set('daemon_id', input.daemonId);
+    return this.request<PairingRemoveInfo>(
+      `/api/pairing/daemons?${params}`,
+      { method: 'DELETE' },
       10_000,
     );
   }

@@ -7,6 +7,8 @@ import type {
   DaemonInfo,
   IdentityWithBindings,
   PairingAddDaemonInfo,
+  PairingDaemonInfo,
+  PairingRemoveInfo,
   PairingSecretInfo,
   PairingStateInfo,
   UiLanguage,
@@ -21,6 +23,49 @@ function esc(value: unknown): string {
     .replaceAll('"', '&quot;');
 }
 
+/*
+ * Reverse-dial endpoints are fixed: the Server always dials
+ * `ws://<host>:8422/daemon`, so the UI only asks for the host and composes
+ * the URL. Accepting a pasted full URL (or `host:port`) keeps the field
+ * forgiving without exposing the fixed parts as editable inputs.
+ */
+const DAEMON_WS_SCHEME = 'ws';
+const DAEMON_WS_PORT = 8422;
+
+/** The bare host from whatever the user typed or pasted. */
+function daemonHost(raw: string): string {
+  let value = raw.trim();
+  if (!value) return '';
+  value = value.replace(/^wss?:\/\//i, '');
+  value = value.replace(/\/.*$/, '');
+  const bracketed = value.match(/^(\[[^\]]+\])(?::\d+)?$/);
+  if (bracketed) return bracketed[1];
+  const hostPort = value.match(/^([^:/]+):\d+$/);
+  return hostPort ? hostPort[1] : value;
+}
+
+/** `ws://<host>:8422` — empty when no host was entered. */
+function daemonUrl(host: string): string {
+  const bare = daemonHost(host);
+  return bare ? `${DAEMON_WS_SCHEME}://${bare}:${DAEMON_WS_PORT}` : '';
+}
+
+function isValidDaemonHost(raw: string): boolean {
+  const host = daemonHost(raw);
+  return /^[A-Za-z0-9._-]+$/.test(host) || /^\[[0-9A-Fa-f:.]+\]$/.test(host);
+}
+
+/**
+ * Update the composed-URL hint under a host input without re-rendering (a
+ * re-render would drop focus and the caret mid-typing).
+ */
+function syncDaemonHostHint(inputId: string, raw: string): void {
+  const hint = document.getElementById(`${inputId}-hint`);
+  if (!hint) return;
+  const url = daemonUrl(raw);
+  hint.textContent = url ? tr('settings.daemonHostHint', { url }) : '';
+}
+
 let boot: BootInfo | undefined;
 let lang: UiLanguage = 'zh';
 let busyAction: string | null = null;
@@ -29,8 +74,8 @@ let daemonForm: {
   busy: boolean;
   error: string | null;
   result: { command: string; daemonsPath: string } | null;
-  draft: { name: string; url: string; capabilities: string };
-} = { open: false, busy: false, error: null, result: null, draft: { name: '', url: '', capabilities: '' } };
+  draft: { name: string; host: string; capabilities: string };
+} = { open: false, busy: false, error: null, result: null, draft: { name: '', host: '', capabilities: '' } };
 let copiedAt = 0;
 let pairingCopiedAt = 0;
 let pairingSecretCopiedAt = 0;
@@ -53,6 +98,10 @@ let pairing: {
   busy: boolean;
   error: string | null;
   daemonsPath: string;
+  targets: PairingDaemonInfo[];
+  confirmRemove: string | null;
+  removing: string | null;
+  removedNotice: { name: string; restartRequired: boolean } | null;
   result: {
     daemonId: string;
     added: string;
@@ -60,7 +109,7 @@ let pairing: {
     restartRequired: boolean;
     restarting: boolean;
   } | null;
-  draft: { name: string; url: string; capabilities: string };
+  draft: { name: string; host: string; capabilities: string };
 } = {
   loaded: false,
   loading: false,
@@ -72,8 +121,12 @@ let pairing: {
   busy: false,
   error: null,
   daemonsPath: '',
+  targets: [],
+  confirmRemove: null,
+  removing: null,
+  removedNotice: null,
   result: null,
-  draft: { name: '', url: '', capabilities: '' },
+  draft: { name: '', host: '', capabilities: '' },
 };
 
 interface DaemonConfigDraft {
@@ -191,7 +244,7 @@ function renderDaemonForm(): string {
   return `
     <div class="agd-daemon-form">
       <label class="agd-field">${tr('settings.daemonName')}<input id="agd-daemon-name" class="agd-input" value="${esc(daemonForm.draft.name)}" autocomplete="off"></label>
-      <label class="agd-field">${tr('settings.daemonUrl')}<input id="agd-daemon-url" class="agd-input agd-mono" placeholder="ws://192.168.1.24:8422" value="${esc(daemonForm.draft.url)}" autocomplete="off"></label>
+      <label class="agd-field">${tr('settings.daemonUrl')}<input id="agd-daemon-host" class="agd-input agd-mono" placeholder="1.2.3.4" value="${esc(daemonForm.draft.host)}" autocomplete="off"><span id="agd-daemon-host-hint" class="agd-daemon-config-meta">${daemonUrl(daemonForm.draft.host) ? tr('settings.daemonHostHint', { url: daemonUrl(daemonForm.draft.host) }) : ''}</span></label>
       <label class="agd-field">${tr('settings.daemonCaps')}<input id="agd-daemon-caps" class="agd-input" placeholder="${tr('settings.daemonCapsPh')}" value="${esc(daemonForm.draft.capabilities)}" autocomplete="off"></label>
       ${daemonForm.error ? `<p class="agd-form-err">${esc(daemonForm.error)}</p>` : ''}
       <div class="agd-actions">
@@ -231,6 +284,7 @@ async function loadPairing(): Promise<void> {
     pairing.secretConfigured = state.secret_configured;
     pairing.daemonsPath = state.daemons_path;
     pairing.secretSource = state.secret_source;
+    pairing.targets = state.daemons;
     if (state.secret_configured) {
       const secret = await bridge.call<PairingSecretInfo>('pairingSecret', { reveal: false });
       pairing.secretMasked = secret.masked;
@@ -286,7 +340,7 @@ async function copyPairingSecret(): Promise<void> {
 }
 
 async function submitPairingForm(): Promise<void> {
-  const { name, url, capabilities } = pairing.draft;
+  const { name, host, capabilities } = pairing.draft;
   if (!name.trim()) {
     pairing.error = tr('settings.addDaemonNeedName');
     render();
@@ -297,18 +351,19 @@ async function submitPairingForm(): Promise<void> {
     render();
     return;
   }
-  if (!/^wss?:\/\/\S+$/.test(url.trim())) {
+  if (!isValidDaemonHost(host)) {
     pairing.error = tr('settings.addDaemonBadUrl');
     render();
     return;
   }
+  const url = daemonUrl(host);
   pairing.busy = true;
   pairing.error = null;
   render();
   try {
     const res = await bridge.call<PairingAddDaemonInfo>('pairingAddDaemon', {
       name: name.trim(),
-      url: url.trim(),
+      url,
       capabilities,
     });
     pairing.result = {
@@ -319,7 +374,7 @@ async function submitPairingForm(): Promise<void> {
       restarting: false,
     };
     pairing.daemonsPath = res.daemons_path;
-    pairing.draft = { name: '', url: '', capabilities: '' };
+    pairing.draft = { name: '', host: '', capabilities: '' };
     void call('refresh');
   } catch (err) {
     pairing.error = pairingErrorText(err);
@@ -329,16 +384,43 @@ async function submitPairingForm(): Promise<void> {
   }
 }
 
+async function removePairingTarget(url: string): Promise<void> {
+  pairing.removing = url;
+  pairing.error = null;
+  render();
+  try {
+    const res = await bridge.call<PairingRemoveInfo>('pairingRemoveDaemon', { url });
+    pairing.removedNotice = { name: res.name, restartRequired: res.restart_required };
+    pairing.targets = pairing.targets.filter((target) => target.url !== res.url);
+    pairing.confirmRemove = null;
+    pairing.loaded = false;
+    void loadPairing();
+    void call('refresh');
+  } catch (err) {
+    pairing.error = pairingErrorText(err);
+  } finally {
+    pairing.removing = null;
+    render();
+  }
+}
+
+async function restartServer(): Promise<void> {
+  await call('stopServer');
+  await call('startServer');
+  pairing.result = null;
+  pairing.removedNotice = null;
+  pairing.loaded = false;
+  void loadPairing();
+  render();
+}
+
 async function restartServerForPairing(): Promise<void> {
   if (!pairing.result) {
     return;
   }
   pairing.result = { ...pairing.result, restarting: true };
   render();
-  await call('stopServer');
-  await call('startServer');
-  pairing.result = null;
-  render();
+  await restartServer();
 }
 
 function renderPairingCard(): string {
@@ -373,12 +455,41 @@ function renderPairingCard(): string {
     <div class="agd-daemon-form">
       <p class="agd-note">${tr('settings.pairingAddTitle')}</p>
       <label class="agd-field">${tr('settings.daemonName')}<input id="agd-pairing-name" class="agd-input" value="${esc(pairing.draft.name)}" autocomplete="off"></label>
-      <label class="agd-field">${tr('settings.daemonUrl')}<input id="agd-pairing-url" class="agd-input agd-mono" placeholder="ws://192.168.1.24:8422" value="${esc(pairing.draft.url)}" autocomplete="off"></label>
+      <label class="agd-field">${tr('settings.daemonUrl')}<input id="agd-pairing-host" class="agd-input agd-mono" placeholder="1.2.3.4" value="${esc(pairing.draft.host)}" autocomplete="off"><span id="agd-pairing-host-hint" class="agd-daemon-config-meta">${daemonUrl(pairing.draft.host) ? tr('settings.daemonHostHint', { url: daemonUrl(pairing.draft.host) }) : ''}</span></label>
       <label class="agd-field">${tr('settings.daemonCaps')}<input id="agd-pairing-caps" class="agd-input" placeholder="${tr('settings.daemonCapsPh')}" value="${esc(pairing.draft.capabilities)}" autocomplete="off"></label>
       <div class="agd-actions">
         <button type="button" id="agd-pairing-submit" class="agd-btn agd-btn-primary" ${pairing.busy ? 'disabled' : ''}>${pairing.busy ? spinner() : ''}${tr('settings.pairingAddSubmit')}</button>
       </div>
     </div>`;
+
+  const targetRows = pairing.targets
+    .map(
+      (target) => `
+      <tr>
+        <td>${esc(target.name)}</td>
+        <td><span class="agd-mono">${esc(target.url)}</span></td>
+        <td><span class="agd-pill ${target.connected ? 'agd-pill-ok' : 'agd-pill-err'}">${target.connected ? tr('settings.pairingConnected') : tr('settings.disconnected')}</span></td>
+        <td class="agd-table-actions">${renderPairingTargetActions(target)}</td>
+      </tr>`,
+    )
+    .join('');
+  const targets = pairing.targets.length
+    ? `<table class="agd-table">
+        <thead><tr><th>${tr('settings.daemonName')}</th><th>${tr('settings.daemonUrl')}</th><th>${tr('settings.status')}</th><th></th></tr></thead>
+        <tbody>${targetRows}</tbody>
+      </table>`
+    : `<p class="agd-note agd-dim">${tr('settings.pairingNoTargets')}</p>`;
+
+  const removedNotice = pairing.removedNotice
+    ? `<div class="agd-actions">
+        <span class="agd-form-ok">${tr('settings.pairingRemoved', { name: esc(pairing.removedNotice.name) })}</span>
+        <span class="agd-flex"></span>
+        ${pairing.removedNotice.restartRequired && lifecycleControl
+          ? `<button type="button" id="agd-pairing-removed-restart" class="agd-btn agd-btn-primary">${tr('settings.pairingRestart')}</button>`
+          : ''}
+        <button type="button" id="agd-pairing-removed-done" class="agd-btn">${tr('settings.pairingDone')}</button>
+      </div>`
+    : '';
 
   return `
     <section class="agd-card">
@@ -395,9 +506,22 @@ function renderPairingCard(): string {
         <button type="button" id="agd-pairing-copy-secret" class="agd-btn">${secretCopied ? tr('settings.copied') : tr('settings.copy')}</button>
       </label>
       <p class="agd-note agd-dim">${tr('settings.pairingSecretHint')}</p>
+      <p class="agd-note">${tr('settings.pairingTargets')}</p>
+      ${targets}
+      ${removedNotice}
       ${pairing.error ? `<p class="agd-form-err">${esc(pairing.error)}</p>` : ''}
       ${form}
     </section>`;
+}
+
+function renderPairingTargetActions(target: PairingDaemonInfo): string {
+  const url = esc(target.url);
+  if (pairing.confirmRemove === target.url) {
+    return `
+      <button type="button" class="agd-btn agd-btn-danger" data-pairing-remove="${url}" ${pairing.removing ? 'disabled' : ''}>${pairing.removing === target.url ? spinner() : ''}${tr('settings.pairingRemoveConfirm')}</button>
+      <button type="button" class="agd-btn" data-pairing-remove-cancel="${url}" ${pairing.removing ? 'disabled' : ''}>${tr('settings.cancel')}</button>`;
+  }
+  return `<button type="button" class="agd-btn agd-btn-danger" data-pairing-remove-arm="${url}">${tr('settings.pairingRemove')}</button>`;
 }
 
 function renderDaemonConfigField(
@@ -1402,15 +1526,17 @@ function wireEvents(): void {
   });
   for (const [id, key] of [
     ['agd-daemon-name', 'name'],
-    ['agd-daemon-url', 'url'],
+    ['agd-daemon-host', 'host'],
     ['agd-daemon-caps', 'capabilities'],
   ] as const) {
     document.getElementById(id)?.addEventListener('input', (e) => {
-      daemonForm.draft[key] = (e.target as HTMLInputElement).value;
+      const value = (e.target as HTMLInputElement).value;
+      daemonForm.draft[key] = value;
+      if (key === 'host') syncDaemonHostHint(id, value);
     });
   }
   document.getElementById('agd-daemon-submit')?.addEventListener('click', async () => {
-    const { name, url, capabilities } = daemonForm.draft;
+    const { name, host, capabilities } = daemonForm.draft;
     if (!name.trim()) {
       daemonForm.error = tr('settings.addDaemonNeedName');
       render();
@@ -1421,7 +1547,7 @@ function wireEvents(): void {
       render();
       return;
     }
-    if (!/^wss?:\/\/\S+$/.test(url.trim())) {
+    if (!isValidDaemonHost(host)) {
       daemonForm.error = tr('settings.addDaemonBadUrl');
       render();
       return;
@@ -1432,7 +1558,7 @@ function wireEvents(): void {
     try {
       daemonForm.result = await bridge.call<{ command: string; daemonsPath: string }>('addDaemon', {
         name: name.trim(),
-        url: url.trim(),
+        url: daemonUrl(host),
         capabilities,
       });
     } catch (err) {
@@ -1470,15 +1596,44 @@ function wireEvents(): void {
   });
   for (const [id, key] of [
     ['agd-pairing-name', 'name'],
-    ['agd-pairing-url', 'url'],
+    ['agd-pairing-host', 'host'],
     ['agd-pairing-caps', 'capabilities'],
   ] as const) {
     document.getElementById(id)?.addEventListener('input', (e) => {
-      pairing.draft[key] = (e.target as HTMLInputElement).value;
+      const value = (e.target as HTMLInputElement).value;
+      pairing.draft[key] = value;
+      if (key === 'host') syncDaemonHostHint(id, value);
     });
   }
   document.getElementById('agd-pairing-submit')?.addEventListener('click', () => {
     void submitPairingForm();
+  });
+  document.querySelectorAll<HTMLElement>('[data-pairing-remove-arm]').forEach((button) => {
+    button.addEventListener('click', () => {
+      pairing.confirmRemove = button.dataset.pairingRemoveArm ?? null;
+      pairing.error = null;
+      render();
+    });
+  });
+  document.querySelectorAll<HTMLElement>('[data-pairing-remove-cancel]').forEach((button) => {
+    button.addEventListener('click', () => {
+      pairing.confirmRemove = null;
+      render();
+    });
+  });
+  document.querySelectorAll<HTMLElement>('[data-pairing-remove]').forEach((button) => {
+    button.addEventListener('click', () => {
+      if (pairing.removing) return;
+      void removePairingTarget(button.dataset.pairingRemove ?? '');
+    });
+  });
+  document.getElementById('agd-pairing-removed-restart')?.addEventListener('click', () => {
+    void restartServer();
+  });
+  document.getElementById('agd-pairing-removed-done')?.addEventListener('click', () => {
+    pairing.removedNotice = null;
+    pairing.error = null;
+    render();
   });
   document.getElementById('agd-pairing-copy-cmd')?.addEventListener('click', async () => {
     const command = pairing.result?.command;

@@ -54,6 +54,16 @@ export interface PairingAddDaemonInfo extends PairingInviteInfo {
   restart_required: boolean;
 }
 
+export interface PairingRemoveInfo {
+  removed: boolean;
+  name: string;
+  url: string;
+  daemon_id: string;
+  daemons_path: string;
+  disconnected: boolean;
+  restart_required: boolean;
+}
+
 export type DaemonConfigValue = number | string | string[];
 
 export interface DaemonConfigSetting {
