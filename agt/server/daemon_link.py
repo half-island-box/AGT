@@ -76,10 +76,37 @@ class DaemonLink:
 
         self._link: WsRpcLink | None = None
         self._active = False  # True once a connection has been accepted at least once
+        self._stop_requested = False  # set by stop(); the run loop exits
 
     @property
     def connected(self) -> bool:
         return self._link is not None and not self._link.closed
+
+    async def stop(self) -> None:
+        """Permanently stop this link: no reconnects, current socket closed.
+
+        Used when a target is removed from ``~/.agt/daemons`` at runtime.
+        Idempotent; safe to call from the pairing route.
+
+        Closes the underlying socket rather than calling
+        :meth:`WsRpcLink.close`: that method cancels the read task, and the
+        cancellation would propagate into ``_connect_and_serve``'s await of
+        the same task (``CancelledError`` is not an ``Exception``). Letting
+        the read loop end on its own lets the run loop observe
+        ``_stop_requested`` and exit cleanly.
+        """
+        self._stop_requested = True
+        link = self._link
+        ws = link.ws if link is not None else None
+        if ws is not None:
+            try:
+                await ws.close()
+            except Exception:  # pragma: no cover — close is best effort
+                log.debug(
+                    "DaemonLink %s close during stop failed",
+                    self.daemon_id,
+                    exc_info=True,
+                )
 
     @property
     def supports_rpc_v1(self) -> bool:
@@ -233,7 +260,7 @@ class DaemonLink:
         """
         backoff = _BACKOFF_INITIAL
         ever_connected = False
-        while not shutdown.is_set():
+        while not shutdown.is_set() and not self._stop_requested:
             try:
                 await self._connect_and_serve()
                 backoff = _BACKOFF_INITIAL
@@ -247,7 +274,7 @@ class DaemonLink:
                         "DaemonLink %s reconnected (%s)", self.daemon_id, self.url,
                     )
             except Exception as exc:
-                if shutdown.is_set():
+                if shutdown.is_set() or self._stop_requested:
                     break
                 if not ever_connected:
                     # Pre-first-connect: state is "trying to reach"; quiet.
@@ -262,7 +289,7 @@ class DaemonLink:
                         self.daemon_id, exc, backoff,
                     )
                     ever_connected = False  # next connect is a "reconnect"
-            if shutdown.is_set():
+            if shutdown.is_set() or self._stop_requested:
                 break
             # Sleep with cancellation support.
             try:

@@ -3183,6 +3183,46 @@ def daemon_invite(
     )
 
 
+@daemon.command("remove")
+@click.argument("target")
+def daemon_remove(target: str) -> None:
+    """Remove a reverse-dial target from this machine's ~/.agt/daemons.
+
+    TARGET is the entry name (e.g. ``cloud-01``) or its ``ws://`` URL.
+    The Server reads the file once at startup, so restart it to apply —
+    the matching DaemonLink is also stopped immediately by the API, but
+    the CLI cannot reach a running Server's link pool.
+    """
+    from ..daemons_file import (
+        DaemonsFileError,
+        daemons_file_path,
+        read_daemons_entries,
+        remove_daemons_entry,
+    )
+
+    entries = read_daemons_entries()
+    match = next((e for e in entries if e.name == target), None)
+    if match is None:
+        match = next((e for e in entries if e.url == target), None)
+    if match is None:
+        click.echo(
+            f"Error: no entry matching '{target}' in {daemons_file_path()}",
+            err=True,
+        )
+        sys.exit(1)
+
+    try:
+        removed = remove_daemons_entry(name=match.name)
+    except DaemonsFileError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    click.echo(f"Removed {removed.name} {removed.url} from {daemons_file_path()}")
+    click.echo(
+        "Restart the server (`agt server start`) for the change to take effect."
+    )
+
+
 @daemon.command("init")
 @click.argument("invite_code", required=False, metavar="[INVITE_CODE]")
 @click.option(

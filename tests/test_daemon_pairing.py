@@ -21,6 +21,7 @@ from agt.daemons_file import (
     format_daemons_entry,
     parse_daemons_line,
     read_daemons_entries,
+    remove_daemons_entry,
     upsert_daemons_entry,
 )
 from agt.invite import InviteError, decode_invite, encode_invite
@@ -177,6 +178,55 @@ class TestUpsertDaemonsEntry:
         )
         entries = read_daemons_entries()
         assert [e.url for e in entries] == ["ws://5.6.7.8:8422"]
+
+
+class TestRemoveDaemonsEntry:
+    def _write(self, home: Path, text: str) -> Path:
+        path = home / ".agt" / "daemons"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_remove_by_name_preserves_other_lines(self, home: Path) -> None:
+        path = self._write(
+            home,
+            f"# keep me\ncloud-01 {URL}\ncloud-02 ws://5.6.7.8:8422\n",
+        )
+        removed = remove_daemons_entry(name="cloud-01")
+        assert removed.name == "cloud-01"
+        assert path.read_text(encoding="utf-8") == (
+            "# keep me\ncloud-02 ws://5.6.7.8:8422\n"
+        )
+
+    def test_remove_by_url(self, home: Path) -> None:
+        did = str(uuid.uuid4())
+        path = self._write(home, f"cloud-01 {URL} id={did}\n")
+        removed = remove_daemons_entry(url=URL)
+        assert removed.daemon_id == did
+        assert path.read_text(encoding="utf-8") == ""
+
+    def test_remove_by_daemon_id(self, home: Path) -> None:
+        did = str(uuid.uuid4())
+        self._write(home, f"cloud-01 {URL} id={did}\n")
+        assert remove_daemons_entry(daemon_id=did).name == "cloud-01"
+        assert read_daemons_entries() == []
+
+    def test_requires_selector(self, home: Path) -> None:
+        path = self._write(home, f"cloud-01 {URL}\n")
+        with pytest.raises(DaemonsFileError) as exc:
+            remove_daemons_entry()
+        assert exc.value.code == "bad-selector"
+        assert path.read_text(encoding="utf-8") == f"cloud-01 {URL}\n"
+
+    def test_unknown_target(self, home: Path) -> None:
+        self._write(home, f"cloud-01 {URL}\n")
+        with pytest.raises(DaemonsFileError) as exc:
+            remove_daemons_entry(name="nope")
+        assert exc.value.code == "not-found"
+
+    def test_missing_file(self, home: Path) -> None:
+        with pytest.raises(DaemonsFileError) as exc:
+            remove_daemons_entry(name="cloud-01")
+        assert exc.value.code == "not-found"
 
 
 # ── identity precedence ────────────────────────────────────────────
@@ -347,6 +397,38 @@ class TestDaemonInitCli:
         assert cfg.ws_listen_port == 8422
 
 
+class TestDaemonRemoveCli:
+    def _invoke(self, args):
+        from agt.cli.main import cli
+
+        return CliRunner().invoke(cli, ["daemon", "remove", *args])
+
+    def test_remove_by_name(self, home: Path) -> None:
+        path = home / ".agt" / "daemons"
+        path.write_text(
+            f"cloud-01 {URL}\ncloud-02 ws://5.6.7.8:8422\n", encoding="utf-8"
+        )
+        result = self._invoke(["cloud-01"])
+        assert result.exit_code == 0, result.output
+        assert path.read_text(encoding="utf-8") == "cloud-02 ws://5.6.7.8:8422\n"
+        assert "Removed cloud-01" in result.output
+
+    def test_remove_by_url(self, home: Path) -> None:
+        path = home / ".agt" / "daemons"
+        path.write_text(f"cloud-01 {URL}\n", encoding="utf-8")
+        result = self._invoke([URL])
+        assert result.exit_code == 0, result.output
+        assert read_daemons_entries() == []
+
+    def test_unknown_target_exits_1(self, home: Path) -> None:
+        path = home / ".agt" / "daemons"
+        path.write_text(f"cloud-01 {URL}\n", encoding="utf-8")
+        result = self._invoke(["nope"])
+        assert result.exit_code == 1
+        assert "no entry matching" in result.output
+        assert path.read_text(encoding="utf-8") == f"cloud-01 {URL}\n"
+
+
 # ── pairing API ────────────────────────────────────────────────────
 
 
@@ -464,3 +546,77 @@ class TestPairingRoutes:
             assert body["secret_configured"] is True
         finally:
             asyncio.run(engine.dispose())
+
+    def test_remove_entry_stops_live_link(self, tmp_path) -> None:
+        did = str(uuid.uuid4())
+        client, engine, daemons_path = _build_client(
+            tmp_path,
+            daemons_text=(
+                f"cloud-01 {URL} id={did}\ncloud-02 ws://5.6.7.8:8422\n"
+            ),
+        )
+
+        class _FakeLink:
+            def __init__(self) -> None:
+                self.stopped = False
+
+            async def stop(self) -> None:
+                self.stopped = True
+
+        link = _FakeLink()
+        client.app.state.daemon_links = {did: link}
+        try:
+            r = client.delete(
+                "/api/pairing/daemons", params={"name": "cloud-01"}
+            )
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body["removed"] is True
+            assert body["daemon_id"] == did
+            assert body["disconnected"] is True
+            assert body["restart_required"] is True
+            assert link.stopped is True
+            assert did not in client.app.state.daemon_links
+            assert daemons_path.read_text(encoding="utf-8") == (
+                "cloud-02 ws://5.6.7.8:8422\n"
+            )
+        finally:
+            asyncio.run(engine.dispose())
+
+    def test_remove_unknown_entry_is_404(self, tmp_path) -> None:
+        client, engine, daemons_path = _build_client(
+            tmp_path, daemons_text=f"cloud-01 {URL}\n"
+        )
+        try:
+            r = client.delete(
+                "/api/pairing/daemons", params={"name": "nope"}
+            )
+            assert r.status_code == 404
+            assert daemons_path.read_text(encoding="utf-8") == f"cloud-01 {URL}\n"
+        finally:
+            asyncio.run(engine.dispose())
+
+    def test_remove_without_selector_is_400(self, tmp_path) -> None:
+        client, engine, _ = _build_client(
+            tmp_path, daemons_text=f"cloud-01 {URL}\n"
+        )
+        try:
+            assert client.delete("/api/pairing/daemons").status_code == 400
+        finally:
+            asyncio.run(engine.dispose())
+
+    def test_remote_peer_cannot_remove(self, tmp_path) -> None:
+        client, engine, daemons_path = _build_client(
+            tmp_path,
+            daemons_text=f"cloud-01 {URL}\n",
+            peer=("10.0.0.5", 51234),
+        )
+        try:
+            r = client.delete(
+                "/api/pairing/daemons", params={"name": "cloud-01"}
+            )
+            assert r.status_code == 403
+            assert daemons_path.read_text(encoding="utf-8") == f"cloud-01 {URL}\n"
+        finally:
+            asyncio.run(engine.dispose())
+
