@@ -14,6 +14,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..daemons_file import (
+    DaemonEntry,
+    read_daemons_entries,
+    validate_url,
+)
 from ..ids import AGT_DAEMON_NAMESPACE, daemon_id_from_url
 from ..net import host_of_url as _host_of_url, is_local_host as _is_local_host
 from ..server_secret import load_server_secret
@@ -23,27 +28,13 @@ from ..server_secret import load_server_secret
 _ = (AGT_DAEMON_NAMESPACE, daemon_id_from_url)
 
 
-def _read_daemons_file() -> list[tuple[str, str]]:
-    """Parse ``~/.agt/daemons`` — one ``name url`` per line.
+def _read_daemons_file() -> list[DaemonEntry]:
+    """Return every well-formed entry of ``~/.agt/daemons``.
 
-    Mirrors the Server's ``_parse_daemons_file`` shape; here we only need
-    (name, url) pairs. Missing file / malformed lines are skipped.
+    The line format itself lives in :mod:`agt.daemons_file` so the daemon
+    and the Server can never drift apart on it.
     """
-    path = Path.home() / ".agt" / "daemons"
-    if not path.exists():
-        return []
-    out: list[tuple[str, str]] = []
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        parts = line.split(None, 1)
-        if len(parts) != 2:
-            continue
-        name, url = parts[0].strip(), parts[1].strip()
-        if name and url:
-            out.append((name, url))
-    return out
+    return read_daemons_entries()
 
 
 def _port_of_url(url: str) -> str | None:
@@ -58,12 +49,52 @@ def _port_of_url(url: str) -> str | None:
     return None
 
 
-def _find_self_daemon(ws_listen_port: int) -> tuple[str, str] | None:
-    for name, url in _read_daemons_file():
-        if _port_of_url(url) == str(ws_listen_port) and _is_local_host(
-            _host_of_url(url)
+def _self_daemon_entry(ws_listen_port: int) -> DaemonEntry | None:
+    """Return this machine's entry from ``~/.agt/daemons``, if any.
+
+    Rules (always require BOTH a port match and a local host):
+    - any entry whose URL port equals ``ws_listen_port`` AND whose host
+      is this machine → that entry
+    - otherwise → None
+
+    A single-entry file is NOT assumed to be this machine — that's the
+    foot-gun that made a host with only a cloud registration (in
+    ``~/.agt/daemons``) appear to be the cloud machine itself, with
+    uuid5(NS, cloud_url) as its own daemon_id. The dual check also
+    disambiguates a cloud entry and the auto-registered local entry
+    when both use port 8422: ``agt daemon start`` appends
+    ``local ws://0.0.0.0:<port>`` at startup, and only that entry has
+    a local host.
+
+    Since daemon identity can now be persisted explicitly (see
+    :func:`_load_daemon_id`), this heuristic is only a fallback for
+    installs that have not been through ``agt daemon init``.
+    """
+    for entry in _read_daemons_file():
+        if _port_of_url(entry.url) == str(ws_listen_port) and _is_local_host(
+            _host_of_url(entry.url)
         ):
-            return (name, url)
+            return entry
+    return None
+
+
+def _find_self_daemon(ws_listen_port: int) -> tuple[str, str] | None:
+    """Backward-compatible ``(name, url)`` view of :func:`_self_daemon_entry`."""
+    entry = _self_daemon_entry(ws_listen_port)
+    return (entry.name, entry.url) if entry is not None else None
+
+
+def _entry_for_url(url: str | None) -> DaemonEntry | None:
+    """The file entry that names ``url`` exactly, if any.
+
+    Unlike :func:`_self_daemon_entry` this makes no assumption about the
+    host being local: a paired daemon advertises its public address.
+    """
+    if not url:
+        return None
+    for entry in _read_daemons_file():
+        if entry.url == url:
+            return entry
     return None
 
 
@@ -88,11 +119,19 @@ class DaemonConfigError(ValueError):
 
 _CURRENT_FILE_SCHEMA_VERSION = 1
 
-_MANAGED_KEYS: dict[str, str] = {
+_MANAGED_KEYS: dict[str, str | None] = {
     "max_concurrent": "AGT_MAX_CONCURRENT",
     "agent_timeout": "AGT_AGENT_TIMEOUT",
     "work_dir": "AGT_WORK_DIR",
     "agent_cwd_allowlist": "AGT_AGENT_CWD_ALLOWLIST",
+    # Reverse-dial pairing settings. Persisting these is what lets
+    # ``agt daemon init`` leave a machine configured across restarts
+    # instead of relying on exports in the operator's shell.
+    "listen_mode": "AGT_LISTEN_MODE",
+    "ws_port": "AGT_DAEMON_WS_PORT",
+    "daemon_id": "AGT_DAEMON_ID",
+    "daemon_url": None,  # no env equivalent; file-only
+    "server_url": "AGT_SERVER_URL",
 }
 
 # Daemon内的配置文件，包含了daemon的运行时配置，支持从环境变量和持久化JSON文件加载
@@ -106,6 +145,11 @@ class ManagedDaemonConfig:
     agent_timeout: int | None = None
     work_dir: Path | None = None
     agent_cwd_allowlist: list[Path] | None = None
+    listen_mode: bool | None = None
+    ws_port: int | None = None
+    daemon_id: str | None = None
+    daemon_url: str | None = None
+    server_url: str | None = None
 
 
 @dataclass
@@ -195,6 +239,44 @@ def _validate_managed_config(data: dict[str, Any]) -> ManagedDaemonConfig:
                 paths.append(p)
         cfg.agent_cwd_allowlist = paths
 
+    if "listen_mode" in data:
+        v = data["listen_mode"]
+        if not isinstance(v, bool):
+            raise DaemonConfigError("listen_mode must be a boolean")
+        cfg.listen_mode = v
+
+    if "ws_port" in data:
+        v = data["ws_port"]
+        if not isinstance(v, int) or isinstance(v, bool) or not (1 <= v <= 65535):
+            raise DaemonConfigError("ws_port must be an integer in 1..65535")
+        cfg.ws_port = v
+
+    if "daemon_id" in data:
+        v = data["daemon_id"]
+        if not isinstance(v, str) or not v.strip():
+            raise DaemonConfigError("daemon_id must be a non-empty string")
+        if any(ch.isspace() for ch in v):
+            raise DaemonConfigError("daemon_id must not contain whitespace")
+        cfg.daemon_id = v.strip()
+
+    if "daemon_url" in data:
+        v = data["daemon_url"]
+        if not isinstance(v, str):
+            raise DaemonConfigError("daemon_url must be a string")
+        try:
+            validate_url(v)
+        except ValueError as exc:
+            raise DaemonConfigError(str(exc)) from exc
+        cfg.daemon_url = v
+
+    if "server_url" in data:
+        v = data["server_url"]
+        if not isinstance(v, str) or not v.startswith(("http://", "https://")):
+            raise DaemonConfigError(
+                "server_url must be an http:// or https:// URL"
+            )
+        cfg.server_url = v
+
     return cfg
 
 
@@ -230,6 +312,17 @@ def _coerce_int_env(name: str, raw: str) -> int:
         raise DaemonConfigError(
             f"environment variable {name} must be an integer, got {raw!r}"
         ) from exc
+
+
+def _coerce_bool_env(name: str, raw: str) -> bool:
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off", ""}:
+        return False
+    raise DaemonConfigError(
+        f"environment variable {name} must be a boolean, got {raw!r}"
+    )
 
 
 def resolve_daemon_settings(
@@ -337,6 +430,112 @@ def resolve_daemon_settings(
         env_name=env_name,
     )
 
+    # listen_mode
+    env_name = _MANAGED_KEYS["listen_mode"]
+    env_raw = env.get(env_name) if env_name else None
+    file_val = file_cfg.listen_mode if file_cfg else None
+    default_val = defaults.listen_mode
+    if env_raw is not None and env_raw != "":
+        value = _coerce_bool_env(env_name, env_raw)
+        source = "env"
+    elif file_val is not None:
+        value = file_val
+        source = "file"
+    else:
+        value = default_val
+        source = "default"
+    settings["listen_mode"] = ResolvedSetting(
+        value=value,
+        source=source,
+        file_value=file_val,
+        default_value=default_val,
+        env_name=env_name,
+    )
+
+    # ws_port
+    env_name = _MANAGED_KEYS["ws_port"]
+    env_raw = env.get(env_name) if env_name else None
+    file_val = file_cfg.ws_port if file_cfg else None
+    default_val = defaults.ws_listen_port
+    if env_raw is not None and env_raw != "":
+        value = _coerce_int_env(env_name, env_raw)
+        source = "env"
+    elif file_val is not None:
+        value = file_val
+        source = "file"
+    else:
+        value = default_val
+        source = "default"
+    settings["ws_port"] = ResolvedSetting(
+        value=value,
+        source=source,
+        file_value=file_val,
+        default_value=default_val,
+        env_name=env_name,
+    )
+
+    # daemon_id (explicit identity override; None means "derive")
+    env_name = _MANAGED_KEYS["daemon_id"]
+    env_raw = env.get(env_name) if env_name else None
+    file_val = file_cfg.daemon_id if file_cfg else None
+    default_val = None
+    if env_raw is not None and env_raw.strip():
+        value = env_raw.strip()
+        source = "env"
+    elif file_val is not None:
+        value = file_val
+        source = "file"
+    else:
+        value = default_val
+        source = "default"
+    settings["daemon_id"] = ResolvedSetting(
+        value=value,
+        source=source,
+        file_value=file_val,
+        default_value=default_val,
+        env_name=env_name,
+    )
+
+    # daemon_url (file-only; the URL this daemon advertises)
+    env_name = _MANAGED_KEYS["daemon_url"]
+    file_val = file_cfg.daemon_url if file_cfg else None
+    default_val = ""
+    if file_val is not None:
+        value = file_val
+        source = "file"
+    else:
+        value = default_val
+        source = "default"
+    settings["daemon_url"] = ResolvedSetting(
+        value=value,
+        source=source,
+        file_value=file_val,
+        default_value=default_val,
+        env_name=env_name,
+    )
+
+    # server_url (Server base URL; env wins, file is the persisted form)
+    env_name = _MANAGED_KEYS["server_url"]
+    env_raw = env.get(env_name) if env_name else None
+    file_val = file_cfg.server_url if file_cfg else None
+    default_val = ""
+    if env_raw is not None and env_raw.strip():
+        value = env_raw.strip()
+        source = "env"
+    elif file_val is not None:
+        value = file_val
+        source = "file"
+    else:
+        value = default_val
+        source = "default"
+    settings["server_url"] = ResolvedSetting(
+        value=value,
+        source=source,
+        file_value=file_val,
+        default_value=default_val,
+        env_name=env_name,
+    )
+
     return settings
 
 
@@ -351,6 +550,16 @@ def _managed_config_to_dict(cfg: ManagedDaemonConfig) -> dict[str, Any]:
         data["work_dir"] = str(cfg.work_dir)
     if cfg.agent_cwd_allowlist is not None:
         data["agent_cwd_allowlist"] = [str(p) for p in cfg.agent_cwd_allowlist]
+    if cfg.listen_mode is not None:
+        data["listen_mode"] = cfg.listen_mode
+    if cfg.ws_port is not None:
+        data["ws_port"] = cfg.ws_port
+    if cfg.daemon_id is not None:
+        data["daemon_id"] = cfg.daemon_id
+    if cfg.daemon_url is not None:
+        data["daemon_url"] = cfg.daemon_url
+    if cfg.server_url is not None:
+        data["server_url"] = cfg.server_url
     return data
 
 
@@ -438,6 +647,39 @@ def update_daemon_config_file(
                     seen.add(key_path)
                     out.append(key_path)
             data[key] = out
+        elif key == "listen_mode":
+            if not isinstance(value, bool):
+                raise DaemonConfigError("listen_mode must be a boolean")
+            data[key] = value
+        elif key == "ws_port":
+            if (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or not (1 <= value <= 65535)
+            ):
+                raise DaemonConfigError("ws_port must be an integer in 1..65535")
+            data[key] = value
+        elif key == "daemon_id":
+            text = str(value).strip()
+            if not text or any(ch.isspace() for ch in text):
+                raise DaemonConfigError(
+                    "daemon_id must be a non-empty string without whitespace"
+                )
+            data[key] = text
+        elif key == "daemon_url":
+            text = str(value).strip()
+            try:
+                validate_url(text)
+            except ValueError as exc:
+                raise DaemonConfigError(str(exc)) from exc
+            data[key] = text
+        elif key == "server_url":
+            text = str(value).strip()
+            if not text.startswith(("http://", "https://")):
+                raise DaemonConfigError(
+                    "server_url must be an http:// or https:// URL"
+                )
+            data[key] = text
 
     # Validate the merged result before writing.
     _validate_managed_config(data)
@@ -504,17 +746,21 @@ def _is_path_under(child: Path, parent: Path) -> bool:
         return False
 
 
-def _load_daemon_id(url: str | None) -> str:
+def _load_daemon_id(url: str | None, persisted_id: str | None = None) -> str:
     """Stable daemon identity.
 
     Priority:
     1. ``AGT_DAEMON_ID`` env (explicit override, highest).
-    2. ``uuid5(AGT_DAEMON_NAMESPACE, url)`` — deterministic, stable across
+    2. ``persisted_id`` — ``daemon_id`` from ``~/.agt/daemon.json`` or the
+       ``id=`` field of this machine's ``~/.agt/daemons`` entry. Set by
+       ``agt daemon init``, it decouples the identity from the exact
+       spelling of the URL.
+    3. ``uuid5(AGT_DAEMON_NAMESPACE, url)`` — deterministic, stable across
        restarts; a changed URL (address moved) legitimately changes the id.
-    3. Fresh uuid4 — transient, NOT persisted. Only hit when the daemon
-       starts with no env override and no self entry in ``~/.agt/daemons``
-       (i.e. started outside ``agt daemon start`` on a bare machine);
-       the id will not survive a restart in that case.
+    4. Fresh uuid4 — transient, NOT persisted. Only hit when the daemon
+       starts with no env override, no persisted id and no self entry in
+       ``~/.agt/daemons`` (i.e. started outside ``agt daemon start`` on a
+       bare machine); the id will not survive a restart in that case.
 
     The old ``~/.agt/daemon_id`` persistent-file fallback was removed:
     it was almost never written (the env and url branches return before
@@ -525,6 +771,8 @@ def _load_daemon_id(url: str | None) -> str:
     env = os.environ.get("AGT_DAEMON_ID")
     if env:
         return env
+    if persisted_id:
+        return persisted_id
     if url:
         return daemon_id_from_url(url)
     return str(uuid.uuid4())[:8]
@@ -580,21 +828,35 @@ class DaemonConfig:
         at startup rather than silently falling back to defaults.
         """
         default = cls()
-        listen_mode = os.environ.get("AGT_LISTEN_MODE", "0").strip() in ("1", "true", "yes")
-        ws_listen_port = int(os.environ.get("AGT_DAEMON_WS_PORT", str(default.ws_listen_port)))
-        self_entry = _find_self_daemon(ws_listen_port)
-        daemon_url = self_entry[1] if self_entry else None
+        resolved = resolve_daemon_settings()
+        listen_mode = bool(resolved["listen_mode"].value)
+        ws_listen_port = int(resolved["ws_port"].value)
+        # ``_self_daemon_entry`` is only a fallback now: ``agt daemon init``
+        # persists daemon_id/daemon_url explicitly, and an explicit URL on a
+        # public IP would not satisfy the "local host" heuristic anyway.
+        self_entry = _self_daemon_entry(ws_listen_port)
+        daemon_url = (
+            resolved["daemon_url"].value
+            or (self_entry.url if self_entry else None)
+        )
+        # Prefer the entry that actually names this daemon's advertised URL:
+        # after ``agt daemon init`` the file holds both a stale local entry
+        # (``local ws://0.0.0.0:8422``) and the real one, and only the
+        # latter carries the pairing name and id.
+        url_entry = _entry_for_url(daemon_url) or self_entry
         # Human-readable label: explicit env, daemons-file name, else "local"
         # (local daemons not registered in ~/.agt/daemons default to "local").
         daemon_name = (
             os.environ.get("AGT_DAEMON_NAME")
-            or (self_entry[0] if self_entry else None)
+            or (url_entry.name if url_entry else None)
             or "local"
         )
-        daemon_id = _load_daemon_id(daemon_url)
-        resolved = resolve_daemon_settings()
+        persisted_id = resolved["daemon_id"].value
+        if not persisted_id and url_entry is not None:
+            persisted_id = url_entry.daemon_id
+        daemon_id = _load_daemon_id(daemon_url, persisted_id)
         return cls(
-            server_base_url=os.environ.get("AGT_SERVER_URL"),
+            server_base_url=resolved["server_url"].value or None,
             server_secret=load_server_secret(),
             daemon_id=daemon_id,
             daemon_name=daemon_name,
@@ -626,6 +888,8 @@ __all__ = [
     "AGT_DAEMON_NAMESPACE",
     "_load_daemon_id",
     "_find_self_daemon",
+    "_self_daemon_entry",
+    "_entry_for_url",
     "_host_of_url",
     "_is_local_host",
     "_parse_allowlist",

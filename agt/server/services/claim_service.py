@@ -272,8 +272,8 @@ async def _build_step_message(
     Large cross-daemon references carry only the URI — the daemon
     resolves them on demand via ``artifacts.get``.
     """
-    from ...a2a import parse_artifact_uri, render_message
-    from ..models import ArtifactModel
+    from ...a2a import parse_artifact_uri, parse_upload_uri, render_message
+    from ..models import ArtifactModel, InputUploadModel
 
     job = await db.get(JobModel, candidate.job_id) if candidate.job_id else None
     if candidate.input_message:
@@ -299,7 +299,27 @@ async def _build_step_message(
     for part in raw.get("parts", []):
         if part.get("type") != "file":
             continue
-        artifact_id = parse_artifact_uri(part.get("uri", ""))
+        uri = part.get("uri", "")
+        upload_id = parse_upload_uri(uri)
+        if upload_id:
+            # User upload: the Server owns the bytes, so there is never a
+            # ``local_path`` hint. Small content is inlined (one less RPC
+            # on the daemon); anything else is resolved on demand via
+            # ``uploads.get``. A missing row is left unresolved on purpose
+            # — the daemon fails the Step loudly rather than running with
+            # a silently missing input.
+            upload = await db.get(InputUploadModel, upload_id)
+            if upload is None:
+                continue
+            part["name"] = part.get("name") or upload.name
+            if not part.get("mime_type"):
+                part["mime_type"] = upload.mime_type or None
+            if upload.inline_bytes is not None:
+                import base64
+
+                part["inline_b64"] = base64.b64encode(upload.inline_bytes).decode()
+            continue
+        artifact_id = parse_artifact_uri(uri)
         if not artifact_id:
             continue
         artifact = await db.get(ArtifactModel, artifact_id)

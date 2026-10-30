@@ -86,6 +86,8 @@ async def report_task_ws_first(
     outcome: str | None = None,
     outcome_payload: dict | None = None,
     context_ops: list[dict] | None = None,
+    events: list | None = None,
+    usage: dict | None = None,
 ) -> bool:
     """Write a task result via WS first; HTTP fallback when not safe.
 
@@ -130,6 +132,11 @@ async def report_task_ws_first(
         body["outcome_payload"] = outcome_payload
     if context_ops:
         body["context_ops"] = context_ops
+    if events:
+        # Structured event tail not acknowledged by a progress call.
+        body["agent_events"] = events
+    if usage is not None:
+        body["usage"] = usage
 
     if wsrpc is not None and wsrpc.supports_rpc_v1 and not state.blocked:
         try:
@@ -177,6 +184,8 @@ async def report_task_ws_first(
             outcome=outcome,
             outcome_payload=outcome_payload,
             context_ops=context_ops,
+            events=events,
+            usage=usage,
         )
         return True
     except Exception as exc:
@@ -191,6 +200,7 @@ async def report_task_progress_ws_first(
     state: ClaimStateMachine,
     task_id: str,
     stdout_prefix: str,
+    events: list | None = None,
 ) -> bool:
     """Report an incremental stdout prefix via WS first; HTTP fallback.
 
@@ -210,6 +220,8 @@ async def report_task_progress_ws_first(
     (executor sampler) ignores the result entirely.
     """
     body = {"task_id": task_id, "stdout_prefix": stdout_prefix}
+    if events:
+        body["events"] = events
 
     if wsrpc is not None and wsrpc.supports_rpc_v1 and not state.blocked:
         try:
@@ -228,7 +240,7 @@ async def report_task_progress_ws_first(
 
     try:
         await http_client.report_progress(
-            task_id=task_id, stdout_prefix=stdout_prefix,
+            task_id=task_id, stdout_prefix=stdout_prefix, events=events,
         )
         return True
     except Exception as exc:

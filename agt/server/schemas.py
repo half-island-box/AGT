@@ -69,6 +69,12 @@ class SubmitTaskRequest(BaseModel):
     # AGENTS.md are injected when an identity is set. NULL means "let
     # the daemon pick" (legacy: ``work_dir_root / provider / task_id``).
     agent_cwd: str | None = None
+    # Run-history directory: the submitter's project path. A console project
+    # always sends its local path here, even when ``agent_cwd`` points at a
+    # remote daemon's directory, so the project's chat history and run counts
+    # stay grouped under one key. Takes precedence over ``work_dir`` /
+    # ``agent_cwd`` when deriving ``JobModel.cwd``.
+    cwd: str | None = None
 
 
 class SubmitTaskResponse(BaseModel):
@@ -133,6 +139,42 @@ class TaskPayload(BaseModel):
     outputs_subdir: str | None = None
 
 
+class UsageOut(BaseModel):
+    """Token/cost summary for one Step.
+
+    ``scope="turn"`` values come from the provider's terminal aggregate
+    (``result.usage``), which is authoritative. Per-call ``message`` usage
+    lives only in the event stream and is deliberately NOT summed here.
+    Billing input = ``input_tokens + cache_creation + cache_read``; the
+    cache counters are exposed separately so a UI can show hit rate.
+    """
+
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_read_input_tokens: int | None = None
+    cache_creation_input_tokens: int | None = None
+    cost_usd: float | None = None
+    model: str | None = None
+    num_turns: int | None = None
+
+
+class AgentEvent(BaseModel):
+    """One structured agent event (thinking / tool use / tool result / usage).
+
+    ``seq`` is globally monotonic per Step; ``text_offset`` is the length
+    of the cumulative plain text when the event was emitted. Kind-specific
+    fields (``block_id``, ``tool_use_id``, ``text``, ``input``, ``content``,
+    usage counters, …) are kept verbatim via ``extra="allow"`` so a new
+    provider event does not require a schema change.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    seq: int
+    kind: str
+    text_offset: int = 0
+
+
 class ReportRequest(BaseModel):
     daemon_id: str
     task_id: str
@@ -155,6 +197,13 @@ class ReportRequest(BaseModel):
     outcome_payload: dict | None = None
     # Shared-context marker operations captured during the subprocess run.
     context_ops: list[dict] = []
+    # Turn-level usage summary (``result.usage`` + cost/model/num_turns).
+    # Optional: legacy daemons omit it and the Step keeps NULL columns.
+    usage: UsageOut | None = None
+    # Structured events not acknowledged by a previous progress call (the
+    # daemon re-sends its tail here so a lost progress frame never loses
+    # an event). Idempotent on ``(task_id, seq)``.
+    agent_events: list[AgentEvent] = []
 
 
 class ReportResponse(BaseModel):
@@ -238,10 +287,57 @@ class ProgressRequest(BaseModel):
     daemon_id: str
     task_id: str
     stdout_prefix: str
+    # Structured events produced since the previous sample. Empty for
+    # legacy daemons; the stdout prefix contract is unchanged.
+    events: list[AgentEvent] = []
+
+
+# ── Input uploads (chat attachments) ────────────────────────────────
+
+
+class UploadCreateRequest(BaseModel):
+    """One user file uploaded before/with a chat turn.
+
+    JSON base64 (no multipart dependency): the bytes are small enough
+    for a local bridge and the same shape works from the VS Code webview,
+    the browser console and the CLI alike.
+    """
+
+    name: str
+    mime_type: str | None = None
+    content_b64: str
+    # Origin hint: "console" / "vscode" / "cli". Display/audit only.
+    source: str = ""
+
+
+class UploadOut(BaseModel):
+    """Public upload metadata. ``uri`` is the only reference form."""
+
+    upload_id: str
+    name: str
+    mime_type: str
+    size: int
+    sha256: str
+    uri: str
+    source: str = ""
+    created_at: str
+    expires_at: str | None = None
+
+
+class UploadResolveOut(BaseModel):
+    """``uploads.get`` RPC response — bytes + display metadata."""
+
+    content_b64: str
+    name: str
+    mime_type: str = ""
+    sha256: str
 
 
 class ProgressResponse(BaseModel):
     recorded: bool
+    # Highest ``seq`` stored for this Step after the write. Only present
+    # when the request carried events (legacy responses stay ``{recorded}``).
+    last_seq: int | None = None
 
 
 class TaskStatusResponse(BaseModel):
@@ -269,6 +365,8 @@ class TaskStatusResponse(BaseModel):
     agent_cwd: str | None = None
     # Phase 2: declared deliverables of this Step (public metadata only).
     artifacts: list[ArtifactOut] = []
+    # Token/cost summary; None for legacy rows / providers without usage.
+    usage: UsageOut | None = None
 
 
 # ── Stream (SSE) events — Phase 5 remote streaming ──────────────────
@@ -279,11 +377,20 @@ class TaskStatusResponse(BaseModel):
 
 
 class StreamSnapshotEvent(BaseModel):
-    """Full cumulative stdout + status, sent immediately on subscribe."""
+    """Full cumulative stdout + status, sent immediately on subscribe.
+
+    ``events`` replays the structured events already stored for this Step
+    (so a reconnect never loses thinking/tool history), and ``event_cursor``
+    is the highest ``seq`` included — the hub suppresses anything at or
+    below it. ``usage`` may be ``None`` while the turn is still running.
+    """
 
     type: str = "snapshot"
     status: str
     stdout: str
+    events: list[dict] = []
+    event_cursor: int = 0
+    usage: UsageOut | None = None
 
 
 class StreamDeltaEvent(BaseModel):
@@ -291,6 +398,13 @@ class StreamDeltaEvent(BaseModel):
 
     type: str = "delta"
     chunk: str
+
+
+class StreamAgentEventsEvent(BaseModel):
+    """One batch of structured events not yet seen by this subscriber."""
+
+    type: str = "agent_events"
+    events: list[dict] = []
 
 
 class StreamDoneEvent(BaseModel):
@@ -305,6 +419,9 @@ class StreamDoneEvent(BaseModel):
     stderr: str | None = None
     # Phase 2: declared deliverables of this Step.
     artifacts: list[ArtifactOut] = []
+    # Token/cost summary and model name for the finished turn.
+    usage: UsageOut | None = None
+    model: str | None = None
 
 
 # ── Session ─────────────────────────────────────────────────────────
@@ -407,6 +524,70 @@ class HeartbeatResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     status: str = "ok"
+
+
+# ── Console projects ────────────────────────────────────────────────
+
+
+class ConsoleProjectCreate(BaseModel):
+    path: str
+    name: str | None = None
+    # Optional remote working directory. ``path`` is always the mandatory
+    # local directory; these two are the pair "daemon + directory on that
+    # daemon" the user optionally picked at creation time.
+    remote_daemon_id: str | None = None
+    remote_path: str | None = None
+
+
+class ConsoleProjectUpdate(BaseModel):
+    name: str
+
+
+class ConsoleProjectRunCounts(BaseModel):
+    chat: int = 0
+    sop: int = 0
+    goal: int = 0
+
+
+class ConsoleProjectOut(BaseModel):
+    id: str
+    name: str
+    path: str
+    available: bool
+    # Both None for local-only projects; both set when the project also
+    # carries a remote working directory.
+    remote_daemon_id: str | None = None
+    remote_path: str | None = None
+    remote: bool = False
+    created_at: str
+    updated_at: str
+    last_opened_at: str | None = None
+    run_counts: ConsoleProjectRunCounts = Field(default_factory=ConsoleProjectRunCounts)
+
+
+class ConsoleProjectListResponse(BaseModel):
+    projects: list[ConsoleProjectOut]
+
+
+class ConsoleDirectoryOut(BaseModel):
+    name: str
+    path: str
+
+
+class ConsoleDirectoryListResponse(BaseModel):
+    roots: list[str]
+    parent: str | None
+    current: str
+    directories: list[ConsoleDirectoryOut]
+
+
+class ConsoleDirectoryPickResponse(BaseModel):
+    path: str | None = None
+
+
+class ConsoleSopRenameRequest(BaseModel):
+    path: str
+    new_name: str
 
 
 # ── Identity (Phase 4 Step 1) ───────────────────────────────────────
@@ -614,6 +795,8 @@ class SopRunSummary(BaseModel):
     identity_did: str | None = None
     daemon_id: str | None = None
     cwd: str | None = None
+    template_path: str | None = None
+    template_hash: str | None = None
     created_at: str
     updated_at: str
     total_nodes: int
@@ -655,6 +838,8 @@ class RunSummary(BaseModel):
     identity_did: str | None = None
     daemon_id: str | None = None
     cwd: str | None = None
+    template_path: str | None = None
+    template_hash: str | None = None
     title: str | None = None
     created_at: str
     updated_at: str
@@ -663,6 +848,60 @@ class RunSummary(BaseModel):
 class RunListResponse(BaseModel):
     runs: list[RunSummary]
     total: int
+
+
+class UsageTotals(BaseModel):
+    """Aggregated token/cost totals over a time window.
+
+    ``steps`` counts only usage-bearing Steps (legacy / unreported rows are
+    excluded), and ``turns`` is the summed per-Step ``num_turns``.
+    """
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+    cost_usd: float = 0.0
+    steps: int = 0
+    turns: int = 0
+
+
+class UsageSeriesPoint(BaseModel):
+    """One time bucket of usage. Missing buckets are zero-filled server-side."""
+
+    bucket: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+    cost_usd: float = 0.0
+    steps: int = 0
+
+
+class UsageBreakdownItem(BaseModel):
+    """Usage grouped by daemon × agent × model."""
+
+    daemon_id: str | None = None
+    agent: str
+    model: str | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+    cost_usd: float = 0.0
+    steps: int = 0
+
+
+class UsageSummaryResponse(BaseModel):
+    """Payload for the web-console usage dashboard (``GET /api/usage/summary``)."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    from_: str = Field(alias="from")
+    to: str
+    totals: UsageTotals
+    series: list[UsageSeriesPoint]
+    breakdown: list[UsageBreakdownItem]
 
 
 ClaimResponse.model_rebuild()
@@ -694,6 +933,14 @@ __all__ = [
     "HeartbeatRequest",
     "HeartbeatResponse",
     "HealthResponse",
+    "ConsoleProjectCreate",
+    "ConsoleProjectUpdate",
+    "ConsoleProjectRunCounts",
+    "ConsoleProjectOut",
+    "ConsoleProjectListResponse",
+    "ConsoleDirectoryOut",
+    "ConsoleDirectoryListResponse",
+    "ConsoleDirectoryPickResponse",
     "IdentityCreate",
     "IdentityOut",
     "IdentityUpdate",
@@ -720,4 +967,8 @@ __all__ = [
     "ChatRunListResponse",
     "RunSummary",
     "RunListResponse",
+    "UsageTotals",
+    "UsageSeriesPoint",
+    "UsageBreakdownItem",
+    "UsageSummaryResponse",
 ]

@@ -23,6 +23,7 @@ from ..schemas import (
     ProgressResponse,
     ReportRequest,
     ReportResponse,
+    StreamAgentEventsEvent,
     StreamDeltaEvent,
     StreamDoneEvent,
     StreamSnapshotEvent,
@@ -37,8 +38,10 @@ from ..services.claim_service import (
 )
 from ..services.artifact_service import artifact_to_out, artifacts_for_steps
 from ..services.report_service import (
+    events_for_step,
     record_step_progress_for_daemon,
     record_step_result_for_daemon,
+    step_usage_out,
 )
 from ..services.runtime_service import is_stale
 from ..services.selection_service import SelectionError, select_runtime
@@ -288,13 +291,23 @@ async def report_task(
             # Phase 3: structured-outcome sidecar (spawn envelopes).
             outcome_payload=payload.outcome_payload,
             context_ops=payload.context_ops,
+            # Token usage + the event tail the daemon could not ack.
+            usage=payload.usage,
+            agent_events=payload.agent_events,
         )
         return ReportResponse(**result)
     except ValueError as exc:
         raise _business_error_to_http(exc)
 
 
-@router.post("/{task_id}/progress", response_model=ProgressResponse)
+@router.post(
+    "/{task_id}/progress",
+    response_model=ProgressResponse,
+    # ``last_seq`` is only meaningful when the daemon sent events; omitting
+    # it from legacy responses keeps them byte-identical to the pre-events
+    # shape (``{"recorded": true}``).
+    response_model_exclude_none=True,
+)
 async def progress_task(
     task_id: str,
     payload: ProgressRequest,
@@ -311,6 +324,7 @@ async def progress_task(
             daemon_id=payload.daemon_id,
             step_id=task_id,
             stdout_prefix=payload.stdout_prefix,
+            events=payload.events,
         )
         return ProgressResponse(**result)
     except ValueError as exc:
@@ -356,6 +370,7 @@ async def list_tasks(
                 ArtifactOut(**artifact_to_out(r))
                 for r in artifact_map.get(t.step_id, [])
             ],
+            usage=step_usage_out(t),
         )
         for t in rows
     ]
@@ -390,6 +405,7 @@ async def task_status(
             ArtifactOut(**artifact_to_out(r))
             for r in (await artifacts_for_steps(db, [task_id])).get(task_id, [])
         ],
+        usage=step_usage_out(task),
     )
 
 
@@ -410,11 +426,17 @@ async def stream_task(
 ) -> StreamingResponse:
     """SSE stream of a task's execution (Phase 5 remote streaming).
 
-    Event sequence: ``snapshot`` → ``delta``* → ``done``. The snapshot and
-    the 404 check are performed **here, in the endpoint body**, using a
-    short-lived session that is closed before the ``StreamingResponse``
-    generator starts running (design decision 9). The generator therefore
-    never touches the DB; it only drains the in-process ``StreamHub`` queue.
+    Event sequence: ``snapshot`` → (``delta`` | ``agent_events``)* → ``done``.
+    The snapshot and the 404 check are performed **here, in the endpoint
+    body**, using a short-lived session that is closed before the
+    ``StreamingResponse`` generator starts running (design decision 9). The
+    generator therefore never touches the DB; it only drains the in-process
+    ``StreamHub`` queue.
+
+    The snapshot also replays every stored ``step_events`` row so a client
+    that reconnects mid-turn (or opens history) still sees the
+    thinking/tool transcript; ``event_cursor`` tells the hub where to
+    resume.
     """
     factory = request.app.state.session_factory
     async with session_scope(factory) as db:
@@ -427,6 +449,11 @@ async def stream_task(
         snapshot_stdout = task.stdout or ""
         snapshot_status = task.status
         is_terminal = task.status in _TERMINAL_STATUSES
+        snapshot_events = await events_for_step(db, task_id)
+        snapshot_usage = step_usage_out(task)
+        event_cursor = (
+            int(snapshot_events[-1].get("seq", 0)) if snapshot_events else 0
+        )
 
         # Captured now (session open) for the terminal shortcut below.
         artifact_rows = (await artifacts_for_steps(db, [task_id])).get(task_id, [])
@@ -438,6 +465,8 @@ async def stream_task(
             "exit_code": task.exit_code,
             "resume_rejected": task.resume_rejected,
             "artifacts": [artifact_to_out(r) for r in artifact_rows],
+            "usage": snapshot_usage,
+            "model": task.model,
         }
 
     async def event_generator():
@@ -446,7 +475,11 @@ async def stream_task(
             yield _sse_frame(
                 "snapshot",
                 StreamSnapshotEvent(
-                    status=snapshot_status, stdout=snapshot_stdout
+                    status=snapshot_status,
+                    stdout=snapshot_stdout,
+                    events=snapshot_events,
+                    event_cursor=event_cursor,
+                    usage=snapshot_usage,
                 ),
             )
             if is_terminal:
@@ -454,7 +487,9 @@ async def stream_task(
                 return
 
             sub = default_hub.subscribe(
-                task_id, cursor=len(snapshot_stdout)
+                task_id,
+                cursor=len(snapshot_stdout),
+                event_cursor=event_cursor,
             )
             while True:
                 try:
@@ -470,6 +505,13 @@ async def stream_task(
                 if etype == "delta":
                     yield _sse_frame(
                         "delta", StreamDeltaEvent(chunk=event["chunk"])
+                    )
+                elif etype == "agent_events":
+                    yield _sse_frame(
+                        "agent_events",
+                        StreamAgentEventsEvent(
+                            events=event.get("events") or []
+                        ),
                     )
                 elif etype == "done":
                     yield _sse_frame("done", StreamDoneEvent(**event))
@@ -487,6 +529,27 @@ async def stream_task(
             "Connection": "keep-alive",
         },
     )
+
+
+@router.get("/{task_id}/events")
+async def task_events(
+    task_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Stored structured events for one Step (history replay).
+
+    Returns the same wire shape the SSE ``agent_events`` frame carries, so
+    a client can render a finished Step without re-subscribing to a closed
+    stream. Empty for legacy rows / providers without a sink.
+    """
+    task = await db.get(StepModel, task_id)
+    if task is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="task not found")
+    return {
+        "task_id": task_id,
+        "events": await events_for_step(db, task_id),
+        "usage": step_usage_out(task),
+    }
 
 
 __all__ = ["router"]

@@ -3,27 +3,23 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "agt"
-version = "0.1.0"
+name = "agt-team"
+version = "0.1.4"
 description = "Local AI agent CLI bridge — discover, register, and invoke local AI coding agents (Claude Code, Codex, etc.) from the terminal."
 readme = "README.md"
 requires-python = ">=3.12"
+authors = [
+    {name = "half-island-box", email = "182872445+half-island-box@users.noreply.github.com"},
+]
 dependencies = [
     "click>=8.0",
     "fastapi>=0.115.0",
-    "uvicorn[standard]>=0.30.0",
+    "uvicorn>=0.30.0",
     "httpx>=0.27.0",
     "sqlalchemy[asyncio]>=2.0.0",
     "aiosqlite>=0.20.0",
-    "alembic>=1.13.0",
     "websockets>=12.0",
     "pyjwt>=2.8.0",
-    # Phase B: Model Context Protocol server (catalog tool). Justified: the
-    # parent-agent catalog query is exposed over MCP so every agent CLI can
-    # attach without a bespoke integration per provider; the SDK owns the
-    # protocol/transport (streamable HTTP) correctness instead of hand-rolling it.
-    # Pinned <2: mcp 2.x renamed FastMCP→MCPServer and reshaped the transport
-    # API; our catalog code targets the stable v1 FastMCP surface.
     "mcp>=1.0.0,<2",
 ]
 
@@ -36,6 +32,7 @@ agt = "agt.cli.main:cli"
 dev = [
     "pytest>=8.0",
     "coverage>=7.0",
+    "alembic>=1.13.0",
 ]
 
 [tool.hatch.build.targets.wheel]

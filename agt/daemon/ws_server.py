@@ -179,7 +179,7 @@ class DaemonWsServer:
         raise ValueError({"type": "unknown_method", "message": method})
 
     async def _handle_fs_list(self, body: dict) -> dict:
-        """List directories on THIS machine for the console's directory picker.
+        """List directories on THIS machine for the console's project picker.
 
         The remote console cannot stat a path on this daemon, so the picker
         asks us. Roots are the same ``agent_cwd_allowlist`` used by

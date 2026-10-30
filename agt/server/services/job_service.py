@@ -157,6 +157,7 @@ async def create_job(
         root_job_id=effective_root,
         status="blocked" if blocked else "queued",
         job_type=job_type,
+        first_prompt=prompt if job_type == "chat" else None,
         provider=provider,
         identity_did=identity_did,
         target_daemon_id=target_daemon_id,

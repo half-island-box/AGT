@@ -15,7 +15,7 @@ from pathlib import Path
 
 from sqlalchemy import create_engine, text
 
-from agt.server.migrate_schema import migrate_identities_and_sessions
+from agt.server.migrate_schema import ensure_schema, migrate_identities_and_sessions
 
 
 LEGACY_TASKS_DDL = """
@@ -168,6 +168,63 @@ def test_run_on_already_migrated_model_schema(tmp_path: Path) -> None:
     # Regression: the index must also exist on the fresh path, where
     # create_all already added the column and the ALTER branch is skipped.
     assert "idx_tasks_identity" in _indexes(engine)
+
+
+def test_chat_first_prompt_column_is_added_and_backfilled(tmp_path: Path) -> None:
+    """Existing chat Jobs gain first_prompt from their earliest Step."""
+    from agt.server.models import Base
+
+    engine = _engine(tmp_path)
+    Base.metadata.create_all(engine)
+
+    with engine.begin() as conn:
+        conn.exec_driver_sql("ALTER TABLE jobs DROP COLUMN first_prompt")
+        conn.exec_driver_sql(
+            """
+            INSERT INTO jobs (
+                job_id, root_job_id, status, job_type, provider,
+                sop_iteration, created_at, updated_at
+            ) VALUES (
+                'chat-1', 'chat-1', 'done', 'chat', 'claude',
+                0, '2026-01-01', '2026-01-02'
+            )
+            """
+        )
+        conn.exec_driver_sql(
+            """
+            INSERT INTO tasks (
+                task_id, job_id, provider, prompt, status, created_at, updated_at
+            ) VALUES (
+                'step-2', 'chat-1', 'claude', 'second question', 'completed',
+                '2026-01-02', '2026-01-02'
+            )
+            """
+        )
+        conn.exec_driver_sql(
+            """
+            INSERT INTO tasks (
+                task_id, job_id, provider, prompt, status, created_at, updated_at
+            ) VALUES (
+                'step-1', 'chat-1', 'claude', 'first question', 'completed',
+                '2026-01-01', '2026-01-01'
+            )
+            """
+        )
+
+    with engine.begin() as conn:
+        ensure_schema(conn)
+
+    with engine.connect() as conn:
+        job_columns = [
+            row[1]
+            for row in conn.execute(text("PRAGMA table_info(jobs)")).fetchall()
+        ]
+        first_prompt = conn.execute(
+            text("SELECT first_prompt FROM jobs WHERE job_id='chat-1'")
+        ).scalar_one()
+
+    assert "first_prompt" in job_columns
+    assert first_prompt == "first question"
 
 
 # ── Phase 4 Step 3: sessions PK rebuild ────────────────────────────

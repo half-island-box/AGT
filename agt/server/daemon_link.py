@@ -76,10 +76,68 @@ class DaemonLink:
 
         self._link: WsRpcLink | None = None
         self._active = False  # True once a connection has been accepted at least once
+        self._stop_requested = False  # set by stop(); the run loop exits
+        # Wakes the run loop out of its reconnect backoff immediately. Set by
+        # :meth:`kick` when the user asks for a refresh — waiting out the
+        # 60s backoff cap would make the button feel broken.
+        self._wake = asyncio.Event()
 
     @property
     def connected(self) -> bool:
         return self._link is not None and not self._link.closed
+
+    def kick(self) -> None:
+        """Ask the run loop to re-dial now instead of finishing its backoff.
+
+        A no-op when the link is already up (there is no sleep to cut short);
+        the next drop reconnects as usual.
+        """
+        self._wake.set()
+
+    async def wait_connected(self, timeout: float) -> bool:
+        """Wait up to ``timeout`` seconds for the dial to succeed.
+
+        Used by the refresh endpoint so its response can report a truthful
+        ``connected`` flag instead of "we just started trying".
+        """
+        deadline = asyncio.get_running_loop().time() + timeout
+        while True:
+            if self.connected:
+                return True
+            if self._stop_requested:
+                return False
+            if asyncio.get_running_loop().time() >= deadline:
+                return False
+            await asyncio.sleep(0.05)
+
+    async def stop(self) -> None:
+        """Permanently stop this link: no reconnects, current socket closed.
+
+        Used when a target is removed from ``~/.agt/daemons`` at runtime.
+        Idempotent; safe to call from the pairing route.
+
+        Closes the underlying socket rather than calling
+        :meth:`WsRpcLink.close`: that method cancels the read task, and the
+        cancellation would propagate into ``_connect_and_serve``'s await of
+        the same task (``CancelledError`` is not an ``Exception``). Letting
+        the read loop end on its own lets the run loop observe
+        ``_stop_requested`` and exit cleanly.
+        """
+        self._stop_requested = True
+        # Cut a backoff sleep short: otherwise a never-connected link can sit
+        # in its up-to-60s nap before the run loop notices the stop request.
+        self._wake.set()
+        link = self._link
+        ws = link.ws if link is not None else None
+        if ws is not None:
+            try:
+                await ws.close()
+            except Exception:  # pragma: no cover — close is best effort
+                log.debug(
+                    "DaemonLink %s close during stop failed",
+                    self.daemon_id,
+                    exc_info=True,
+                )
 
     @property
     def supports_rpc_v1(self) -> bool:
@@ -154,7 +212,7 @@ class DaemonLink:
         )
 
     async def list_directory(self, path: str | None) -> dict:
-        """List directories on the remote daemon (console directory picker).
+        """List directories on the remote daemon (console project picker).
 
         Mirrors :meth:`get_session_history`: the console cannot stat the
         daemon's disk, so it asks over the reverse-dial link. ``path=None``
@@ -253,7 +311,7 @@ class DaemonLink:
         """
         backoff = _BACKOFF_INITIAL
         ever_connected = False
-        while not shutdown.is_set():
+        while not shutdown.is_set() and not self._stop_requested:
             try:
                 await self._connect_and_serve()
                 backoff = _BACKOFF_INITIAL
@@ -267,7 +325,7 @@ class DaemonLink:
                         "DaemonLink %s reconnected (%s)", self.daemon_id, self.url,
                     )
             except Exception as exc:
-                if shutdown.is_set():
+                if shutdown.is_set() or self._stop_requested:
                     break
                 if not ever_connected:
                     # Pre-first-connect: state is "trying to reach"; quiet.
@@ -282,14 +340,35 @@ class DaemonLink:
                         self.daemon_id, exc, backoff,
                     )
                     ever_connected = False  # next connect is a "reconnect"
-            if shutdown.is_set():
+            if shutdown.is_set() or self._stop_requested:
                 break
-            # Sleep with cancellation support.
-            try:
-                await asyncio.wait_for(shutdown.wait(), timeout=backoff)
-            except asyncio.TimeoutError:
-                pass
+            # Sleep with cancellation support, but let ``kick()`` cut it short
+            # so the user-triggered refresh re-dials immediately.
+            if not await self._backoff_sleep(shutdown, backoff):
+                backoff = _BACKOFF_INITIAL  # woken: retry now at full speed
+                continue
             backoff = min(backoff * 2, _BACKOFF_CAP)
+
+    async def _backoff_sleep(self, shutdown: asyncio.Event, timeout: float) -> bool:
+        """Sleep up to ``timeout``; return True if it timed out (no kick)."""
+        if self._wake.is_set():
+            self._wake.clear()
+            return False
+        shutdown_wait = asyncio.ensure_future(shutdown.wait())
+        wake_wait = asyncio.ensure_future(self._wake.wait())
+        try:
+            done, _pending = await asyncio.wait(
+                {shutdown_wait, wake_wait},
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            for task in (shutdown_wait, wake_wait):
+                task.cancel()
+        if self._wake.is_set():
+            self._wake.clear()
+            return False
+        return not done
 
     async def _authenticate_daemon(self, ws) -> None:
         """Verify the daemon's identity from its handshake frame.
@@ -343,8 +422,13 @@ class DaemonLink:
         # is unreachable in a reverse-dial setup. Send the ack before
         # spinning up the read loop.
         await ws.send(json.dumps({"type": "heartbeat_ack", "rpc_v1": True}))
+        # ``_authenticate_daemon`` consumed the daemon's own hello frame, so
+        # our link would never observe an inbound ``heartbeat_ack`` and its
+        # ``supports_rpc_v1`` would stay False — disabling every server→daemon
+        # RPC (``session.history``, ``session.delete``, ``fs.list``, …). The
+        # handshake already proved rpc_v1 (it raises otherwise), so seed it.
         # Pass on_request so we respond to inbound claim frames.
-        link = WsRpcLink(ws, on_request=self._handle_inbound_request)
+        link = WsRpcLink(ws, on_request=self._handle_inbound_request, rpc_v1=True)
         await link.start()
         self._link = link
         self._active = True
@@ -371,6 +455,8 @@ class DaemonLink:
             return await self._handle_tasks_progress(body)
         if method == "artifacts.get":
             return await self._handle_artifacts_get(body)
+        if method == "uploads.get":
+            return await self._handle_uploads_get(body)
         if method == "catalog.list":
             return await self._handle_catalog_list(body)
         if method == "spawn.create":
@@ -554,6 +640,47 @@ class DaemonLink:
                 "sha256": artifact.sha256,
             }
 
+    async def _handle_uploads_get(self, body: dict) -> dict:
+        """Daemon→server input-side upload resolution (chat attachments).
+
+        Unlike ``artifacts.get`` there is no same-daemon zero-copy branch:
+        the bytes belong to the Server, so every daemon reads them over
+        the link. A missing row/expired blob raises ``upload_missing`` so
+        the daemon fails the Step loudly instead of running without the
+        user's file.
+        """
+        upload_id = body.get("upload_id")
+        if not isinstance(upload_id, str) or not upload_id:
+            raise ValueError({
+                "type": "validation_error",
+                "message": "uploads.get requires upload_id",
+            })
+        import base64
+
+        from .services.input_service import get_upload, read_upload_content
+
+        async with session_scope(self._session_factory) as db:
+            upload = await get_upload(db, upload_id)
+            if upload is None:
+                raise ValueError({
+                    "type": "upload_missing",
+                    "reason": "upload_missing",
+                    "message": upload_id,
+                })
+            content = await read_upload_content(upload)
+            if content is None:
+                raise ValueError({
+                    "type": "upload_missing",
+                    "reason": "upload_expired",
+                    "message": upload_id,
+                })
+            return {
+                "content_b64": base64.b64encode(content).decode(),
+                "name": upload.name,
+                "mime_type": upload.mime_type,
+                "sha256": upload.sha256,
+            }
+
     def _artifacts_dir(self) -> "Path":
         from pathlib import Path
 
@@ -631,17 +758,6 @@ class DaemonLink:
 
     async def _handle_tasks_report(self, body: dict) -> dict:
         """Record a daemon's task execution result over the reverse-dial link.
-
-        ``daemon_id`` comes from the configured target, never the body —
-        a misbehaving daemon can't report on behalf of another. This is
-        the reverse-dial counterpart to ``POST /api/tasks/{id}/report``;
-        both paths funnel through :func:`record_step_result_for_daemon`.
-
-        Business rejections (task missing / not owned) surface as
-        ``RPCRejected(404|403)`` so the daemon can tell the difference
-        between a permanent failure (don't retry) and a transport issue
-        (do retry via HTTP fallback). Other ``ValueError`` payloads fall
-        through to the link's generic ``validation_error`` shape.
         """
         required = (
             "task_id", "exit_code", "stdout", "stderr", "duration", "status",
@@ -666,12 +782,13 @@ class DaemonLink:
                     session_id=body.get("session_id"),
                     resume_rejected=bool(body.get("resume_rejected", False)),
                     outcome=body.get("outcome"),
-                    # Phase 2: declared deliverables ride the report body;
-                    # malformed items are dropped so the report always
-                    # goes through (best-effort by design).
+
                     artifacts=_parse_artifact_items(body.get("artifacts")),
                     outcome_payload=body.get("outcome_payload"),
                     context_ops=body.get("context_ops") or [],
+
+                    usage=body.get("usage"),
+                    agent_events=body.get("agent_events") or [],
                 )
         except ValueError as exc:
             payload = (
@@ -688,13 +805,6 @@ class DaemonLink:
 
     async def _handle_tasks_progress(self, body: dict) -> dict:
         """Record an incremental stdout prefix over the reverse-dial link.
-
-        Reverse-dial counterpart to ``POST /api/tasks/{id}/progress``.
-        ``daemon_id`` comes from the configured target, never the body —
-        a misbehaving daemon can't post progress for another daemon's task.
-        Business rejections surface as ``RPCRejected(404|403)`` so the
-        daemon can tell permanent failure from a transport issue, exactly
-        like ``tasks.report``.
         """
         required = ("task_id", "stdout_prefix")
         for field_name in required:
@@ -710,6 +820,7 @@ class DaemonLink:
                     daemon_id=self.daemon_id,
                     step_id=body["task_id"],
                     stdout_prefix=str(body["stdout_prefix"]),
+                    events=body.get("events") or [],
                 )
         except ValueError as exc:
             payload = (
@@ -725,9 +836,6 @@ class DaemonLink:
 
 def _parse_artifact_items(raw: Any) -> list:
     """Validate the optional ``artifacts`` list of a WS report body.
-
-    Malformed items are dropped (not fatal): the report itself must
-    always go through. Legacy daemons omit the field entirely.
     """
     if not raw:
         return []

@@ -297,6 +297,8 @@ class ServerClient:
         artifacts: list[dict[str, Any]] | None = None,
         outcome_payload: dict | None = None,
         context_ops: list[dict[str, Any]] | None = None,
+        events: list[dict[str, Any]] | None = None,
+        usage: dict[str, Any] | None = None,
     ) -> bool:
         payload = {
             "daemon_id": self._daemon_id,
@@ -320,6 +322,12 @@ class ServerClient:
             payload["outcome_payload"] = outcome_payload
         if context_ops:
             payload["context_ops"] = context_ops
+        if events:
+            # ``agent_events`` (not ``events``) matches the report schema;
+            # progress uses the shorter ``events`` key.
+            payload["agent_events"] = events
+        if usage is not None:
+            payload["usage"] = usage
         resp = await self._post(f"/api/tasks/{task_id}/report", payload)
         return bool(resp.get("recorded", False))
 
@@ -355,6 +363,39 @@ class ServerClient:
             if exc.status == 404:
                 return None
             raise
+
+    async def upload_input_file(
+        self,
+        *,
+        name: str,
+        content_b64: str,
+        mime_type: str | None = None,
+        source: str = "cli",
+    ) -> dict[str, Any]:
+        """Upload one chat attachment; returns metadata incl. ``uri``.
+
+        The Server deduplicates on content hash, so re-sending the same
+        bytes in a later turn is free.
+        """
+        payload: dict[str, Any] = {
+            "name": name,
+            "content_b64": content_b64,
+            "source": source,
+        }
+        if mime_type:
+            payload["mime_type"] = mime_type
+        return await self._post("/api/uploads", payload)
+
+    async def get_upload_content(self, upload_id: str) -> bytes:
+        """Fetch an upload's bytes over HTTP (daemon-side fallback)."""
+        assert self._client is not None, "ServerClient must be used as async context manager"
+        resp = await self._client.get(
+            f"/api/uploads/{upload_id}/content",
+            headers=self._headers(),
+        )
+        if resp.status_code >= 300:
+            raise RPCRejected(resp.status_code, {"raw": resp.text})
+        return resp.content
 
     async def submit_sop(
         self,
@@ -464,18 +505,25 @@ class ServerClient:
             raise RPCRejected(resp.status_code, {"raw": resp.text})
         return resp.content
 
-    async def report_progress(self, task_id: str, stdout_prefix: str) -> bool:
-        """Report an incremental stdout prefix (Phase 5 remote streaming).
+    async def report_progress(
+        self,
+        task_id: str,
+        stdout_prefix: str,
+        events: list[dict[str, Any]] | None = None,
+    ) -> bool:
+        """Report an incremental stdout prefix + event batch.
 
         Best-effort: the caller treats failures as ignorable — the next
         sample supersedes this one, and the terminal ``report_task`` is the
-        authoritative write.
+        authoritative write (it also carries any unacknowledged events).
         """
         payload = {
             "daemon_id": self._daemon_id,
             "task_id": task_id,
             "stdout_prefix": stdout_prefix,
         }
+        if events:
+            payload["events"] = events
         resp = await self._post(f"/api/tasks/{task_id}/progress", payload)
         return bool(resp.get("recorded", False))
 
@@ -575,9 +623,16 @@ class ServerClient:
         work_dir: str | None = None,
         identity_did: str | None = None,
         agent_cwd: str | None = None,
+        message: dict | None = None,
     ) -> dict:
-        """Create a Job with its first Step. Returns {"job_id", "task_id", "status"}."""
+        """Create a Job with its first Step. Returns {"job_id", "task_id", "status"}.
+
+        ``message`` is the optional A2A-shaped structured input (used by
+        chat attachments: a TextPart plus one FilePart per upload).
+        """
         payload: dict[str, Any] = {"prompt": prompt, "provider": provider}
+        if message is not None:
+            payload["message"] = message
         if target_daemon_id is not None:
             payload["target_daemon_id"] = target_daemon_id
         if work_dir is not None:
@@ -588,9 +643,14 @@ class ServerClient:
             payload["agent_cwd"] = agent_cwd
         return await self._post("/api/jobs", payload)
 
-    async def job_input(self, job_id: str, prompt: str) -> dict:
+    async def job_input(
+        self, job_id: str, prompt: str, message: dict | None = None
+    ) -> dict:
         """Append a new Step to an existing Job."""
-        return await self._post(f"/api/jobs/{job_id}/input", {"prompt": prompt})
+        payload: dict[str, Any] = {"prompt": prompt}
+        if message is not None:
+            payload["message"] = message
+        return await self._post(f"/api/jobs/{job_id}/input", payload)
 
     async def job_status(self, job_id: str) -> dict:
         return await self._get(f"/api/jobs/{job_id}/status")

@@ -93,6 +93,10 @@ class JobModel(Base):
     job_type: Mapped[str] = mapped_column(
         String(16), nullable=False, default="task", index=True
     )
+    # Chat history display title: the immutable first user prompt for a
+    # conversation. NULL on non-chat Jobs and legacy rows whose original
+    # prompt could not be recovered.
+    first_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Denormalized from the first Step for convenient querying.
     provider: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     identity_did: Mapped[str | None] = mapped_column(
@@ -112,6 +116,12 @@ class JobModel(Base):
     sop_loop_name: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     sop_iteration: Mapped[int] = mapped_column(Integer, nullable=False, default=0, index=True)
     sop_loop_meta: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # SOP run-template association. Only SOP root jobs carry these values;
+    # legacy and non-SOP rows remain NULL.
+    sop_template_path: Mapped[str | None] = mapped_column(
+        String(1024), nullable=True, index=True
+    )
+    sop_template_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
     # Goal mode: root-Job metadata JSON — {"mode":"goal","budget":
     # {max_depth,max_descendants,max_batch},"template":…,"goal":…,
     # "goal_sha256":…}. Only goal roots write this; children, SOP nodes
@@ -196,6 +206,16 @@ class StepModel(Base):
     stdout: Mapped[str | None] = mapped_column(Text, nullable=True)
     stderr: Mapped[str | None] = mapped_column(Text, nullable=True)
     duration: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Per-turn token usage, taken verbatim from the provider's terminal
+    # ``result`` aggregate (never summed with per-call ``message`` usage).
+    # NULL for legacy rows / providers that report no usage.
+    input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cache_read_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cache_creation_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    num_turns: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Structured outcome reported by the daemon (or derived by the server
     # for legacy daemons). Values: done, needs_input, error, spawn_subjob.
     outcome: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -250,6 +270,31 @@ class StepModel(Base):
         back_populates="children",
         remote_side="StepModel.step_id",
     )
+
+
+class StepEventModel(Base):
+    """One structured agent event (thinking / tool / usage) for a Step.
+
+    Events are append-only and idempotent on ``(task_id, seq)`` — a
+    re-sent progress batch or a report tail can be written twice without
+    duplicating rows. ``payload_json`` holds the kind-specific fields;
+    ``kind`` / ``text_offset`` are promoted to columns because the SSE
+    replay and the UI filter on them.
+    """
+
+    __tablename__ = "step_events"
+
+    step_id: Mapped[str] = mapped_column(
+        "task_id",
+        String(64),
+        ForeignKey("tasks.task_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    seq: Mapped[int] = mapped_column(Integer, primary_key=True)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    text_offset: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    created_at: Mapped[str] = mapped_column(String(32), nullable=False)
 
 
 class SessionModel(Base):
@@ -339,6 +384,41 @@ class ArtifactModel(Base):
         String(16), nullable=False, default="registered", index=True
     )
     created_at: Mapped[str] = mapped_column(String(32), nullable=False)
+
+
+class InputUploadModel(Base):
+    """A user-uploaded input file, owned by the Server.
+
+    Deliberately separate from ``ArtifactModel``: artifacts are a Step's
+    *declared output* (foreign-keyed to job/step, origin daemon, lazy
+    cross-daemon fetch), whereas an upload is *job input* that the Server
+    owns before any Step exists. Reusing the artifact table would pollute
+    its lazy-load / GC semantics with rows that have no producer.
+
+    Bytes live inline (<4KB) or on the server disk (``storage_path``).
+    ``sha256`` is unique — identical content reuses one row. Rows expire
+    (``expires_at``) and are swept by the Server; a reference already
+    baked into a Step's ``input_message`` is valid for the job's lifetime.
+    """
+
+    __tablename__ = "input_uploads"
+
+    upload_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # Original basename (sanitized — never a path).
+    name: Mapped[str] = mapped_column(String(512), nullable=False)
+    mime_type: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    size: Mapped[int] = mapped_column(Integer, nullable=False)
+    sha256: Mapped[str] = mapped_column(
+        String(64), nullable=False, unique=True, index=True
+    )
+    # Server-side materialized storage (>4KB blobs).
+    storage_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    # Small content stored directly in the DB (<4KB).
+    inline_bytes: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    # Origin hint for display/audit: console / vscode / cli.
+    source: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    created_at: Mapped[str] = mapped_column(String(32), nullable=False)
+    expires_at: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
 class IdentityModel(Base):
@@ -495,6 +575,50 @@ class ContextEntryModel(Base):
     )
 
 
+class ConsoleProjectModel(Base):
+    """A user-selected directory project for the browser console.
+
+    The project is a stable name/path pointer, not a workspace copy. Run
+    history remains scoped by ``jobs.cwd``; this table gives the console a
+    persistent picker and last-opened ordering without rewriting run rows.
+    """
+
+    __tablename__ = "console_projects"
+    __table_args__ = (
+        UniqueConstraint("path", name="ux_console_projects_path"),
+        # A project may carry an OPTIONAL remote working directory for one
+        # daemon. The pair is all-or-nothing (enforced in the service); when
+        # present it must be unique per daemon+path so two projects cannot
+        # point the same remote machine at the same directory.
+        Index(
+            "ux_console_projects_remote",
+            "remote_daemon_id",
+            "remote_path",
+            unique=True,
+            sqlite_where=text(
+                "remote_daemon_id IS NOT NULL AND remote_path IS NOT NULL"
+            ),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    path: Mapped[str] = mapped_column(String(1024), nullable=False, unique=True)
+    # Optional remote working directory. ``path`` above is always the local
+    # (Server-machine) directory and is mandatory; these two are only set
+    # when the user also picked a directory on a remote daemon. Both NULL or
+    # both set.
+    remote_daemon_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
+    )
+    remote_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    created_at: Mapped[str] = mapped_column(String(32), nullable=False)
+    updated_at: Mapped[str] = mapped_column(String(32), nullable=False)
+    last_opened_at: Mapped[str | None] = mapped_column(
+        String(32), nullable=True, index=True
+    )
+
+
 # Compatibility alias: the ORM was originally exposed as ``TaskModel`` before
 # the Job/Step split made its actual Step semantics explicit.
 TaskModel = StepModel
@@ -510,7 +634,9 @@ __all__ = [
     "IdentityModel",
     "IdentityBindingModel",
     "ArtifactModel",
+    "InputUploadModel",
     "JobParentModel",
     "SpawnBatchModel",
     "ContextEntryModel",
+    "ConsoleProjectModel",
 ]

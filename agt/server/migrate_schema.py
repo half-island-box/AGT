@@ -285,6 +285,91 @@ def ensure_schema(conn: Connection) -> None:
         )
         log.info("Migrated jobs table: added goal_meta column")
 
+    # Chat history title: preserve the immutable first user prompt on the
+    # conversation owner (Job), rather than duplicating it on every provider
+    # session pointer row.
+    if _table_exists(conn, "jobs") and "first_prompt" not in _column_names(conn, "jobs"):
+        conn.exec_driver_sql(
+            "ALTER TABLE jobs ADD COLUMN first_prompt TEXT"
+        )
+        log.info("Migrated jobs table: added first_prompt column")
+
+    jobs_columns = _column_names(conn, "jobs") if _table_exists(conn, "jobs") else set()
+    tasks_columns = _column_names(conn, "tasks") if _table_exists(conn, "tasks") else set()
+    if (
+        {"job_id", "job_type", "first_prompt"} <= jobs_columns
+        and {"job_id", "task_id", "prompt", "created_at"} <= tasks_columns
+    ):
+        conn.exec_driver_sql("""
+            UPDATE jobs
+            SET first_prompt = (
+                SELECT t.prompt
+                FROM tasks AS t
+                WHERE t.job_id = jobs.job_id
+                ORDER BY t.created_at ASC, t.task_id ASC
+                LIMIT 1
+            )
+            WHERE job_type = 'chat'
+              AND (first_prompt IS NULL OR first_prompt = '')
+        """)
+
+    # Chat attachments: user-uploaded inputs owned by the Server. New
+    # databases get this from ``create_all``; this guard covers DB files
+    # whose tables were created before the feature landed (and keeps the
+    # Alembic / ensure_schema tracks in step).
+    if not _table_exists(conn, "input_uploads"):
+        conn.exec_driver_sql("""
+            CREATE TABLE input_uploads (
+                upload_id VARCHAR(64) NOT NULL,
+                name VARCHAR(512) NOT NULL,
+                mime_type VARCHAR(128) NOT NULL DEFAULT '',
+                size INTEGER NOT NULL,
+                sha256 VARCHAR(64) NOT NULL,
+                storage_path VARCHAR(1024),
+                inline_bytes BLOB,
+                source VARCHAR(32) NOT NULL DEFAULT '',
+                created_at VARCHAR(32) NOT NULL,
+                expires_at VARCHAR(32),
+                PRIMARY KEY (upload_id)
+            )
+        """)
+        conn.exec_driver_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ix_input_uploads_sha256 "
+            "ON input_uploads (sha256)"
+        )
+        log.info("Migrated schema: created input_uploads table")
+
+    # Structured agent events + per-turn token usage. New databases get
+    # both from ``create_all``; these guards cover DB files that predate
+    # the feature (the same dual-track pattern as the other Phase columns).
+    for column, ddl in (
+        ("input_tokens", "INTEGER"),
+        ("output_tokens", "INTEGER"),
+        ("cache_read_tokens", "INTEGER"),
+        ("cache_creation_tokens", "INTEGER"),
+        ("cost_usd", "REAL"),
+        ("model", "VARCHAR(128)"),
+        ("num_turns", "INTEGER"),
+    ):
+        if _table_exists(conn, "tasks") and column not in _column_names(conn, "tasks"):
+            conn.exec_driver_sql(f"ALTER TABLE tasks ADD COLUMN {column} {ddl}")
+            log.info("Migrated tasks table: added %s column", column)
+
+    if not _table_exists(conn, "step_events"):
+        conn.exec_driver_sql("""
+            CREATE TABLE step_events (
+                task_id VARCHAR(64) NOT NULL,
+                seq INTEGER NOT NULL,
+                kind VARCHAR(32) NOT NULL,
+                text_offset INTEGER NOT NULL DEFAULT 0,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                created_at VARCHAR(32) NOT NULL,
+                PRIMARY KEY (task_id, seq),
+                FOREIGN KEY (task_id) REFERENCES tasks (task_id) ON DELETE CASCADE
+            )
+        """)
+        log.info("Migrated schema: created step_events table")
+
     # Phase 6: unify run history by cwd and first-class job_type.
     if _table_exists(conn, "jobs") and "cwd" not in _column_names(conn, "jobs"):
         conn.exec_driver_sql(
@@ -292,11 +377,54 @@ def ensure_schema(conn: Connection) -> None:
         )
         log.info("Migrated jobs table: added cwd column")
 
+    # SOP run-template association. Legacy rows stay NULL so they are never
+    # incorrectly attributed to a template.
+    if (
+        _table_exists(conn, "jobs")
+        and "sop_template_path" not in _column_names(conn, "jobs")
+    ):
+        conn.exec_driver_sql(
+            "ALTER TABLE jobs ADD COLUMN sop_template_path VARCHAR(1024)"
+        )
+        conn.exec_driver_sql(
+            "ALTER TABLE jobs ADD COLUMN sop_template_hash VARCHAR(128)"
+        )
+        conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_jobs_sop_template_path "
+            "ON jobs (sop_template_path)"
+        )
+        log.info("Migrated jobs table: added SOP template association columns")
+
     if _table_exists(conn, "sessions") and "cwd" not in _column_names(conn, "sessions"):
         conn.exec_driver_sql(
             "ALTER TABLE sessions ADD COLUMN cwd VARCHAR(1024)"
         )
         log.info("Migrated sessions table: added cwd column")
+
+    # Console projects: optional remote working directory on one daemon.
+    # ``path`` stays the mandatory Server-machine directory. Existing DB
+    # files predate these columns, so create_all alone leaves them out.
+    if _table_exists(conn, "console_projects"):
+        project_columns = _column_names(conn, "console_projects")
+        if "remote_daemon_id" not in project_columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE console_projects ADD COLUMN remote_daemon_id VARCHAR(64)"
+            )
+            log.info("Migrated console_projects table: added remote_daemon_id column")
+        if "remote_path" not in project_columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE console_projects ADD COLUMN remote_path VARCHAR(1024)"
+            )
+            log.info("Migrated console_projects table: added remote_path column")
+        conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_console_projects_remote_daemon_id "
+            "ON console_projects (remote_daemon_id)"
+        )
+        conn.exec_driver_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_console_projects_remote "
+            "ON console_projects (remote_daemon_id, remote_path) "
+            "WHERE remote_daemon_id IS NOT NULL AND remote_path IS NOT NULL"
+        )
 
     # Backfill cwd from the best available directory column.
     if (
@@ -338,6 +466,10 @@ def ensure_schema(conn: Connection) -> None:
         )
         conn.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_jobs_cwd_root_job_id_updated_at ON jobs (cwd, root_job_id, updated_at)"
+        )
+        conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_jobs_sop_template_path "
+            "ON jobs (sop_template_path)"
         )
     if _table_exists(conn, "sessions"):
         conn.exec_driver_sql(

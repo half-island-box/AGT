@@ -59,12 +59,18 @@ def test_claude_adapter_uses_stream_sink_factory():
     assert isinstance(adapter.stream_sink_factory(), ClaudeStreamSink)
 
 
-def test_codex_adapter_uses_noop_sink_phase5():
-    """Phase 5 leaves Codex on the legacy pipe-text path."""
-    from agt.runtime.streaming import NoopSink
+def test_codex_adapter_uses_app_server_sink():
+    """Codex streams through ``codex app-server`` (JSON-RPC over stdio)."""
+    from agt.runtime.command_builders import CodexAppServerCommandBuilder
+    from agt.runtime.streaming import CodexAppServerSink, NoopSink
 
     adapter = get_adapter("codex")
-    assert isinstance(adapter.stream_sink_factory(), NoopSink)
+    assert isinstance(adapter.stream_sink_factory(), CodexAppServerSink)
+    assert isinstance(adapter.command_builder, CodexAppServerCommandBuilder)
+    assert adapter.stream_transport_probe is not None
+    fallback = adapter.pipe_text_fallback
+    assert fallback is not None
+    assert isinstance(fallback.stream_sink_factory(), NoopSink)
 
 
 def test_unknown_provider_does_not_grant_streaming():
@@ -85,16 +91,19 @@ def test_claude_adapter_carries_bypass_permission_args():
     assert adapter.permission_args == ("--permission-mode", "bypassPermissions")
 
 
-def test_codex_adapter_carries_sandbox_args():
-    """Codex spawns with ``--approve-for-me`` so the non-interactive
-    ``exec`` process can write deliverables (``.agt/outputs/``) without
-    a TTY prompt — it routes approval through automatic review using the
-    workspace-write sandbox."""
+def test_codex_legacy_fallback_carries_sandbox_args():
+    """The ``codex exec`` fallback spawns with ``--approve-for-me`` so the
+    non-interactive process can write deliverables without a TTY prompt.
+    The app-server path carries the same intent in ``thread/start``
+    (workspace-write + auto review), so it needs no argv flags."""
     from agt.runtime.registry import CODEX_SANDBOX_ARGS
 
     adapter = get_adapter("codex")
-    assert adapter.permission_args == CODEX_SANDBOX_ARGS
-    assert adapter.permission_args == ("--approve-for-me",)
+    assert adapter.permission_args == ()
+    fallback = adapter.pipe_text_fallback
+    assert fallback is not None
+    assert fallback.permission_args == CODEX_SANDBOX_ARGS
+    assert fallback.permission_args == ("--approve-for-me",)
 
 
 def test_non_claude_adapters_have_empty_permission_args():
@@ -112,3 +121,17 @@ def test_non_claude_adapters_have_empty_permission_args():
 def test_unknown_provider_has_empty_permission_args():
     """The fallback adapter must not inject Claude-only flags either."""
     assert get_adapter("not-a-real-provider-xyz").permission_args == ()
+
+
+def test_codex_transport_env_override(monkeypatch):
+    """``AGT_CODEX_TRANSPORT`` short-circuits the app-server probe."""
+    import asyncio
+    from pathlib import Path
+
+    from agt.runtime.registry import _codex_app_server_available
+
+    binary = Path("/nonexistent/codex")
+    monkeypatch.setenv("AGT_CODEX_TRANSPORT", "exec")
+    assert asyncio.run(_codex_app_server_available(binary)) is False
+    monkeypatch.setenv("AGT_CODEX_TRANSPORT", "app-server")
+    assert asyncio.run(_codex_app_server_available(binary)) is True

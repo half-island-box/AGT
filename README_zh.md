@@ -28,6 +28,8 @@ Goal 驱动的子 Agent 编排、静态 DAG 工作流和统一产物注册表。
   WebSocket 跨机器调度。
 - **Identity 路由**：定义 reviewer、tester 等角色，并按 Provider、Daemon
   亲和性和 Runtime 可用性路由。
+- **Console 项目**：持久保存用户选择的目录项目，并通过仅限本机的 API
+  浏览允许范围内的目录。
 - **MCP 与编辑器集成**：向支持 MCP 的 Agent 暴露子 Agent Spawn 工具，并
   提供早期 VS Code 扩展，用于 Chat、Goal 和 SOP 编辑。
 
@@ -124,7 +126,9 @@ agt task submit --prompt "用三个词打招呼"
 ```
 
 Server 默认监听 `127.0.0.1:8420`，OpenAPI 文档位于
-`http://127.0.0.1:8420/docs`。部署拓扑和配置详见
+`http://127.0.0.1:8420/docs`。Server 同时提供仅限本机的 Console 项目
+API，用于创建、重命名、打开和列出目录项目；目录浏览范围由
+`AGT_CONSOLE_WORKSPACE_ROOTS` 限制。部署拓扑和配置详见
 [快速启动指南](<docs/guide%20docs/quick_start.md>)。
 
 ## CLI
@@ -166,6 +170,8 @@ Server 默认监听 `127.0.0.1:8420`，OpenAPI 文档位于
 
 - **CLI** 负责提交工作并展示可读的运行状态。
 - **Server** 负责协调、持久化、选路、MCP 和 Artifact。
+- **Console 项目**是持久化的目录指针；运行历史仍通过项目路径
+  `jobs.cwd` 区分。
 - **Daemon** 负责本地进程执行、并发控制和心跳。
 - **Agent CLI** 以独立子进程运行，会话连续性由 Provider 负责。
 - **SQLite** 是所有 Server 管理运行的信息源；`sessions.json` 仅用于本机直连 `agt chat`。

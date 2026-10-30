@@ -23,6 +23,7 @@ from ..services.job_service import (
     stop_chat_job,
 )
 from ..services.selection_service import SelectionError, select_runtime
+from ..services.report_service import events_for_step, step_usage_out
 from .identities import _selection_error_to_http
 from .tasks import _notify_daemons
 from ...a2a import Message, render_message
@@ -133,6 +134,7 @@ async def create_job_route(
         target_daemon_id=effective_target,
         work_dir=payload.work_dir,
         agent_cwd=payload.agent_cwd,
+        cwd=payload.cwd,
         identity_did=payload.identity_did,
         job_type="chat",
         message=payload.message,
@@ -453,6 +455,34 @@ async def job_log(
             for s in job.steps
         ],
     )
+
+
+@router.get("/{job_id}/events")
+async def job_events(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Structured agent events for every Step under a Job, grouped by Step.
+
+    History-replay companion to the SSE ``agent_events`` frame: a UI that
+    opens a finished chat can render thinking/tool blocks and the usage
+    footer without re-subscribing. Steps with no events (legacy rows,
+    non-streaming providers) return an empty list.
+    """
+    job = await get_job(db, job_id)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job not found")
+    steps = []
+    for step in job.steps:
+        steps.append(
+            {
+                "task_id": step.step_id,
+                "status": step.status,
+                "events": await events_for_step(db, step.step_id),
+                "usage": step_usage_out(step),
+            }
+        )
+    return {"job_id": job.job_id, "status": job.status, "steps": steps}
 
 
 __all__ = ["router"]

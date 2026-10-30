@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -13,12 +14,13 @@ import uvicorn
 from fastapi import FastAPI
 
 from .config import DaemonTarget, ServerConfig, ServerConfigError
-from .daemon_link import DaemonLink
+from .console import router as console_router
 from .database import bind_get_db, make_engine, make_session_factory, session_scope
 from .mcp_server import build_catalog_mcp, catalog_mcp_asgi
 from .middleware.auth import bind_verify_task_token
 from .migrate_schema import ensure_schema, migrate_identities_and_sessions
 from .models import Base
+from .services.daemon_link_pool import DaemonLinkPool
 from .pidfile import (
     DEFAULT_PID_FILE,
     PID_FILE,
@@ -31,6 +33,8 @@ from .routes.daemons import router as daemons_router
 from .routes.heartbeat import router as heartbeat_router
 from .routes.identities import router as identities_router
 from .routes.jobs import router as jobs_router
+from .routes.pairing import router as pairing_router
+from .routes.projects import router as projects_router
 from .routes.artifacts import router as artifacts_router
 from .routes.context import router as context_router
 from .routes.sop import router as sop_router
@@ -39,14 +43,37 @@ from .routes.runtimes import router as runtimes_router
 from .routes.runs import router as runs_router
 from .routes.sessions import router as sessions_router
 from .routes.tasks import router as tasks_router
+from .routes.uploads import router as uploads_router
+from .routes.usage import router as usage_router
+from .services.input_service import sweep_expired_uploads
 from .services.runtime_service import prune_stale_runtimes
 
 log = logging.getLogger(__name__)
 
 
+def _is_loopback_bind(host: str) -> bool:
+    """Whether a server bind address can only receive local connections."""
+    value = host.strip("[]")
+    try:
+        return ipaddress.ip_address(value).is_loopback
+    except ValueError:
+        return value == "localhost"
+
+
 def create_app(config: ServerConfig | None = None) -> FastAPI:
     """Build the FastAPI app, configured against the given ServerConfig."""
     cfg = config or ServerConfig.from_env()
+    if (
+        cfg.console_enabled
+        and cfg.host not in {"127.0.0.1", "localhost", "::1"}
+        and not cfg.console_allow_remote
+    ):
+        log.warning(
+            "Browser console disabled for non-loopback bind %s; "
+            "set AGT_CONSOLE_ALLOW_REMOTE=1 only behind an authenticated proxy",
+            cfg.host,
+        )
+        cfg.console_enabled = False
     engine = make_engine(cfg)
     session_factory = make_session_factory(engine)
     # Phase B: ``daemon_id → DaemonTarget`` lookup, built once here and
@@ -79,7 +106,14 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                 log.info(
                     "Startup sweep: removed %d stale runtime row(s)", removed,
                 )
+            # Expired chat attachments: same one-shot sweep idea. A live
+            # job's already-materialized inputs are unaffected (the daemon
+            # copied them at claim time).
+            await sweep_expired_uploads(db)
+            await db.commit()
         log.info("agt-server ready on %s:%d (db=%s)", cfg.host, cfg.port, cfg.db_path)
+        if cfg.console_enabled:
+            log.info("AGT console: http://127.0.0.1:%d/", cfg.port)
 
         # Optional PID file (detached mode): write the live pid so that
         # ``agt server stop`` / ``status`` can find and signal us. Only
@@ -97,24 +131,21 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         # and answers inbound ``tasks.claim`` frames. We start them as
         # background tasks; failure of one daemon link doesn't affect
         # others or the HTTP API.
+        #
+        # The pool is reloadable at runtime (``POST /api/daemons/refresh``):
+        # it re-reads ``~/.agt/daemons`` and adds / drops / re-dials links
+        # without disturbing healthy ones.
         shutdown_event = asyncio.Event()
-        daemon_links: dict[str, DaemonLink] = {}
-        daemon_link_tasks: list[asyncio.Task] = []
-        for target in cfg.daemons:
-            link = DaemonLink(
-                daemon_id=target.daemon_id,
-                url=target.url,
-                secret=cfg.secret,
-                session_factory=session_factory,
-                name=target.name,
-                db_path=cfg.db_path,
-                daemon_defs=daemon_defs,
-            )
-            daemon_links[target.daemon_id] = link
-            daemon_link_tasks.append(
-                asyncio.create_task(link.run(shutdown_event), name=f"daemon-link:{target.daemon_id}")
-            )
-        app.state.daemon_links = daemon_links
+        pool = DaemonLinkPool(
+            config=cfg,
+            session_factory=session_factory,
+            daemon_defs=daemon_defs,
+            shutdown=shutdown_event,
+            initial_targets=cfg.daemons,
+        )
+        await pool.start()
+        app.state.daemon_links = pool.links
+        app.state.daemon_link_pool = pool
         if cfg.daemons:
             log.info(
                 "Reverse-dial pool: %d daemon link(s) → %s",
@@ -142,17 +173,13 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                             pid_path.unlink()
                     except FileNotFoundError:
                         pass
-                for t in daemon_link_tasks:
-                    t.cancel()
-                # Give the tasks a moment to acknowledge shutdown, but don't
-                # block forever — the server should exit promptly.
-                for t in daemon_link_tasks:
-                    try:
-                        await asyncio.wait_for(t, timeout=2.0)
-                    except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
-                        pass
+                # Give the links a moment to close their sockets and exit, but
+                # don't block forever — the server should exit promptly.
+                try:
+                    await asyncio.wait_for(pool.stop(), timeout=2.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                    pass
                 await engine.dispose()
-
     app = FastAPI(
         title="agt-server",
         version="0.2.0",
@@ -178,6 +205,8 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     app.include_router(daemon_config_router)
     app.include_router(daemons_router)
     app.include_router(tasks_router)
+    app.include_router(uploads_router)
+    app.include_router(usage_router)
     app.include_router(jobs_router)
     app.include_router(artifacts_router)
     app.include_router(context_router)
@@ -187,6 +216,13 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     app.include_router(sessions_router)
     app.include_router(heartbeat_router)
     app.include_router(identities_router)
+    # Loopback-only: these return/handle the HMAC secret. Kept outside the
+    # console_enabled switch on purpose — the restriction is per-request,
+    # not "is the UI mounted".
+    app.include_router(pairing_router)
+    if cfg.console_enabled:
+        app.include_router(projects_router)
+        app.include_router(console_router)
 
     return app
 

@@ -51,7 +51,9 @@ async def goal_runs(
     controls page size; ``total`` is the number of all goal roots, so the
     client can paginate without fetching every tree.
     """
-    runs, total = await list_goal_runs(db, limit=limit, offset=offset)
+    runs, total = await list_goal_runs(
+        db, cwds=[cwd] if cwd else None, limit=limit, offset=offset
+    )
     return GoalRunListResponse(runs=runs, total=total)
 
 

@@ -75,8 +75,7 @@ def _rpc_error(exc: Exception) -> HTTPException:
 
 
 @router.get("", response_model=ListDaemonsResponse)
-async def list_daemons_route(
-    request: Request,
+async def list_daemons_route(    request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> ListDaemonsResponse:
     """List every known daemon (offline ones included, with heartbeat)."""
@@ -184,34 +183,43 @@ async def list_daemon_artifacts_route(
     return await artifacts_for_daemon(db, daemon_id)
 
 
-@router.get("/{daemon_id}/directories")
-async def list_daemon_directories_route(
-    daemon_id: str,
+@router.post("/refresh")
+async def refresh_daemons_route(
     request: Request,
-    path: str | None = Query(None),
+    daemon_id: str | None = Query(
+        None,
+        description=(
+            "Narrow the forced re-dial to this target. The registry itself "
+            "is always re-read from the daemons file (it is global)."
+        ),
+    ),
 ) -> dict:
-    """List directories on a remote daemon's filesystem.
+    """Re-read ``~/.agt/daemons`` and reconcile the live reverse-dial links.
 
-    Backs the plugin's remote-daemon working-directory picker. The daemon's
-    disk is unreachable from the console, so this proxies an ``fs.list`` RPC
-    over the reverse-dial link; ``path=None`` starts at the daemon's first
-    ``agent_cwd_allowlist`` root. Only configured remote targets (those with
-    a live ``DaemonLink``) are browsable — local daemons have no link and are
-    browsed by the extension host directly.
+    A daemon added while the Server was running used to need a restart
+    because the config snapshot was built once. This endpoint applies the
+    file immediately: new targets are dialed, dropped ones are stopped, and
+    a disconnected target is re-dialed now instead of waiting out its
+    reconnect backoff. Healthy links are left untouched, so in-flight
+    claims/reports are never interrupted.
+
+    Returns one row per configured target:
+    ``{daemon_id, action, connected}`` with ``action`` ∈ ``added`` /
+    ``removed`` / ``replaced`` / ``redialled`` / ``unchanged``.
     """
-    link = _daemon_links(request).get(daemon_id)
-    if link is None:
+    pool = getattr(request.app.state, "daemon_link_pool", None)
+    if pool is None:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={
-                "type": "unknown_remote_daemon",
-                "message": f"'{daemon_id}' is not a configured remote daemon",
+                "type": "daemon_pool_unavailable",
+                "message": "server did not start a daemon link pool",
             },
         )
-    try:
-        return await link.list_directory(path)
-    except (WSRPCUnavailable, WSRPCUncertain, RPCRejected) as exc:
-        raise _rpc_error(exc) from None
+    return {
+        "daemons": await pool.refresh(daemon_id=daemon_id),
+        "daemons_path": pool.daemons_path,
+    }
 
 
 __all__ = ["router"]

@@ -13,7 +13,9 @@ without the Server, preserving the no-daemon-required workflow.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+import mimetypes
 import os
 import shutil
 import signal
@@ -541,12 +543,46 @@ def _chat_turn_local(
     resume_session_id: str | None = None,
     first_prompt: str | None = None,
     turn_index: int = 1,
+    files: tuple[Path, ...] = (),
+    event_printer: _AgentEventPrinter | None = None,
 ) -> None:
-    """Run one chat turn against the local daemon."""
+    """Run one chat turn against the local daemon.
+
+    ``files`` never touch the Server on this path: the local controller
+    already runs on this machine, so each attachment is passed as a
+    zero-copy ``local_path`` hint and rendered to ``Input file: <path>``
+    by the shared message renderer (same prompt shape as remote turns).
+
+    ``event_printer`` receives structured thinking/tool events live via
+    the executor's ``event_cb`` hook.
+    """
     async def _run():
+        effective_prompt = prompt
+        if files:
+            from ..task.message_render import render_task_message
+
+            message = {
+                "role": "user",
+                "parts": [
+                    {"type": "text", "text": prompt},
+                    *[
+                        {
+                            "type": "file",
+                            "uri": path.resolve().as_uri(),
+                            "name": path.name,
+                            "mime_type": mimetypes.guess_type(path.name)[0],
+                            "local_path": str(path.resolve()),
+                        }
+                        for path in files
+                    ],
+                ],
+            }
+            effective_prompt = await render_task_message(
+                message, agent_cwd=agent_cwd
+            )
         return await controller.run(
             provider=provider,
-            prompt=prompt,
+            prompt=effective_prompt,
             task_id=task_id,
             agent_cwd=agent_cwd,
             agt_meta_dir=agt_meta_dir,
@@ -554,9 +590,12 @@ def _chat_turn_local(
             first_prompt=first_prompt,
             turn_index=turn_index,
             use_cwd_session_store=True,
+            event_cb=event_printer,
         )
 
     result = asyncio.run(_run())
+    if event_printer is not None:
+        event_printer.usage_from_done({"usage": result.usage})
     # Streaming (Phase 5): each text block is printed with
     # ``end=""``, so the terminal cursor may sit mid-line when the
     # turn ends. Make sure the next ``agt> `` prompt lands on a fresh
@@ -585,10 +624,119 @@ def _finish_stream_line(stdout: str) -> None:
         click.echo()
 
 
+class _AgentEventPrinter:
+    """Render structured agent events on the terminal during a chat turn.
+
+    Text still arrives through the plain-text stream; this only adds the
+    opt-in extras. Defaults are all-off so existing terminal output is
+    byte-identical to the pre-event behaviour.
+    """
+
+    def __init__(
+        self,
+        *,
+        show_tools: bool = False,
+        show_thinking: bool = False,
+        show_usage: bool = False,
+    ) -> None:
+        self.show_tools = show_tools
+        self.show_thinking = show_thinking
+        self.show_usage = show_usage
+        self._tool_names: dict[str, str] = {}
+        self._printed_usage = False
+
+    def __call__(self, event: dict) -> None:
+        if not isinstance(event, dict):
+            return
+        kind = event.get("kind")
+        if kind == "thinking_start" and self.show_thinking:
+            click.echo("\n💭 ", nl=False)
+        elif kind == "thinking_delta" and self.show_thinking:
+            text = event.get("text")
+            if isinstance(text, str) and text:
+                click.echo(text, nl=False)
+        elif kind == "thinking_end" and self.show_thinking:
+            click.echo()
+        elif kind == "tool_use_start" and self.show_tools:
+            name = event.get("name") or "tool"
+            tool_use_id = event.get("tool_use_id")
+            if isinstance(tool_use_id, str):
+                self._tool_names[tool_use_id] = name
+            click.echo(f"\n🔧 {name}", nl=False)
+        elif kind == "tool_use_end" and self.show_tools:
+            summary = _tool_input_summary(event.get("input"))
+            if summary:
+                click.echo(f": {summary}", nl=False)
+            click.echo()
+        elif kind == "tool_result" and self.show_tools:
+            content = str(event.get("content") or "")
+            first_line = content.strip().splitlines()[0] if content.strip() else ""
+            if len(first_line) > 120:
+                first_line = f"{first_line[:117]}…"
+            marker = "✗" if event.get("is_error") else "↳"
+            click.echo(f"   {marker} {first_line}")
+        elif (
+            kind == "usage"
+            and self.show_usage
+            and event.get("scope") == "turn"
+        ):
+            self._printed_usage = True
+            click.echo(f"\n{_format_usage_line(event)}")
+
+    def usage_from_done(self, done: dict) -> None:
+        """Print the usage summary off a ``done`` frame when no event had it.
+
+        Old servers push ``usage`` only on the terminal frame; new ones also
+        send a ``usage`` event. This keeps the footer exactly once.
+        """
+        if not self.show_usage or self._printed_usage:
+            return
+        usage = done.get("usage")
+        if not isinstance(usage, dict):
+            return
+        model = done.get("model")
+        if model and not usage.get("model"):
+            usage = {**usage, "model": model}
+        self._printed_usage = True
+        click.echo(f"\n{_format_usage_line(usage)}")
+
+
+def _tool_input_summary(value) -> str:
+    """One-line summary of a tool input (``command`` / ``path`` / …)."""
+    if not isinstance(value, dict):
+        return ""
+    for key in ("command", "file_path", "path", "pattern", "query", "url", "description"):
+        candidate = value.get(key)
+        if isinstance(candidate, str) and candidate:
+            candidate = candidate.strip().replace("\n", " ")
+            return f"{key}={candidate[:100]}"
+    return ""
+
+
+def _format_usage_line(usage: dict) -> str:
+    """``[tokens] in … · out … · cache hit …% · $…`` for one finished turn."""
+    input_tokens = int(usage.get("input_tokens") or 0)
+    output_tokens = int(usage.get("output_tokens") or 0)
+    cache_read = int(usage.get("cache_read_input_tokens") or 0)
+    cache_creation = int(usage.get("cache_creation_input_tokens") or 0)
+    billed_input = input_tokens + cache_read + cache_creation
+    parts = [f"in {billed_input:,}", f"out {output_tokens:,}"]
+    if cache_read or cache_creation:
+        hit = cache_read / billed_input * 100 if billed_input else 0.0
+        parts.append(f"cache hit {hit:.0f}%")
+    cost = usage.get("cost_usd")
+    if isinstance(cost, (int, float)):
+        parts.append(f"${cost:.4f}")
+    model = usage.get("model")
+    prefix = f"{model} · " if model else ""
+    return f"[usage] {prefix}{' · '.join(parts)}"
+
+
 async def _stream_and_wait(
     client: ServerClient,
     task_id: str,
     target_daemon_id: str,
+    event_printer: _AgentEventPrinter | None = None,
 ) -> dict | None:
     """Subscribe to the task's SSE stream and render it incrementally.
 
@@ -596,6 +744,9 @@ async def _stream_and_wait(
     delta and re-aligns on every ``snapshot`` / ``done``, so reconnects and
     fallbacks never re-print content the user has already seen (design
     decision 6).
+
+    ``agent_events`` frames are handed to ``event_printer`` (no-op when the
+    flags are off or the server is old and never sends them).
     """
     printed = 0
 
@@ -614,6 +765,10 @@ async def _stream_and_wait(
                     if chunk:
                         click.echo(chunk, nl=False)
                         printed += len(chunk)
+                elif etype == "agent_events":
+                    if event_printer is not None:
+                        for item in event.get("events") or []:
+                            event_printer(item)
                 elif etype == "done":
                     final = dict(event)
                     final_stdout = final.get("stdout") or ""
@@ -621,6 +776,8 @@ async def _stream_and_wait(
                     if tail:
                         click.echo(tail, nl=False)
                     _finish_stream_line(final_stdout)
+                    if event_printer is not None:
+                        event_printer.usage_from_done(final)
                     return final
             # Stream ended without a ``done`` frame (server closed early).
             break
@@ -631,7 +788,10 @@ async def _stream_and_wait(
                 continue
             break
 
-    return await _poll_fallback(client, task_id, target_daemon_id, printed)
+    data = await _poll_fallback(client, task_id, target_daemon_id, printed)
+    if data is not None and event_printer is not None:
+        event_printer.usage_from_done(data)
+    return data
 
 
 async def _poll_fallback(
@@ -667,6 +827,7 @@ def _chat_turn_remote(
     work_dir_str: str | None,
     identity_did: str | None = None,
     agent_cwd: Path | None = None,
+    event_printer: _AgentEventPrinter | None = None,
 ) -> None:
     """Run one chat turn pinned to a remote daemon via the Server.
 
@@ -681,7 +842,9 @@ def _chat_turn_remote(
     """
     async def _remote() -> dict | None:
         async with ServerClient(base_url=server_url, daemon_id="cli-direct") as client:
-            return await _stream_and_wait(client, step_id, target_daemon_id)
+            return await _stream_and_wait(
+                client, step_id, target_daemon_id, event_printer,
+            )
 
     try:
         asyncio.run(_remote())
@@ -765,6 +928,33 @@ def _chat_turn_remote(
          "creates it if missing. Auto-detected to your cwd when --daemon "
          "points at this machine's local daemon.",
 )
+@click.option(
+    "--file",
+    "files",
+    multiple=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Attach a file to the FIRST chat turn (repeatable, max 10). "
+         "With --daemon the file is uploaded to the Server first; local "
+         "chat passes the path directly to the agent.",
+)
+@click.option(
+    "--show-tools",
+    is_flag=True,
+    help="Print tool calls and tool results as one-line annotations "
+         "while the turn streams (off by default).",
+)
+@click.option(
+    "--show-thinking",
+    is_flag=True,
+    help="Print the model's thinking stream while the turn runs "
+         "(off by default).",
+)
+@click.option(
+    "--usage",
+    "show_usage",
+    is_flag=True,
+    help="Print a token / cache / cost footer after each turn.",
+)
 def chat(
     provider: str | None,
     target_daemon_id: str | None,
@@ -776,11 +966,22 @@ def chat(
     no_history: bool,
     identity_did: str | None,
     agent_cwd_override: Path | None,
+    files: tuple[Path, ...],
+    show_tools: bool,
+    show_thinking: bool,
+    show_usage: bool,
 ) -> None:
     if identity_did is not None and target_daemon_id is None:
         click.echo(
             "Error: --identity requires --daemon "
             "(identity runtime resolution happens on the Server).",
+            err=True,
+        )
+        sys.exit(2)
+    if len(files) > _MAX_CHAT_ATTACHMENTS:
+        click.echo(
+            f"Error: at most {_MAX_CHAT_ATTACHMENTS} --file attachments "
+            f"per turn (got {len(files)}).",
             err=True,
         )
         sys.exit(2)
@@ -968,7 +1169,17 @@ def chat(
         initial_resume=initial_resume,
         identity_did=identity_did,
         agent_cwd=agent_cwd,
+        files=files,
+        event_printer=_AgentEventPrinter(
+            show_tools=show_tools,
+            show_thinking=show_thinking,
+            show_usage=show_usage,
+        ),
     )
+
+
+# Chat attachments: per-turn cap (the Server enforces the byte limit).
+_MAX_CHAT_ATTACHMENTS = 10
 
 
 def _chat_loop(
@@ -984,6 +1195,8 @@ def _chat_loop(
     initial_resume: str | None,
     identity_did: str | None,
     agent_cwd: Path | None,
+    files: tuple[Path, ...] = (),
+    event_printer: _AgentEventPrinter | None = None,
 ) -> None:
     """Read-eval-print loop.
 
@@ -992,6 +1205,9 @@ def _chat_loop(
 
     Remote path: a Job is created on the first turn (unless resuming) and
     each turn appends a new Step via ``POST /api/jobs/{job_id}/input``.
+
+    ``--file`` attachments belong to the first turn only: the user names
+    them on the command line, then types the prompt they describe.
     """
     turn_index = 0
     first_prompt: str | None = None
@@ -1027,6 +1243,8 @@ def _chat_loop(
             turn_index=turn_index,
             identity_did=identity_did,
             agent_cwd=agent_cwd,
+            files=files if is_first else (),
+            event_printer=event_printer,
         )
 
 
@@ -1048,11 +1266,17 @@ def _remote_chat_step_id(
     work_dir_str: str | None,
     identity_did: str | None,
     agent_cwd: Path | None,
+    files: tuple[Path, ...] = (),
 ) -> tuple[str | None, str | None]:
     """Resolve the Step id for one remote chat turn.
 
     If ``job_id`` is None, creates a new Job with ``prompt`` as the first
     Step. Otherwise appends a new Step via ``POST /api/jobs/{job_id}/input``.
+
+    ``files`` are uploaded to the Server first (deduplicated on content
+    hash) and sent as FileParts alongside the TextPart. A failed upload
+    aborts the turn with an error — silently dropping an attachment would
+    let the agent answer a question it never saw the input for.
 
     Returns ``(step_id, job_id)`` so the caller can keep the Job id for
     subsequent turns.
@@ -1060,6 +1284,9 @@ def _remote_chat_step_id(
 
     async def _create_or_input() -> dict:
         async with ServerClient(base_url=server_url, daemon_id="cli-direct") as client:
+            message = None
+            if files:
+                message = await _upload_chat_attachments(client, prompt, files)
             if job_id is None:
                 return await client.create_job(
                     prompt=prompt,
@@ -1068,8 +1295,9 @@ def _remote_chat_step_id(
                     work_dir=work_dir_str,
                     identity_did=identity_did,
                     agent_cwd=str(agent_cwd) if agent_cwd is not None else None,
+                    message=message,
                 )
-            return await client.job_input(job_id, prompt)
+            return await client.job_input(job_id, prompt, message=message)
 
     try:
         resp = asyncio.run(_create_or_input())
@@ -1085,6 +1313,36 @@ def _remote_chat_step_id(
         )
         return None, job_id
     return resp.get("task_id"), resp.get("job_id", job_id)
+
+
+async def _upload_chat_attachments(
+    client: ServerClient,
+    prompt: str,
+    files: tuple[Path, ...],
+) -> dict:
+    """Upload ``files`` and build the A2A Message for one chat turn.
+
+    Each upload is stored by the Server (deduplicated on content hash)
+    and referenced by ``agt-upload://<id>``; the daemon resolves the
+    bytes at claim time and materializes them under ``.agt/inputs/``.
+    """
+    parts: list[dict] = [{"type": "text", "text": prompt}]
+    for path in files:
+        data = path.read_bytes()
+        mime = mimetypes.guess_type(path.name)[0]
+        info = await client.upload_input_file(
+            name=path.name,
+            content_b64=base64.b64encode(data).decode(),
+            mime_type=mime,
+            source="cli",
+        )
+        parts.append({
+            "type": "file",
+            "uri": info.get("uri") or f"agt-upload://{info['upload_id']}",
+            "name": info.get("name") or path.name,
+            "mime_type": info.get("mime_type") or mime,
+        })
+    return {"role": "user", "parts": parts}
 
 
 def _run_chat_turn(
@@ -1104,6 +1362,8 @@ def _run_chat_turn(
     agent_cwd: Path | None,
     turn_index: int,
     identity_did: str | None,
+    files: tuple[Path, ...] = (),
+    event_printer: _AgentEventPrinter | None = None,
 ) -> str | None:
     """Dispatch one chat turn to the local daemon or the remote Server.
 
@@ -1120,6 +1380,8 @@ def _run_chat_turn(
             resume_session_id=resume_for_turn,
             first_prompt=first_prompt if is_first else None,
             turn_index=turn_index,
+            files=files,
+            event_printer=event_printer,
         )
         return job_id
 
@@ -1133,6 +1395,7 @@ def _run_chat_turn(
         work_dir_str=work_dir_str,
         identity_did=identity_did,
         agent_cwd=agent_cwd,
+        files=files,
     )
     if step_id is None:
         return current_job_id
@@ -1142,6 +1405,7 @@ def _run_chat_turn(
         server_url, work_dir_str,
         identity_did=identity_did,
         agent_cwd=agent_cwd,
+        event_printer=event_printer,
     )
     return current_job_id
 
@@ -1683,9 +1947,27 @@ def server_start(
     ``--detach``: fork a child running uvicorn; parent exits immediately.
     """
     # Validate configuration before importing the server module or spawning
-    # a detached child. This produces a friendly CLI message instead of a
-    # raw traceback when AGT_SERVER_SECRET is missing.
+    # a detached child. On a first run we generate the secret here rather
+    # than failing: `agt server start` is the first command most users run,
+    # and the value is auto-discovered by both the Server and any local
+    # daemon, so there is nothing to export.
     from ..server.config import ServerConfig, ServerConfigError
+    from ..server_secret import (
+        default_server_secret_path,
+        ensure_server_secret,
+    )
+
+    secret_path = default_server_secret_path()
+    had_secret = bool(secret_path.exists()) or bool(
+        os.environ.get("AGT_SERVER_SECRET", "").strip()
+    )
+    try:
+        created_secret = ensure_server_secret()
+    except OSError as exc:
+        click.echo(f"Error: cannot create {secret_path}: {exc}", err=True)
+        sys.exit(1)
+    if not had_secret and created_secret:
+        click.echo(f"Generated server secret at {secret_path}")
 
     try:
         ServerConfig.from_env()
@@ -1790,6 +2072,8 @@ def server_status(pid_file: str | None) -> None:
         click.echo("Server is NOT running.")
         sys.exit(1)
     click.echo(f"Server is running, pid={pid}, pidfile={path}")
+    port = int(os.environ.get("AGT_SERVER_PORT", "8420"))
+    click.echo(f"Console: http://127.0.0.1:{port}/")
 
 
 def _resolve_server_pid_file(explicit: str | None) -> Path:
@@ -2749,6 +3033,371 @@ def daemon_status() -> None:
     sys.exit(cmd_status(args))
 
 
+def _ws_port_from_url(url: str, fallback: int = 8422) -> int:
+    """Best-effort port extraction for the invite payload."""
+    from ..daemon.config import _port_of_url
+
+    raw = _port_of_url(url)
+    try:
+        return int(raw) if raw else fallback
+    except ValueError:
+        return fallback
+
+
+@daemon.command("invite")
+@click.option("--name", default=None, help="Daemon label (e.g. cloud-01).")
+@click.option("--url", "url", default=None, help="Daemon's public ws:// URL.")
+@click.option(
+    "--existing",
+    default=None,
+    help="Re-use an entry already present in ~/.agt/daemons (by name).",
+)
+@click.option(
+    "--daemon-id",
+    "daemon_id",
+    default=None,
+    help="Explicit daemon id. Defaults to the existing entry's id or a new uuid4.",
+)
+@click.option(
+    "--add",
+    "add_entry",
+    is_flag=True,
+    help="Register the target in this machine's ~/.agt/daemons.",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Allow replacing a name that is already registered with another URL.",
+)
+@click.option(
+    "--server-url",
+    default=None,
+    help="Server base URL to embed (only needed by HTTP-mode daemons).",
+)
+def daemon_invite(
+    name: str | None,
+    url: str | None,
+    existing: str | None,
+    daemon_id: str | None,
+    add_entry: bool,
+    force: bool,
+    server_url: str | None,
+) -> None:
+    """Generate a one-paste invite code for a remote daemon.
+
+    The code carries the server secret, the daemon's public URL, its
+    daemon id and listen port. Run the printed ``agt daemon init``
+    command on the daemon machine; nothing else needs to be copied.
+
+    Treat the code like an SSH private key: anyone holding it can
+    connect to this Server as that daemon.
+    """
+    from ..daemons_file import (
+        DaemonEntry,
+        DaemonsFileError,
+        daemons_file_path,
+        read_daemons_entries,
+        upsert_daemons_entry,
+    )
+    from ..invite import InviteError, encode_invite
+    from ..server_secret import load_server_secret
+
+    secret = load_server_secret()
+    if not secret:
+        click.echo(
+            "Error: no server secret configured. Start the server once "
+            "(`agt server start`) or run `agt server init`.",
+            err=True,
+        )
+        sys.exit(1)
+
+    if existing:
+        match = next(
+            (e for e in read_daemons_entries() if e.name == existing), None
+        )
+        if match is None:
+            click.echo(
+                f"Error: no entry named '{existing}' in {daemons_file_path()}",
+                err=True,
+            )
+            sys.exit(1)
+        name = match.name
+        url = url or match.url
+        daemon_id = daemon_id or match.daemon_id
+
+    if not name:
+        click.echo("Error: --name is required.", err=True)
+        sys.exit(2)
+    if not url:
+        click.echo("Error: --url is required (or use --existing).", err=True)
+        sys.exit(2)
+
+    try:
+        from ..daemons_file import validate_daemon_id, validate_name, validate_url
+
+        validate_name(name)
+        validate_url(url)
+        if daemon_id:
+            daemon_id = validate_daemon_id(daemon_id)
+    except ValueError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(2)
+
+    daemon_id = daemon_id or str(uuid.uuid4())
+    ws_port = _ws_port_from_url(url)
+
+    if add_entry:
+        try:
+            outcome = upsert_daemons_entry(
+                DaemonEntry(name=name, url=url, daemon_id=daemon_id),
+                replace_name=force,
+            )
+        except DaemonsFileError as exc:
+            click.echo(f"Error: {exc}", err=True)
+            sys.exit(1)
+        click.echo(
+            f"{outcome.capitalize()} {name} {url} (id={daemon_id}) "
+            f"in {daemons_file_path()}"
+        )
+
+    try:
+        code = encode_invite(
+            secret=secret,
+            url=url,
+            daemon_id=daemon_id,
+            name=name,
+            ws_port=ws_port,
+            server_url=server_url,
+        )
+    except InviteError as exc:  # pragma: no cover — defensive
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    click.echo()
+    click.echo("Run this on the daemon machine:")
+    click.echo()
+    click.echo(f"    agt daemon init {code}")
+    click.echo()
+    click.echo(
+        "The code embeds your server secret. Treat it like an SSH private key."
+    )
+
+
+@daemon.command("remove")
+@click.argument("target")
+def daemon_remove(target: str) -> None:
+    """Remove a reverse-dial target from this machine's ~/.agt/daemons.
+
+    TARGET is the entry name (e.g. ``cloud-01``) or its ``ws://`` URL.
+    The Server reads the file once at startup, so restart it to apply —
+    the matching DaemonLink is also stopped immediately by the API, but
+    the CLI cannot reach a running Server's link pool.
+    """
+    from ..daemons_file import (
+        DaemonsFileError,
+        daemons_file_path,
+        read_daemons_entries,
+        remove_daemons_entry,
+    )
+
+    entries = read_daemons_entries()
+    match = next((e for e in entries if e.name == target), None)
+    if match is None:
+        match = next((e for e in entries if e.url == target), None)
+    if match is None:
+        click.echo(
+            f"Error: no entry matching '{target}' in {daemons_file_path()}",
+            err=True,
+        )
+        sys.exit(1)
+
+    try:
+        removed = remove_daemons_entry(name=match.name)
+    except DaemonsFileError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    click.echo(f"Removed {removed.name} {removed.url} from {daemons_file_path()}")
+    click.echo(
+        "Restart the server (`agt server start`) for the change to take effect."
+    )
+
+
+@daemon.command("init")
+@click.argument("invite_code", required=False, metavar="[INVITE_CODE]")
+@click.option(
+    "--token",
+    default=None,
+    help="Server secret. Required when no INVITE_CODE is given.",
+)
+@click.option("--url", "url", default=None, help="This daemon's public ws:// URL.")
+@click.option("--name", default=None, help="Daemon label.")
+@click.option(
+    "--daemon-id",
+    "daemon_id",
+    default=None,
+    help="Explicit daemon id. Defaults to uuid5(url) when omitted.",
+)
+@click.option("--ws-port", type=int, default=None, help="Listen port (default 8422).")
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Overwrite an existing server secret that differs from the new one.",
+)
+@click.option(
+    "--start",
+    "start_after",
+    is_flag=True,
+    help="Start the daemon in the background after configuring it.",
+)
+@click.pass_context
+def daemon_init(
+    ctx: click.Context,
+    invite_code: str | None,
+    token: str | None,
+    url: str | None,
+    name: str | None,
+    daemon_id: str | None,
+    ws_port: int | None,
+    force: bool,
+    start_after: bool,
+) -> None:
+    """Configure this machine as a reverse-dial daemon.
+
+    With an INVITE_CODE (from ``agt daemon invite`` on the Server) this
+    writes the server secret, the daemon identity/URL and the listen
+    settings in one step. Without one, pass ``--token`` and ``--url``
+    explicitly.
+    """
+    import socket as _socket
+
+    from ..daemon.config import (
+        DaemonConfigError,
+        update_daemon_config_file,
+    )
+    from ..daemons_file import (
+        DaemonEntry,
+        DaemonsFileError,
+        daemons_file_path,
+        upsert_daemons_entry,
+    )
+    from ..ids import daemon_id_from_url
+    from ..invite import InviteError, decode_invite
+    from ..server_secret import default_server_secret_path
+
+    payload: dict = {}
+    server_url: str | None = None
+    if invite_code:
+        try:
+            payload = decode_invite(invite_code)
+        except InviteError as exc:
+            click.echo(f"Error: {exc}", err=True)
+            sys.exit(2)
+        secret = payload["secret"]
+        url = payload["url"]
+        daemon_id = payload["id"]
+        name = payload.get("name") or name or _socket.gethostname()
+        ws_port = payload.get("ws_port") or ws_port
+        server_url = payload.get("server_url")
+    else:
+        if not token:
+            click.echo(
+                "Error: --token is required when no INVITE_CODE is given.",
+                err=True,
+            )
+            sys.exit(2)
+        if not url:
+            click.echo("Error: --url is required.", err=True)
+            sys.exit(2)
+        secret = token
+        daemon_id = daemon_id or daemon_id_from_url(url)
+        name = name or _socket.gethostname()
+
+    # The daemons file only accepts a UUID as ``id=``; catching a bad
+    # value here beats writing an entry whose identity is silently
+    # demoted to a capability later.
+    try:
+        from ..daemons_file import validate_daemon_id
+
+        daemon_id = validate_daemon_id(daemon_id)
+    except ValueError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(2)
+
+    ws_port = ws_port or _ws_port_from_url(url or "")
+    if url is None:
+        click.echo("Error: no daemon URL configured.", err=True)
+        sys.exit(2)
+
+    # 1. Shared secret. Never clobber a different one by accident: that
+    #    would silently disconnect a machine that is already paired.
+    secret_path = default_server_secret_path()
+    existing_secret = ""
+    if secret_path.exists():
+        try:
+            existing_secret = secret_path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            click.echo(f"Error: cannot read {secret_path}: {exc}", err=True)
+            sys.exit(1)
+    if existing_secret and existing_secret != secret and not force:
+        click.echo(
+            f"Error: {secret_path} already holds a different server secret.\n"
+            "Re-run with --force to replace it (this machine will then only "
+            "be able to talk to the new Server).",
+            err=True,
+        )
+        sys.exit(1)
+    if existing_secret != secret:
+        try:
+            secret_path.parent.mkdir(parents=True, exist_ok=True)
+            secret_path.write_text(secret, encoding="utf-8")
+            secret_path.chmod(0o600)
+        except OSError as exc:
+            click.echo(f"Error: cannot write {secret_path}: {exc}", err=True)
+            sys.exit(1)
+        click.echo(f"Wrote server secret to {secret_path}")
+
+    # 2. Persisted daemon identity + listen settings.
+    updates: dict = {
+        "daemon_id": daemon_id,
+        "daemon_url": url,
+        "listen_mode": True,
+        "ws_port": ws_port,
+    }
+    if server_url:
+        updates["server_url"] = server_url
+    try:
+        update_daemon_config_file(updates)
+    except DaemonConfigError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(2)
+
+    # 3. This machine's own entry, so `agt daemon status` / CLI helpers can
+    #    still resolve the local daemon.
+    try:
+        upsert_daemons_entry(
+            DaemonEntry(name=name, url=url, daemon_id=daemon_id),
+            replace_name=force,
+        )
+    except DaemonsFileError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    click.echo(
+        f"Configured {name} ({url}, id={daemon_id}) in {daemons_file_path()}"
+    )
+
+    if start_after:
+        ctx.invoke(daemon_start, server_url=None, detach=True, log_file=None)
+        return
+
+    click.echo()
+    click.echo("Next: agt daemon start --detach")
+    click.echo(
+        f"Make sure this machine's port {ws_port} is reachable from the Server."
+    )
+
+
 @daemon.command("list")
 @click.option(
     "--server-url",
@@ -2923,12 +3572,24 @@ def daemon_config_show() -> None:
         "agent_timeout": "agent timeout (seconds)",
         "work_dir": "work directory",
         "agent_cwd_allowlist": "agent cwd allowlist",
+        "listen_mode": "listen mode (reverse-dial)",
+        "ws_port": "ws listen port",
+        "daemon_id": "daemon id",
+        "daemon_url": "daemon url",
+        "server_url": "server url",
     }
+    # Identity/URL keys are usually unset; printing four "source: default"
+    # lines for them would bury the four settings this command existed for.
+    optional_keys = {"daemon_id", "daemon_url", "server_url"}
 
     for key, label in defaults.items():
         rs = settings[key]
+        if key in optional_keys and rs.source == "default":
+            continue
         value = rs.value
-        if isinstance(value, list):
+        if isinstance(value, bool):
+            display = "yes" if value else "no"
+        elif isinstance(value, list):
             display = ":".join(str(p) for p in value)
         elif isinstance(value, Path):
             display = str(value)
@@ -2948,11 +3609,17 @@ def daemon_config_show() -> None:
             else:
                 saved = str(rs.file_value)
             parts.append(f"saved: {saved}")
-        if rs.default_value is not None and source != "default":
+        if (
+            rs.default_value is not None
+            and rs.default_value != ""
+            and source != "default"
+        ):
             if isinstance(rs.default_value, list):
                 default = ":".join(str(p) for p in rs.default_value)
             elif isinstance(rs.default_value, Path):
                 default = str(rs.default_value)
+            elif isinstance(rs.default_value, bool):
+                default = "yes" if rs.default_value else "no"
             else:
                 default = str(rs.default_value)
             parts.append(f"default: {default}")
@@ -2976,11 +3643,25 @@ def daemon_config_show() -> None:
     default=None,
     help="Absolute allowed agent-cwd root (repeatable).",
 )
+@click.option(
+    "--listen-mode/--no-listen-mode",
+    "listen_mode",
+    default=None,
+    help="Listen for the Server to dial in (reverse-dial) instead of dialing it.",
+)
+@click.option(
+    "--ws-port",
+    type=int,
+    default=None,
+    help="Reverse-dial listen port (default 8422).",
+)
 def daemon_config_set(
     max_concurrent: int | None,
     agent_timeout: int | None,
     work_dir: str | None,
     agent_cwd_allowlist: tuple[str, ...] | None,
+    listen_mode: bool | None,
+    ws_port: int | None,
 ) -> None:
     """Persist one or more Daemon execution-resource settings."""
     from ..daemon.config import (
@@ -3001,6 +3682,10 @@ def daemon_config_set(
         updates["work_dir"] = work_dir
     if agent_cwd_allowlist:
         updates["agent_cwd_allowlist"] = list(agent_cwd_allowlist)
+    if listen_mode is not None:
+        updates["listen_mode"] = listen_mode
+    if ws_port is not None:
+        updates["ws_port"] = ws_port
 
     if not updates:
         click.echo("Error: at least one setting is required.", err=True)
@@ -3056,11 +3741,21 @@ def daemon_config_set(
 @click.option(
     "--agent-cwd-allowlist", is_flag=True, help="Remove agent_cwd_allowlist from the file."
 )
+@click.option("--listen-mode", is_flag=True, help="Remove listen_mode from the file.")
+@click.option("--ws-port", is_flag=True, help="Remove ws_port from the file.")
+@click.option("--daemon-id", is_flag=True, help="Remove daemon_id from the file.")
+@click.option("--daemon-url", is_flag=True, help="Remove daemon_url from the file.")
+@click.option("--server-url", is_flag=True, help="Remove server_url from the file.")
 def daemon_config_unset(
     max_concurrent: bool,
     agent_timeout: bool,
     work_dir: bool,
     agent_cwd_allowlist: bool,
+    listen_mode: bool,
+    ws_port: bool,
+    daemon_id: bool,
+    daemon_url: bool,
+    server_url: bool,
 ) -> None:
     """Remove persisted Daemon execution-resource settings."""
     from ..daemon.config import (
@@ -3076,6 +3771,11 @@ def daemon_config_unset(
             "agent_timeout": agent_timeout,
             "work_dir": work_dir,
             "agent_cwd_allowlist": agent_cwd_allowlist,
+            "listen_mode": listen_mode,
+            "ws_port": ws_port,
+            "daemon_id": daemon_id,
+            "daemon_url": daemon_url,
+            "server_url": server_url,
         }.items()
         if flag
     ]

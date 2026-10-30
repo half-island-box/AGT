@@ -2,10 +2,11 @@
 
 Three execution modes:
 
-- **Streaming** (``sink != NoopSink``): consume structured JSON events
-  from the agent CLI's stream output; print text deltas to the terminal
-  in real time. Used when the provider supports streaming (Phase 5:
-  Claude Code via ``--output-format stream-json``).
+- **Streaming** (``sink != NoopSink``): consume structured events from
+  the agent CLI and print text deltas to the terminal in real time.
+  Claude Code streams JSON Lines via ``--output-format stream-json``;
+  Codex speaks JSON-RPC over stdio via ``codex app-server`` (the sink
+  drives the handshake through ``begin``/``consume``).
 - **Pipe text** (``sink == NoopSink``, default for unknown providers):
   capture stdout/stderr with :class:`StreamReader`; extract session id
   from text + disk fallback. Legacy Phase 1 behaviour, preserved
@@ -50,7 +51,6 @@ from ..runtime.registry import (
 )
 from ..runtime.session_locators import SessionLocator
 from ..runtime.streaming import (
-    ClaudeStreamSink,
     NoopSink,
     StreamingSink,
 )
@@ -163,39 +163,6 @@ def _disk_fallback(locator: SessionLocator | None) -> str | None:
     return candidates[0][1]
 
 
-# ── Phase 5: streaming args dispatch ──────────────────────────────────
-
-
-def _stream_args_for(sink: StreamingSink) -> list[str]:
-    """Return the argv additions to enable streaming for ``sink``.
-
-    Looks at the sink's concrete type so the registry stays the single
-    source of truth for "which provider supports what". Unknown sinks
-    get an empty list (the executor falls back to the pipe-text path).
-
-    Note: Claude Code requires ``--verbose`` to honour
-    ``--output-format=stream-json`` under ``-p`` mode; without it the
-    CLI refuses with "When using --print, --output-format=stream-json
-    requires --verbose".
-    """
-    if isinstance(sink, ClaudeStreamSink):
-        # ``--include-partial-messages`` enables Anthropic Messages
-        # streaming events (``content_block_delta`` / ``text_delta``)
-        # so the CLI emits each chunk as it is generated rather than
-        # buffering into one ``assistant`` event at the end. Without
-        # this flag the sink would still work (legacy ``assistant``
-        # full-message events), but the terminal experience would
-        # degrade to "wait for the full message, then dump" — see
-        # phase5-local-streaming-design.md §A.
-        return [
-            "--output-format",
-            "stream-json",
-            "--verbose",
-            "--include-partial-messages",
-        ]
-    return []
-
-
 def _mcp_url_for(config: DaemonConfig) -> str:
     """The AGT MCP endpoint a spawned agent should call.
 
@@ -231,6 +198,7 @@ class TaskExecutor:
         *,
         interactive: bool = False,
         progress_cb=None,
+        event_cb=None,
     ) -> TaskResult:
         """Run one agent subprocess for ``task``.
 
@@ -253,9 +221,9 @@ class TaskExecutor:
                 f"Agent binary not found at {binary}; run `agt probe` to re-scan."
             )
 
-        adapter = get_adapter(self._runtime.agent_entry.provider)
+        adapter = await self._select_adapter(binary)
         sink = adapter.stream_sink_factory()
-        stream_args = _stream_args_for(sink)
+        stream_args = list(adapter.stream_args)
 
         work_dir = self._ensure_work_dir(task)
 
@@ -357,6 +325,7 @@ class TaskExecutor:
                 result = await self._execute_streaming(
                     task, cmd, work_dir, env, start, sink, adapter,
                     progress_cb=progress_cb,
+                    event_cb=event_cb,
                 )
                 return result
             result = await self._execute_pipe_text(task, cmd, work_dir, env, start)
@@ -405,14 +374,44 @@ class TaskExecutor:
                 except Exception as exc:
                     log.warning("artifact scan failed: %s", exc)
 
+    async def _select_adapter(self, binary: Path) -> ProviderAdapter:
+        """Resolve the provider adapter, honouring transport capability.
+
+        Providers whose streaming transport is optional (codex's
+        ``app-server``) expose a probe. When the installed CLI lacks it,
+        the adapter's legacy pipe-text fallback runs instead, so an old
+        codex keeps working without a behavioural regression.
+        """
+        adapter = get_adapter(self._runtime.agent_entry.provider)
+        probe = adapter.stream_transport_probe
+        if probe is None:
+            return adapter
+        try:
+            available = await probe(binary)
+        except Exception:
+            log.warning("stream transport probe failed", exc_info=True)
+            available = False
+        if available:
+            return adapter
+        return adapter.pipe_text_fallback or adapter
+
     # ── Mode: interactive ───────────────────────────────────────
 
 
-    def _cancelled_result(self, task: Task, start: float, stdout: str = "", stderr: str = "") -> TaskResult:
+    def _cancelled_result(
+        self,
+        task: Task,
+        start: float,
+        stdout: str = "",
+        stderr: str = "",
+        events: list | None = None,
+    ) -> TaskResult:
         """Terminal result for a server-cancelled Step (Phase 4).
 
         Built after the subprocess was killed by the cancellation path;
         ``status="cancelled"`` flows through the normal report chain.
+        ``events`` carries whatever structured events the sink collected
+        before the cancellation so the report tail is not lost.
         """
         return TaskResult(
             task_id=task.task_id,
@@ -424,6 +423,7 @@ class TaskExecutor:
             status="cancelled",
             session_id=None,
             resume_rejected=False,
+            events=list(events or []),
         )
 
     async def _execute_interactive(
@@ -502,10 +502,14 @@ class TaskExecutor:
         adapter: ProviderAdapter,
         *,
         progress_cb=None,
+        event_cb=None,
     ) -> TaskResult:
         """Spawn the agent and consume its structured event stream.
 
         Each line of stdout is parsed as JSON and handed to ``sink``.
+        Sinks that set ``wants_stdin`` (codex's app-server transport)
+        get a stdin pipe and a ``begin`` call right after the spawn, so
+        they can issue the opening JSON-RPC handshake.
         ``sink.on_text_delta`` prints text fragments to the terminal in
         real time; ``sink.finalize`` yields the terminal
         :class:`SinkResult` carrying ``session_id`` and ``is_error``.
@@ -526,19 +530,37 @@ class TaskExecutor:
         ``_echo_task_result``, report_service) see no shape change.
 
         ``progress_cb`` (Phase 5 remote streaming), when provided, is an
-        ``async(current_prefix) -> None`` callback invoked by a background
-        sampler every ``_PROGRESS_FLUSH_INTERVAL`` seconds while the
-        cumulative stdout prefix grows. It never affects the terminal
-        ``TaskResult`` — the sampler is cancelled in ``finally`` and its
-        exceptions are swallowed (see design decision 10).
+        ``async(current_prefix, events) -> None`` callback invoked by a
+        background sampler every ``_PROGRESS_FLUSH_INTERVAL`` seconds while
+        the cumulative stdout prefix or the event buffer grows. It never
+        affects the terminal ``TaskResult`` — the sampler is cancelled in
+        ``finally`` and its exceptions are swallowed (see design decision 10).
+
+        ``event_cb`` (local structured rendering), when provided, is a plain
+        ``(event) -> None`` observer attached to the sink. The CLI uses it
+        to print ``--show-tools`` / ``--show-thinking`` lines live; the
+        remote path never uses it (events ride progress/report instead).
         """
+        if event_cb is not None:
+            sink.on_event = event_cb
+        wants_stdin = bool(getattr(sink, "wants_stdin", False))
         process = await asyncio.create_subprocess_exec(
             *cmd,
+            stdin=asyncio.subprocess.PIPE if wants_stdin else None,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(work_dir),
             env=env,
         )
+
+        # Protocol sinks (codex app-server) start the conversation over
+        # stdin. ``begin`` only writes the opening handshake; every later
+        # request is issued from ``sink.consume`` as responses arrive.
+        if wants_stdin and process.stdin is not None:
+            try:
+                await sink.begin(process.stdin, task=task, work_dir=work_dir)
+            except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+                log.warning("stream sink handshake failed: %s", exc)
 
         stdout_task = asyncio.create_task(self._drain_json(process.stdout, sink))
         stderr_task = asyncio.create_task(self._drain_silent(process.stderr))
@@ -570,6 +592,7 @@ class TaskExecutor:
                 stderr="",
                 duration=duration,
                 status="timeout",
+                events=list(getattr(sink, "events", []) or []),
             )
         except asyncio.CancelledError:
             # Phase 4: server-initiated cancel — kill the agent, surface
@@ -578,7 +601,9 @@ class TaskExecutor:
             process.kill()
             with contextlib.suppress(ProcessLookupError):
                 await process.wait()
-            return self._cancelled_result(task, start)
+            return self._cancelled_result(
+                task, start, events=list(getattr(sink, "events", []) or []),
+            )
         finally:
             if sampler_task is not None:
                 sampler_task.cancel()
@@ -604,30 +629,46 @@ class TaskExecutor:
             stdout=result.text,
             stderr="",
             duration=duration,
-            status="completed" if exit_code == 0 else "failed",
+            # Providers that surface a terminal failure in-band (codex's
+            # ``turn/completed{status:failed}``, claude's ``result.is_error``)
+            # can still exit 0; trust the structured result over the code.
+            status=(
+                "completed" if exit_code == 0 and not result.is_error else "failed"
+            ),
             session_id=session_id,
             resume_rejected=resume_rejected,
+            events=list(result.events),
+            usage=result.usage,
         )
 
     async def _sample_progress(self, sink: StreamingSink, progress_cb) -> None:
-        """Periodically report the sink's cumulative stdout prefix.
+        """Periodically report the sink's cumulative stdout prefix + events.
 
         Runs as a background task for the duration of the streaming
         execution. Reports the **full prefix** (idempotency requirement on
         the server side — a lost prefix can always be rebuilt by the next
-        sample), only when it grew since the previous sample. ``progress_cb``
+        sample) and only the **new** structured events since the previous
+        sample. A sample is skipped when neither grew. ``progress_cb``
         exceptions are swallowed so a network blip on the report path can
         never crash the executor or leave an un-retrieved task exception.
         """
         last_len = 0
+        last_seq = -1
         while True:
             await asyncio.sleep(_PROGRESS_FLUSH_INTERVAL)
             current = "".join(sink.accumulated_text)
-            if len(current) <= last_len:
+            all_events = list(getattr(sink, "events", []) or [])
+            new_events = [
+                event for event in all_events
+                if int(event.get("seq", 0)) > last_seq
+            ]
+            if len(current) <= last_len and not new_events:
                 continue
-            last_len = len(current)
+            last_len = max(last_len, len(current))
+            if new_events:
+                last_seq = int(new_events[-1].get("seq", last_seq))
             try:
-                await progress_cb(current)
+                await progress_cb(current, new_events)
             except Exception:
                 log.debug(
                     "progress_cb raised; skipping this sample",
@@ -659,21 +700,19 @@ class TaskExecutor:
                 session_id = _disk_fallback(adapter.session_locator)
 
         # Resume-rejection detector: inspect the structured result event.
-        # We hand it the last "result" event by re-deriving the relevant
-        # fields from the sink. ``ClaudeStreamSink`` exposes ``subtype``
-        # and ``errors``; detectors for other providers can ignore them.
-        raw_event: dict | None = None
-        raw_error: dict | None = None
-        if isinstance(sink, ClaudeStreamSink):
-            raw_event = {
-                "subtype": sink.subtype,
-                "errors": list(sink.errors),
-            }
-        resume_rejected = bool(
+        # Sinks expose the terminal ``subtype`` / ``errors`` pair when they
+        # have one (Claude and codex both do); detectors for providers
+        # without those fields ignore the payload. A sink may also decide
+        # directly — codex knows a ``thread/resume`` call was rejected.
+        raw_event: dict | None = {
+            "subtype": getattr(sink, "subtype", None),
+            "errors": list(getattr(sink, "errors", []) or []),
+        }
+        resume_rejected = bool(result.resume_rejected) or bool(
             result.is_error
             and adapter.resume_rejection_detector.is_resume_rejection(
                 is_error=result.is_error,
-                raw_error=raw_error,
+                raw_error=None,
                 raw_event=raw_event,
             )
         )

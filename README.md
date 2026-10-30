@@ -18,6 +18,11 @@ workflows, and a shared artifact registry.
 
 - **Provider-neutral execution** — run and chat through one CLI, with
   provider-native sessions and output streaming.
+- **Structured agent events** — chat forwards thinking, tool calls, and tool
+  results (server API, SSE, and CLI), and records per-turn token/cache/cost
+  usage. Claude Code streams them over `stream-json`; Codex streams them over
+  the `codex app-server` JSON-RPC protocol (with automatic fallback to
+  `codex exec` on older CLIs).
 - **Goal orchestration** — a root agent decomposes an objective, spawns child
   agents within a global budget, and synthesizes their deliverables.
 - **Shared context** — Goal agents exchange versioned decisions, constraints,
@@ -30,6 +35,11 @@ workflows, and a shared artifact registry.
   machines via HTTP or reverse-dial WebSocket.
 - **Identity routing** — assign roles such as reviewer or tester and route them
   by provider, daemon affinity, and runtime availability.
+- **Console projects** — persist user-selected directory projects and browse
+  allowed directories through loopback-only server APIs. A project always has
+  a local (Server-machine) directory and may optionally pin one remote
+  daemon directory, browsable over the reverse-dial link and used as the
+  default working directory for chat, SOP, and Goal runs on that daemon.
 - **MCP and editor integration** — expose sub-agent spawning to MCP-capable
   agents and use the early VS Code extension for chat, Goals, and SOP editing.
 
@@ -66,6 +76,12 @@ agt --help
 agt probe
 agt run --provider claude --prompt "Explain this repository"
 agt chat --provider claude
+
+# Attach files to the first chat turn (repeatable, max 10)
+agt chat --file report.pdf --file notes.md
+
+# Show thinking, tool calls, and per-turn token/cost usage
+agt chat --show-thinking --show-tools --usage
 
 # Resume a persisted session
 agt chat --list
@@ -146,16 +162,61 @@ Use server mode for queued execution, remote workers, shared history, and
 multi-machine orchestration.
 
 ```bash
-agt server init
-agt server start --detach
+agt server start --detach          # first run generates ~/.agt/server.secret
 agt daemon start --detach
 agt task submit --prompt "Say hello in three words"
 ```
 
 The server listens on `127.0.0.1:8420` by default. OpenAPI documentation is at
-`http://127.0.0.1:8420/docs`. See the
+`http://127.0.0.1:8420/docs`. The server also provides loopback-only console
+project APIs for creating, renaming, opening, and listing directory-backed
+projects; local directory browsing is constrained by
+`AGT_CONSOLE_WORKSPACE_ROOTS`. A project may additionally pin a directory on one
+remote daemon (`remote_daemon_id` + `remote_path`): listing it goes over the
+reverse-dial link (`GET /api/console/directories?daemon_id=…`) and is bounded by
+that daemon's `AGT_AGENT_CWD_ALLOWLIST`, so every selectable directory is also
+runnable. Runs always record the project's local path as their run-history
+directory (`jobs.cwd`) while keeping the remote directory as the execution
+directory (`jobs.agent_cwd`), so chat, SOP and Goal history — including remote
+runs — and run counts stay grouped under the project; `GET /api/runs` accepts a
+repeated `cwd` to match older rows that recorded a remote path. See the
 [quick-start guide](<docs/guide%20docs/quick_start.md>) for deployment
 topologies and configuration.
+
+### Connect a remote daemon
+
+A daemon behind NAT listens on a fixed port and the server dials out to it.
+Pairing is one command on each side — the invite code carries the shared
+secret, the daemon's public URL and its id, so nothing is copied by hand:
+
+```bash
+# server machine
+agt daemon invite --name cloud-01 --url ws://1.2.3.4:8422 --add
+#   → run the printed `agt daemon init agt1.…` on the daemon machine
+
+# daemon machine
+agt daemon init agt1.…
+agt daemon start --detach
+
+# server machine — retire a remote daemon and drop its target entry
+agt daemon remove cloud-01
+```
+
+`agt daemon remove` deletes the target's line from `~/.agt/daemons` (comments and
+other entries untouched); the server stops dialing it after a refresh or a
+restart. The settings panel's **Connection & pairing** block can also register
+and remove targets through the loopback-only `/api/pairing/*` endpoints, which
+additionally stop the live `DaemonLink` immediately.
+
+`POST /api/daemons/refresh` re-reads the target file into a running server: new
+targets start being dialed at once, dropped ones stop, and a daemon that was
+offline is re-dialed immediately instead of waiting out its reconnect backoff.
+Healthy links are left alone, so in-flight claims are never interrupted. Both
+frontends expose it as a refresh button (the plugin's sidebar title bar and each
+row of the settings daemon list).
+
+An invite code embeds the server secret; treat it like an SSH private key.
+See [reverse-dial pairing](<docs/guide%20docs/quick_start.md#3-反向连接nat-穿透远程-daemon-推荐>).
 
 ## CLI
 
@@ -194,86 +255,16 @@ environment variables, and exit codes.
                             └───────────┘
 ```
 
-### Core invariants
-
-- Every agent invocation is a **per-task subprocess**; agt does not keep an agent process alive.
-- Conversation continuity is delegated to the provider and restored via persisted session IDs.
-- Provider-specific behavior is isolated behind **runtime adapters** (registry pattern).
-- The **server** owns coordination and persistence; **daemons** own local execution.
-- Spawn lineage (`parent_job_id`) and DAG dependencies (`job_parents`) are orthogonal and coexist.
-
-### Project structure
-
-```text
-agt/
-├── a2a.py         A2A-shaped internal object model (Message/Part/Artifact)
-├── agent_history  Provider transcript readers (Claude Code / Codex)
-├── ids.py         Stable ID derivation (uuid5 from daemon URL)
-├── cli/           Click command-line interface
-│   ├── main.py    All core commands (probe/run/chat/server/daemon/task/...)
-│   ├── sop.py     SOP pipeline commands (validate/submit/run/status/log)
-│   └── goal.py    Goal orchestration commands (submit/run/status/log/input/
-│                  cancel/artifacts/export)
-├── goal/          Goal-mode prompt templates (orchestrator strategy)
-├── comm/          HTTP + WebSocket client, WS-RPC link
-├── daemon/        Runtime registration, task claiming, reverse-dial WS server,
-│                  MCP proxy, running-task tracking, local resource server
-├── probe/         Agent CLI discovery (which/shell fallback)
-├── runtime/       Provider adapter registry:
-│                  command_builders, session_locators, streaming sinks,
-│                  resume_detectors, mcp_config profiles
-├── server/        FastAPI application:
-│   ├── routes/    tasks, jobs, artifacts, identities, sessions, daemons,
-│   │              runtimes, heartbeat, sop, goal
-│   ├── services/  job lifecycle, spawn orchestration, artifact registry,
-│   │              claim, report, selection, SOP expansion, goal submit/export,
-│   │              catalog
-│   ├── mcp_server MCP catalog + authenticated Goal spawn (FastMCP)
-│   └── stream_hub SSE pub/sub for remote streaming
-├── sop/           SOP DSL parsing + static validation
-└── task/          Task executor (3 modes), session store, artifact scanner,
-                   spawn intent parser, message renderer
-```
-
-The TypeScript client lives in `vscode/` with a strict layer split: `src/core` (API client, server lifecycle, i18n — no `vscode` imports, reusable by future hosts like Obsidian) and `src/platform` + `src/webviews` (VS Code-specific UI).
-
-## Configuration
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `AGT_SERVER_URL` | `http://127.0.0.1:8420` | Server used by CLI and daemon. |
-| `AGT_SERVER_SECRET` | `~/.agt/server.secret` fallback | Shared HMAC secret used by server and daemon. |
-| `AGT_SERVER_PORT` | `8420` | Server port. |
-| `AGT_DB_PATH` | `~/.agt/agt.db` | SQLite database location. |
-| `AGT_MAX_CONCURRENT` | `1` | Max concurrent agent tasks per daemon; overrides `~/.agt/daemon.json`. |
-| `AGT_AGENT_TIMEOUT` | `600` | Agent subprocess timeout (seconds); overrides `~/.agt/daemon.json`. |
-| `AGT_WORK_DIR` | `~/.agt/workspaces` | Task workspace root; overrides `~/.agt/daemon.json`. |
-| `AGT_AGENT_CWD_ALLOWLIST` | `~` (home directory) | Colon-separated allowed agent cwd roots; overrides `~/.agt/daemon.json`. |
-| `AGT_LISTEN_MODE` | `0` | Set `1` for reverse-dial (NAT) mode. |
-| `AGT_DAEMON_WS_PORT` | `8422` | Reverse-dial WS listen port. |
-| `AGT_DAEMON_MCP_PORT` | `8428` | Loopback MCP proxy port (remote daemons). |
-| `AGT_EXTRA_AGENTS` | — | Extra agents: `cmd:provider:Display[:stream_format]`. |
-
-### Common files
-
-| Data | Location |
-|---|---|
-| Server database | `~/.agt/agt.db` |
-| Project chat sessions | `<project>/.agt/sessions.json` |
-| Identity files | `~/.agt/identities/<slug>/AGENTS.md` |
-| Server PID / log | `~/.agt/server.pid`, `~/.agt/server.log` |
-| Daemon PID / log | `~/.agt/daemon.pid`, `~/.agt/daemon.log` |
-| Daemon execution config | `~/.agt/daemon.json` (optional, `0o600`) |
-
-## Documentation
-
-- [CLI command reference](<docs/guide%20docs/commands.md>)
-- [End-to-end quick start](<docs/guide%20docs/quick_start.md>)
-- [New-provider registration guide](<docs/guide%20docs/provider-registration.md>)
-- [Architecture & orchestration design](docs/impl/agent-orchestration-design.md)
-- [SOP design](docs/impl/phase5-sop-design.md)
-- [Goal mode design](docs/impl/goal-mode-design.md)
-- [Dynamic spawn design](docs/impl/phase3-dynamic-spawn-design.md)
+- **CLI** submits work and provides human-readable views of runs.
+- **Server** owns coordination, persistence, routing, MCP, and artifacts.
+- **Console projects** are persistent directory pointers; run history remains
+  scoped by the project path in `jobs.cwd`. A project's local path is
+  mandatory; its optional `(remote_daemon_id, remote_path)` pair supplies the
+  default working directory for chat/SOP/Goal runs routed to that daemon.
+- **Daemon** owns local process execution, concurrency, and heartbeats.
+- **Agent CLIs** run as fresh subprocesses; sessions remain provider-native.
+- **SQLite** is the source of truth for all Server-managed runs.
+  `sessions.json` indexes are used only by local direct `agt chat`.
 
 ## Development
 

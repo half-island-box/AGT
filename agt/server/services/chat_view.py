@@ -9,10 +9,23 @@ from ..models import JobModel, SessionModel, StepModel
 from ..schemas import ChatRunListResponse, ChatRunSummary
 
 
+def _first_prompt(job: JobModel) -> str | None:
+    """Return the conversation title, falling back to its earliest Step.
+
+    ``first_prompt`` is persisted when a chat Job is created. The Step
+    fallback keeps runs created by old servers visible before the backfill
+    migration runs (or when a test/legacy fixture constructs rows directly).
+    """
+    prompt = job.first_prompt
+    if prompt is None:
+        prompt = next((step.prompt for step in job.steps if step.prompt), None)
+    return prompt if prompt and prompt.strip() else None
+
+
 async def list_chat_runs(
     db: AsyncSession,
     *,
-    cwd: str | None = None,
+    cwds: list[str] | None = None,
     daemon_id: str | None = None,
     provider: str | None = None,
     limit: int,
@@ -21,17 +34,20 @@ async def list_chat_runs(
     """List chat sessions as run rows, newest update first.
 
     Sessions are the canonical chat index; we join JobModel for status and
-    daemon context. The ``cwd`` filter uses ``SessionModel.cwd`` when
-    available, falling back to the associated JobModel.cwd.
+    daemon context. The ``cwds`` filter uses ``SessionModel.cwd`` when
+    available, falling back to the associated JobModel.cwd. Several paths are
+    accepted so a console project can match its local path plus the remote
+    directory its runs used before ``JobModel.cwd`` was pinned to the project.
     """
     stmt = (
         select(SessionModel, JobModel)
         .join(JobModel, SessionModel.job_id == JobModel.job_id)
         .where(JobModel.job_type == "chat")
     )
-    if cwd is not None:
+    if cwds:
         stmt = stmt.where(
-            (SessionModel.cwd == cwd) | (SessionModel.cwd.is_(None) & (JobModel.cwd == cwd))
+            SessionModel.cwd.in_(cwds)
+            | (SessionModel.cwd.is_(None) & JobModel.cwd.in_(cwds))
         )
     if daemon_id is not None:
         stmt = stmt.where(
@@ -62,7 +78,7 @@ async def list_chat_runs(
                 identity_did=session.identity_did or job.identity_did,
                 daemon_id=job.target_daemon_id,
                 cwd=session.cwd or job.cwd,
-                title=None,  # TODO: derive from first StepModel.prompt if desired
+                title=_first_prompt(job),
                 status=job.status,
                 created_at=session.created_at,
                 updated_at=session.updated_at,
@@ -74,7 +90,7 @@ async def list_chat_runs(
 async def list_chat_runs_response(
     db: AsyncSession,
     *,
-    cwd: str | None = None,
+    cwds: list[str] | None = None,
     daemon_id: str | None = None,
     provider: str | None = None,
     limit: int,
@@ -82,7 +98,7 @@ async def list_chat_runs_response(
 ) -> ChatRunListResponse:
     runs, total = await list_chat_runs(
         db,
-        cwd=cwd,
+        cwds=cwds,
         daemon_id=daemon_id,
         provider=provider,
         limit=limit,

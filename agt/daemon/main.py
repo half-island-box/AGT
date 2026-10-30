@@ -23,7 +23,11 @@ from ..probe.scanner import AgentProbe
 from ..runtime.models import Runtime
 from ..server.services.auth_service import TaskToken
 from ..server_secret import default_server_secret_path
-from .config import DaemonConfig, DaemonConfigError
+from .config import (
+    DaemonConfig,
+    DaemonConfigError,
+    resolve_daemon_settings,
+)
 from .daemon import Daemon
 from .local_server import LocalResourceServer
 from .mcp_proxy import ProxyMcpServer
@@ -82,36 +86,41 @@ def _clear_pidfile() -> None:
 
 def _ensure_local_daemons_entry(ws_port: int) -> bool:
     """Append a local-machine entry to ``~/.agt/daemons`` if none exists.
+
+    The entry anchors this machine's daemon identity for installs that
+    have not been through ``agt daemon init``: ``_self_daemon_entry``
+    matches it (port + local host) and ``_load_daemon_id`` derives a
+    stable uuid5 id from its URL. Written as ``local ws://0.0.0.0:<port>``.
+
+    Idempotent — an existing entry with a local host and the same port is
+    reused, never duplicated. Best-effort: a read-only / root-owned
+    ``daemons`` file is logged and skipped (the daemon still starts; it
+    just won't be detectable as "local" by the CLI until the file is
+    writable).
+
     Returns True if a local entry exists on return (pre-existing or just
     appended), False when the append was refused.
     """
+    from ..daemons_file import (
+        DaemonEntry,
+        DaemonsFileError,
+        daemons_file_path,
+        read_daemons_entries,
+        upsert_daemons_entry,
+    )
     from .config import _host_of_url, _is_local_host, _port_of_url
 
-    path = Path.home() / ".agt" / "daemons"
-    lines: list[str] = []
-    if path.exists():
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except OSError as exc:
-            log.warning("Could not read %s: %s", path, exc)
-            return False
-    for raw in lines:
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        parts = line.split(None, 1)
-        if len(parts) != 2:
-            continue
-        url = parts[1].strip()
-        if _port_of_url(url) == str(ws_port) and _is_local_host(
-            _host_of_url(url)
+    path = daemons_file_path()
+    for entry in read_daemons_entries(path):
+        if _port_of_url(entry.url) == str(ws_port) and _is_local_host(
+            _host_of_url(entry.url)
         ):
             return True  # local entry already present
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as fp:
-            fp.write(f"local ws://0.0.0.0:{ws_port}\n")
-    except OSError as exc:
+        upsert_daemons_entry(
+            DaemonEntry(name="local", url=f"ws://0.0.0.0:{ws_port}"), path
+        )
+    except (OSError, DaemonsFileError) as exc:
         log.warning(
             "Could not append local entry to %s (%s). Fix the file's "
             "ownership/permissions, otherwise `agt chat` cannot detect "
@@ -367,12 +376,42 @@ async def _execute_one(
             effective_prompt = task_payload["prompt"]
             raw_message = task_payload.get("message")
             if raw_message:
+                from ..a2a import parse_artifact_uri, parse_upload_uri
                 from ..task.message_render import render_task_message
 
-                async def _artifact_resolver(artifact_id: str):
+                async def _input_resolver(uri: str):
+                    """Resolve one FilePart reference by URI namespace.
+
+                    ``agt-artifact://`` → ``artifacts.get``;
+                    ``agt-upload://``   → ``uploads.get``.
+                    WS first (the reverse-dial link), HTTP fallback.
+                    """
                     cur_ws = (
                         _resolve_ws_source(ws_server) if ws_server is not None else None
                     )
+                    import base64
+
+                    upload_id = parse_upload_uri(uri)
+                    artifact_id = parse_artifact_uri(uri)
+                    if upload_id is not None:
+                        if cur_ws is not None and cur_ws.supports_rpc_v1:
+                            try:
+                                return await cur_ws.call(
+                                    "uploads.get",
+                                    {"upload_id": upload_id},
+                                    timeout_ms=8000,
+                                )
+                            except Exception as exc:
+                                log.warning("uploads.get over WS failed: %s", exc)
+                                return None
+                        try:
+                            content = await client.get_upload_content(upload_id)
+                            return {"content_b64": base64.b64encode(content).decode()}
+                        except Exception as exc:
+                            log.warning("upload content fetch failed: %s", exc)
+                            return None
+                    if artifact_id is None:
+                        return None
                     if cur_ws is not None and cur_ws.supports_rpc_v1:
                         try:
                             return await cur_ws.call(
@@ -385,8 +424,6 @@ async def _execute_one(
                             return None
                     try:
                         content = await client.get_artifact_content(artifact_id)
-                        import base64
-
                         return {"content_b64": base64.b64encode(content).decode()}
                     except Exception as exc:
                         log.warning("artifact content fetch failed: %s", exc)
@@ -396,7 +433,7 @@ async def _execute_one(
                     effective_prompt = await render_task_message(
                         raw_message,
                         agent_cwd=agent_cwd or Path.cwd(),
-                        resolver=_artifact_resolver,
+                        resolver=_input_resolver,
                     )
                 except Exception as exc:
                     log.exception("task %s input rendering failed", task_id)
@@ -422,32 +459,50 @@ async def _execute_one(
             # are swallowed inside ``report_task_progress_ws_first`` and the
             # executor sampler, so progress can never break the terminal
             # report path.
-            async def _progress_cb(stdout_prefix: str) -> None:
+            # Structured events: track the highest ``seq`` the Server has
+            # accepted so the terminal report only carries the unacked tail.
+            sent_event_seq = 0
+
+            async def _progress_cb(
+                stdout_prefix: str, events: list | None = None
+            ) -> None:
                 # Phase 3: length-preserving mask — spawn marker JSON must
                 # never leak through live SSE frames; removal would shrink
                 # the cumulative prefix and trip the server's shrink guard.
                 from ..task.spawn_intent import mask_spawn_lines
                 from ..task.spawn_intent import mask_context_lines
 
+                nonlocal sent_event_seq
+                pending = [
+                    event for event in (events or [])
+                    if int(event.get("seq", 0)) > sent_event_seq
+                ]
                 stdout_prefix = mask_context_lines(mask_spawn_lines(stdout_prefix))
                 cur_ws = (
                     _resolve_ws_source(ws_server) if ws_server is not None else None
                 )
                 if claim_state is not None:
-                    await report_task_progress_ws_first(
+                    ok = await report_task_progress_ws_first(
                         wsrpc=cur_ws,
                         http_client=client,
                         state=claim_state,
                         task_id=task_id,
                         stdout_prefix=stdout_prefix,
+                        events=pending,
                     )
                 else:
                     try:
-                        await client.report_progress(
-                            task_id=task_id, stdout_prefix=stdout_prefix,
+                        ok = await client.report_progress(
+                            task_id=task_id,
+                            stdout_prefix=stdout_prefix,
+                            events=pending,
                         )
                     except Exception:
-                        pass
+                        ok = False
+                if ok and pending:
+                    # Progress is best-effort; a failed sample leaves the
+                    # events in the report tail instead.
+                    sent_event_seq = int(pending[-1].get("seq", sent_event_seq))
 
             try:
                 result = await daemon.run(
@@ -521,6 +576,10 @@ async def _execute_one(
                                 exc,
                             )
 
+            pending_events = [
+                event for event in (getattr(result, "events", None) or [])
+                if int(event.get("seq", 0)) > sent_event_seq
+            ]
             await _safe_report(
                 client,
                 task_id=task_id,
@@ -537,6 +596,8 @@ async def _execute_one(
                 outcome=getattr(result, "outcome", None),
                 outcome_payload=getattr(result, "outcome_payload", None),
                 context_ops=getattr(result, "context_ops", None),
+                events=pending_events,
+                usage=getattr(result, "usage", None),
             )
 
         finally:
@@ -559,6 +620,8 @@ async def _safe_report(
     outcome: str | None = None,
     outcome_payload: dict | None = None,
     context_ops: list[dict] | None = None,
+    events: list | None = None,
+    usage: dict | None = None,
 ) -> None:
     """Best-effort result write. WS-first in reverse-dial mode; HTTP otherwise.
 
@@ -585,6 +648,8 @@ async def _safe_report(
                 outcome=outcome,
                 outcome_payload=outcome_payload,
                 context_ops=context_ops,
+                events=events,
+                usage=usage,
             )
         else:
             await client.report_task(
@@ -600,6 +665,8 @@ async def _safe_report(
                 outcome=outcome,
                 outcome_payload=outcome_payload,
                 context_ops=context_ops,
+                events=events,
+                usage=usage,
             )
     except Exception as exc:
         log.warning("report failed for task %s: %s", task_id, exc)
@@ -754,6 +821,8 @@ async def run_background(config: DaemonConfig) -> None:
             daemon_id=config.daemon_id,
             url=daemon_url,
             on_connect=_push_snapshot_on_connect,
+            # Remote console directory browsing uses the same roots as the
+            # execution allowlist: anything browsable is runnable.
             allowlist=config.agent_cwd_allowlist,
         )
         await ws_server.start()
@@ -827,11 +896,22 @@ async def run_background(config: DaemonConfig) -> None:
 
 def cmd_start(args: argparse.Namespace) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s: %(message)s")
+    # Resolve the managed settings once: registering this machine's
+    # ``~/.agt/daemons`` entry needs the *effective* ws_port, which may now
+    # come from ``~/.agt/daemon.json`` (written by ``agt daemon init``)
+    # rather than the environment.
+    try:
+        resolved = resolve_daemon_settings()
+    except DaemonConfigError as exc:
+        print(f"Failed to load daemon configuration: {exc}", file=sys.stderr)
+        print(
+            "Fix or remove ~/.agt/daemon.json and restart the daemon.",
+            file=sys.stderr,
+        )
+        return 2
     # Register this machine in ~/.agt/daemons BEFORE from_env — the
     # identity derivation reads the file to find this daemon's entry.
-    _ensure_local_daemons_entry(
-        int(os.environ.get("AGT_DAEMON_WS_PORT", str(DaemonConfig().ws_listen_port)))
-    )
+    _ensure_local_daemons_entry(int(resolved["ws_port"].value))
     try:
         config = DaemonConfig.from_env()
     except DaemonConfigError as exc:
