@@ -153,6 +153,26 @@ class DaemonLink:
             timeout_ms=8000,
         )
 
+    async def list_directory(self, path: str | None) -> dict:
+        """List directories on the remote daemon (console directory picker).
+
+        Mirrors :meth:`get_session_history`: the console cannot stat the
+        daemon's disk, so it asks over the reverse-dial link. ``path=None``
+        starts at the daemon's first ``agent_cwd_allowlist`` root.
+
+        Raises ``WSRPCUnavailable`` when the link is down, and propagates
+        ``RPCRejected`` (validation / unknown method) /
+        ``WSRPCUncertain`` (timeout) from the call.
+        """
+        link = self._link
+        if link is None or link.closed or not link.supports_rpc_v1:
+            raise WSRPCUnavailable("daemon offline")
+        return await link.call(
+            "fs.list",
+            {"path": path},
+            timeout_ms=8000,
+        )
+
     async def delete_session(
         self,
         session_id: str,

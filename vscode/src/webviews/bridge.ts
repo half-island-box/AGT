@@ -91,11 +91,12 @@ export const bridge = {
   isMock: vscodeApi === undefined,
 
   /**
-   * True when the host answers ``projects.directories``. The VS Code
-   * extension host has no such handler, so its webviews hide the browse
-   * buttons instead of failing the call; the browser mock provides it.
+   * True when the host answers ``projects.directories``. The extension host
+   * handles it (local via ``node:fs``, remote via the Server's ``fs.list``
+   * proxy), and the browser mock provides it too — so both show the browse
+   * buttons.
    */
-  canBrowseDirectories: vscodeApi === undefined,
+  canBrowseDirectories: true,
 
   call<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T> {
     if (!vscodeApi) {

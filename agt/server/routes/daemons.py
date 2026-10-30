@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ...comm.errors import RPCRejected, WSRPCUnavailable, WSRPCUncertain
 from ..database import get_db
 from ..models import StepModel
 from ..schemas import (
@@ -47,6 +48,30 @@ def _daemon_links(request: Request) -> dict[str, object]:
     ``online`` flag then relies on heartbeat liveness alone.
     """
     return getattr(request.app.state, "daemon_links", None) or {}
+
+
+def _rpc_error(exc: Exception) -> HTTPException:
+    """Map a reverse-dial ``fs.list`` failure onto a console-facing HTTP error."""
+    if isinstance(exc, WSRPCUnavailable):
+        return HTTPException(
+            status_code=503,
+            detail={"type": "daemon_offline", "message": "daemon is offline"},
+        )
+    if isinstance(exc, WSRPCUncertain):
+        return HTTPException(
+            status_code=504,
+            detail={"type": "daemon_timeout", "message": "daemon did not answer in time"},
+        )
+    body = exc.body if isinstance(exc, RPCRejected) and isinstance(exc.body, dict) else {}
+    error_type = str(body.get("type") or "daemon_rejected")
+    message = str(body.get("message") or "daemon rejected the request")
+    # ``path_error`` / ``validation_error`` are user-input problems → 400.
+    # ``unknown_method`` means an older daemon without ``fs.list`` → 502.
+    status_code = 400 if error_type in {"path_error", "validation_error"} else 502
+    return HTTPException(
+        status_code=status_code,
+        detail={"type": error_type, "message": message},
+    )
 
 
 @router.get("", response_model=ListDaemonsResponse)
@@ -157,6 +182,36 @@ async def list_daemon_artifacts_route(
     metadata plus the producing session's id.
     """
     return await artifacts_for_daemon(db, daemon_id)
+
+
+@router.get("/{daemon_id}/directories")
+async def list_daemon_directories_route(
+    daemon_id: str,
+    request: Request,
+    path: str | None = Query(None),
+) -> dict:
+    """List directories on a remote daemon's filesystem.
+
+    Backs the plugin's remote-daemon working-directory picker. The daemon's
+    disk is unreachable from the console, so this proxies an ``fs.list`` RPC
+    over the reverse-dial link; ``path=None`` starts at the daemon's first
+    ``agent_cwd_allowlist`` root. Only configured remote targets (those with
+    a live ``DaemonLink``) are browsable — local daemons have no link and are
+    browsed by the extension host directly.
+    """
+    link = _daemon_links(request).get(daemon_id)
+    if link is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "type": "unknown_remote_daemon",
+                "message": f"'{daemon_id}' is not a configured remote daemon",
+            },
+        )
+    try:
+        return await link.list_directory(path)
+    except (WSRPCUnavailable, WSRPCUncertain, RPCRejected) as exc:
+        raise _rpc_error(exc) from None
 
 
 __all__ = ["router"]

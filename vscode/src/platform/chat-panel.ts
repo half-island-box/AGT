@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ServerLifecycle } from '../core/lifecycle';
 import type { AgtApi } from '../core/api';
+import { listDirectories } from './directories';
 import type {
   ChatInputMessage,
   ChatSessionInfo,
@@ -385,6 +386,12 @@ export class ChatPanel {
           });
           const sessions = await chatSessions(this.ctx.lifecycle.api, daemonId);
           result = { deleted, sessions };
+          break;
+        }
+        case 'projects.directories': {
+          const daemonId = msg.params?.daemonId ? String(msg.params.daemonId) : null;
+          const path = msg.params?.path ? String(msg.params.path) : null;
+          result = await listDirectories(this.ctx.lifecycle.api, daemonId, path);
           break;
         }
         default:

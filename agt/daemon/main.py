@@ -754,6 +754,7 @@ async def run_background(config: DaemonConfig) -> None:
             daemon_id=config.daemon_id,
             url=daemon_url,
             on_connect=_push_snapshot_on_connect,
+            allowlist=config.agent_cwd_allowlist,
         )
         await ws_server.start()
         log.info(

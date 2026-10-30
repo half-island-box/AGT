@@ -1,6 +1,7 @@
 import type {
   ChatInputMessage,
   ChatSessionInfo,
+  ConsoleDirectoryListing,
   DaemonConfigInfo,
   ArtifactInfo,
   DaemonInfo,
@@ -361,6 +362,27 @@ export class AgtApi {
       `/api/daemons/${id}/sessions`,
     );
     return res.sessions;
+  }
+
+  /**
+   * List directories on a remote daemon's filesystem (directory picker).
+   *
+   * ``path`` omitted → the daemon's first ``agent_cwd_allowlist`` root. The
+   * Server proxies this to the daemon over the reverse-dial ``fs.list`` RPC;
+   * a local daemon has no such link and must be browsed by the host directly.
+   */
+  async daemonDirectories(
+    daemonId: string,
+    path?: string | null,
+  ): Promise<ConsoleDirectoryListing> {
+    const params = new URLSearchParams();
+    if (path) params.set('path', path);
+    const query = params.toString();
+    return this.request<ConsoleDirectoryListing>(
+      `/api/daemons/${encodeURIComponent(daemonId)}/directories${query ? `?${query}` : ''}`,
+      {},
+      10_000,
+    );
   }
 
   async resolveSession(sessionId: string): Promise<SessionResolveInfo> {
