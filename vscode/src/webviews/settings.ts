@@ -8,6 +8,7 @@ import type {
   DaemonInfo,
   IdentityWithBindings,
   PairingAddDaemonInfo,
+  PairingRemoveInfo,
   PairingStateInfo,
   UiLanguage,
 } from '../core/types';
@@ -101,6 +102,19 @@ let pairing: {
   result: null,
   draft: { name: '', host: '', capabilities: '' },
 };
+
+/**
+ * Per-row "remove" state for the daemons card: the button arms on the
+ * first click (``confirmId``) and deletes the target on the second, so a
+ * misclick cannot drop a daemon. Kept apart from ``busyAction`` so an
+ * in-flight removal disables the table, not the whole page.
+ */
+let daemonRemove: {
+  confirmId: string | null;
+  busyId: string | null;
+  error: string | null;
+  notice: string | null;
+} = { confirmId: null, busyId: null, error: null, notice: null };
 
 interface DaemonConfigDraft {
   maxConcurrent: string;
@@ -215,6 +229,15 @@ function pairingEnabled(): boolean {
     && boot.capabilities?.pairing !== false;
 }
 
+/**
+ * Only registered targets can be removed: a runtime-only daemon (no
+ * ``url``) has no ``~/.agt/daemons`` entry to delete, and the local
+ * daemon is controlled by the Server/daemon switches instead.
+ */
+function removableDaemon(d: DaemonInfo): boolean {
+  return pairingEnabled() && Boolean(d.url) && d.daemon_id !== boot?.localDaemonId;
+}
+
 function pairingErrorText(err: unknown): string {
   const message = err instanceof Error ? err.message : String(err);
   return tr('settings.pairingError', { message });
@@ -318,6 +341,43 @@ async function connectPairingTarget(): Promise<void> {
   } finally {
     render();
     void call('refresh');
+  }
+}
+
+/**
+ * Remove a registered target from the daemons file and re-sync the
+ * Server's live links, so the row disappears now rather than after a
+ * restart.
+ *
+ * The Server's in-memory target list is only re-read on
+ * ``POST /api/daemons/refresh``; without that step the row would linger
+ * (the DELETE response still says ``restart_required``). The refresh is
+ * best-effort: an older Server without the endpoint keeps the old
+ * behaviour instead of failing the removal that already happened.
+ */
+async function removeDaemonTarget(daemonId: string, url?: string | null): Promise<void> {
+  if (daemonRemove.busyId) return;
+  daemonRemove.busyId = daemonId;
+  daemonRemove.error = null;
+  daemonRemove.notice = null;
+  render();
+  try {
+    const res = await bridge.call<PairingRemoveInfo>('pairingRemoveDaemon', {
+      daemonId,
+      url: url ?? undefined,
+    });
+    try {
+      await bridge.call('refreshDaemons', { daemonId });
+    } catch (err) {
+      console.warn('[agt-settings] refreshDeferred after remove:', err);
+    }
+    daemonRemove.notice = tr('settings.pairingRemoved', { name: res.name || daemonId });
+    void call('refresh');
+  } catch (err) {
+    daemonRemove.error = pairingErrorText(err);
+  } finally {
+    daemonRemove.busyId = null;
+    render();
   }
 }
 
@@ -778,7 +838,7 @@ function render(): void {
         <td><span class="agd-chips">${providerChips(d)}</span></td>
         <td><span class="agd-pill ${d.online ? 'agd-pill-ok' : 'agd-pill-err'}">${d.online ? 'online' : 'offline'}</span></td>
         <td class="agd-dim">${esc(d.last_seen)}</td>
-        <td class="agd-table-action">
+        <td class="agd-table-action agd-table-actions">
           <button
             type="button"
             class="agd-btn agd-daemon-refresh-button"
@@ -786,6 +846,19 @@ function render(): void {
             ${busyAction ? 'disabled' : ''}
             title="${tr('settings.daemonRefresh')}"
           >${busyAction === 'refreshDaemons' ? spinner() : '⟳'}</button>
+          ${removableDaemon(d) ? `
+          <button
+            type="button"
+            class="agd-btn agd-btn-danger agd-daemon-remove-button"
+            data-remove-daemon-id="${esc(d.daemon_id)}"
+            data-remove-daemon-url="${esc(d.url ?? '')}"
+            ${busyAction || daemonRemove.busyId ? 'disabled' : ''}
+            title="${tr('settings.pairingRemoveHint')}"
+          >${daemonRemove.busyId === d.daemon_id
+            ? spinner()
+            : daemonRemove.confirmId === d.daemon_id
+              ? tr('settings.pairingRemoveConfirm')
+              : tr('settings.pairingRemove')}</button>` : ''}
           <button
             type="button"
             class="agd-btn agd-daemon-config-button"
@@ -860,6 +933,8 @@ function render(): void {
         </thead>
         <tbody>${daemonRows || `<tr><td colspan="6" class="agd-dim">${tr('tree.noDaemons')}</td></tr>`}</tbody>
       </table>
+      ${daemonRemove.error ? `<p class="agd-form-err">${esc(daemonRemove.error)}</p>` : ''}
+      ${daemonRemove.notice ? `<p class="agd-form-ok">${esc(daemonRemove.notice)}</p>` : ''}
       <p class="agd-note agd-dim">${tr('settings.daemonHint', { command: `agt daemon start --server ${boot.serverUrl}` })}</p>
       <p class="agd-note agd-dim">${tr('settings.daemonConfigLocalOnly')}</p>
     </section>
@@ -1229,6 +1304,30 @@ function wireEvents(): void {
     btn.addEventListener('click', (event) => {
       event.stopPropagation();
       void call('refreshDaemons', { daemonId: btn.dataset.refreshDaemonId ?? '' });
+    });
+  });
+  // Per-row remove: first click arms, second click deletes. The armed state
+  // reverts on its own after a few seconds so it cannot be "left loaded".
+  document.querySelectorAll<HTMLButtonElement>('button[data-remove-daemon-id]').forEach((btn) => {
+    btn.addEventListener('click', (event) => {
+      event.stopPropagation();
+      const daemonId = btn.dataset.removeDaemonId ?? '';
+      if (!daemonId || daemonRemove.busyId) return;
+      if (daemonRemove.confirmId !== daemonId) {
+        daemonRemove.confirmId = daemonId;
+        daemonRemove.error = null;
+        daemonRemove.notice = null;
+        render();
+        window.setTimeout(() => {
+          if (daemonRemove.confirmId === daemonId) {
+            daemonRemove.confirmId = null;
+            render();
+          }
+        }, 4000);
+        return;
+      }
+      daemonRemove.confirmId = null;
+      void removeDaemonTarget(daemonId, btn.dataset.removeDaemonUrl || null);
     });
   });
   document.getElementById('agd-url')?.addEventListener('change', (e) => {

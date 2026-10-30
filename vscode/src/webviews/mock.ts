@@ -1270,8 +1270,11 @@ export async function mockCall<T>(_method: string, params?: Record<string, unkno
       } as T;
     }
     case 'pairingRemoveDaemon': {
-      const url = String((params as { url?: string } | undefined)?.url ?? '');
-      const index = daemons.findIndex((daemon) => daemon.url === url);
+      const p = (params ?? {}) as { url?: string; daemonId?: string };
+      const url = String(p.url ?? '');
+      const index = daemons.findIndex((daemon) =>
+        p.daemonId ? daemon.daemon_id === String(p.daemonId) : daemon.url === url,
+      );
       const name = index >= 0 ? daemons[index].device_name : 'remote-daemon';
       // pairingState derives its target list from `daemons`, so drop the
       // entry here too or it would reappear on the next load.
