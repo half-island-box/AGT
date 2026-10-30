@@ -179,11 +179,18 @@ agt daemon remove cloud-01
 ```
 
 `agt daemon remove` deletes the target's line from `~/.agt/daemons` (comments and
-other entries untouched); the server stops dialing it after a restart. The
-settings page in the VS Code client and the web console exposes the same flow
-under **Connection & pairing** (secret display/copy, invite generation, target
-removal), backed by loopback-only `/api/pairing/*` endpoints — removing there
-additionally stops the live `DaemonLink` immediately.
+other entries untouched); the server stops dialing it after a refresh or a
+restart. The settings page in the VS Code client and the web console exposes the
+same flow under **Connection & pairing** (secret display/copy, invite
+generation, target removal), backed by loopback-only `/api/pairing/*`
+endpoints — removing there additionally stops the live `DaemonLink` immediately.
+
+`POST /api/daemons/refresh` re-reads the target file into a running server: new
+targets start being dialed at once, dropped ones stop, and a daemon that was
+offline is re-dialed immediately instead of waiting out its reconnect backoff.
+Healthy links are left alone, so in-flight claims are never interrupted. Both
+frontends expose it as a refresh button (the plugin's sidebar title bar and each
+row of the settings daemon list).
 
 An invite code embeds the server secret; treat it like an SSH private key.
 See [reverse-dial pairing](<docs/guide%20docs/quick_start.md#3-反向连接nat-穿透远程-daemon-推荐>).

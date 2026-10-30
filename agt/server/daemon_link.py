@@ -77,10 +77,38 @@ class DaemonLink:
         self._link: WsRpcLink | None = None
         self._active = False  # True once a connection has been accepted at least once
         self._stop_requested = False  # set by stop(); the run loop exits
+        # Wakes the run loop out of its reconnect backoff immediately. Set by
+        # :meth:`kick` when the user asks for a refresh — waiting out the
+        # 60s backoff cap would make the button feel broken.
+        self._wake = asyncio.Event()
 
     @property
     def connected(self) -> bool:
         return self._link is not None and not self._link.closed
+
+    def kick(self) -> None:
+        """Ask the run loop to re-dial now instead of finishing its backoff.
+
+        A no-op when the link is already up (there is no sleep to cut short);
+        the next drop reconnects as usual.
+        """
+        self._wake.set()
+
+    async def wait_connected(self, timeout: float) -> bool:
+        """Wait up to ``timeout`` seconds for the dial to succeed.
+
+        Used by the refresh endpoint so its response can report a truthful
+        ``connected`` flag instead of "we just started trying".
+        """
+        deadline = asyncio.get_running_loop().time() + timeout
+        while True:
+            if self.connected:
+                return True
+            if self._stop_requested:
+                return False
+            if asyncio.get_running_loop().time() >= deadline:
+                return False
+            await asyncio.sleep(0.05)
 
     async def stop(self) -> None:
         """Permanently stop this link: no reconnects, current socket closed.
@@ -96,6 +124,9 @@ class DaemonLink:
         ``_stop_requested`` and exit cleanly.
         """
         self._stop_requested = True
+        # Cut a backoff sleep short: otherwise a never-connected link can sit
+        # in its up-to-60s nap before the run loop notices the stop request.
+        self._wake.set()
         link = self._link
         ws = link.ws if link is not None else None
         if ws is not None:
@@ -311,12 +342,33 @@ class DaemonLink:
                     ever_connected = False  # next connect is a "reconnect"
             if shutdown.is_set() or self._stop_requested:
                 break
-            # Sleep with cancellation support.
-            try:
-                await asyncio.wait_for(shutdown.wait(), timeout=backoff)
-            except asyncio.TimeoutError:
-                pass
+            # Sleep with cancellation support, but let ``kick()`` cut it short
+            # so the user-triggered refresh re-dials immediately.
+            if not await self._backoff_sleep(shutdown, backoff):
+                backoff = _BACKOFF_INITIAL  # woken: retry now at full speed
+                continue
             backoff = min(backoff * 2, _BACKOFF_CAP)
+
+    async def _backoff_sleep(self, shutdown: asyncio.Event, timeout: float) -> bool:
+        """Sleep up to ``timeout``; return True if it timed out (no kick)."""
+        if self._wake.is_set():
+            self._wake.clear()
+            return False
+        shutdown_wait = asyncio.ensure_future(shutdown.wait())
+        wake_wait = asyncio.ensure_future(self._wake.wait())
+        try:
+            done, _pending = await asyncio.wait(
+                {shutdown_wait, wake_wait},
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            for task in (shutdown_wait, wake_wait):
+                task.cancel()
+        if self._wake.is_set():
+            self._wake.clear()
+            return False
+        return not done
 
     async def _authenticate_daemon(self, ws) -> None:
         """Verify the daemon's identity from its handshake frame.
