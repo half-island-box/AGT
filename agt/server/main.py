@@ -15,12 +15,12 @@ from fastapi import FastAPI
 
 from .config import DaemonTarget, ServerConfig, ServerConfigError
 from .console import router as console_router
-from .daemon_link import DaemonLink
 from .database import bind_get_db, make_engine, make_session_factory, session_scope
 from .mcp_server import build_catalog_mcp, catalog_mcp_asgi
 from .middleware.auth import bind_verify_task_token
 from .migrate_schema import ensure_schema, migrate_identities_and_sessions
 from .models import Base
+from .services.daemon_link_pool import DaemonLinkPool
 from .pidfile import (
     DEFAULT_PID_FILE,
     PID_FILE,
@@ -131,24 +131,21 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         # and answers inbound ``tasks.claim`` frames. We start them as
         # background tasks; failure of one daemon link doesn't affect
         # others or the HTTP API.
+        #
+        # The pool is reloadable at runtime (``POST /api/daemons/refresh``):
+        # it re-reads ``~/.agt/daemons`` and adds / drops / re-dials links
+        # without disturbing healthy ones.
         shutdown_event = asyncio.Event()
-        daemon_links: dict[str, DaemonLink] = {}
-        daemon_link_tasks: list[asyncio.Task] = []
-        for target in cfg.daemons:
-            link = DaemonLink(
-                daemon_id=target.daemon_id,
-                url=target.url,
-                secret=cfg.secret,
-                session_factory=session_factory,
-                name=target.name,
-                db_path=cfg.db_path,
-                daemon_defs=daemon_defs,
-            )
-            daemon_links[target.daemon_id] = link
-            daemon_link_tasks.append(
-                asyncio.create_task(link.run(shutdown_event), name=f"daemon-link:{target.daemon_id}")
-            )
-        app.state.daemon_links = daemon_links
+        pool = DaemonLinkPool(
+            config=cfg,
+            session_factory=session_factory,
+            daemon_defs=daemon_defs,
+            shutdown=shutdown_event,
+            initial_targets=cfg.daemons,
+        )
+        await pool.start()
+        app.state.daemon_links = pool.links
+        app.state.daemon_link_pool = pool
         if cfg.daemons:
             log.info(
                 "Reverse-dial pool: %d daemon link(s) → %s",
@@ -176,17 +173,13 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                             pid_path.unlink()
                     except FileNotFoundError:
                         pass
-                for t in daemon_link_tasks:
-                    t.cancel()
-                # Give the tasks a moment to acknowledge shutdown, but don't
-                # block forever — the server should exit promptly.
-                for t in daemon_link_tasks:
-                    try:
-                        await asyncio.wait_for(t, timeout=2.0)
-                    except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
-                        pass
+                # Give the links a moment to close their sockets and exit, but
+                # don't block forever — the server should exit promptly.
+                try:
+                    await asyncio.wait_for(pool.stop(), timeout=2.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                    pass
                 await engine.dispose()
-
     app = FastAPI(
         title="agt-server",
         version="0.2.0",

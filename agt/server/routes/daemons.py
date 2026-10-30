@@ -50,8 +50,7 @@ def _daemon_links(request: Request) -> dict[str, object]:
 
 
 @router.get("", response_model=ListDaemonsResponse)
-async def list_daemons_route(
-    request: Request,
+async def list_daemons_route(    request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> ListDaemonsResponse:
     """List every known daemon (offline ones included, with heartbeat)."""
@@ -157,6 +156,45 @@ async def list_daemon_artifacts_route(
     metadata plus the producing session's id.
     """
     return await artifacts_for_daemon(db, daemon_id)
+
+
+@router.post("/refresh")
+async def refresh_daemons_route(
+    request: Request,
+    daemon_id: str | None = Query(
+        None,
+        description=(
+            "Narrow the forced re-dial to this target. The registry itself "
+            "is always re-read from the daemons file (it is global)."
+        ),
+    ),
+) -> dict:
+    """Re-read ``~/.agt/daemons`` and reconcile the live reverse-dial links.
+
+    A daemon added while the Server was running used to need a restart
+    because the config snapshot was built once. This endpoint applies the
+    file immediately: new targets are dialed, dropped ones are stopped, and
+    a disconnected target is re-dialed now instead of waiting out its
+    reconnect backoff. Healthy links are left untouched, so in-flight
+    claims/reports are never interrupted.
+
+    Returns one row per configured target:
+    ``{daemon_id, action, connected}`` with ``action`` ∈ ``added`` /
+    ``removed`` / ``replaced`` / ``redialled`` / ``unchanged``.
+    """
+    pool = getattr(request.app.state, "daemon_link_pool", None)
+    if pool is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "type": "daemon_pool_unavailable",
+                "message": "server did not start a daemon link pool",
+            },
+        )
+    return {
+        "daemons": await pool.refresh(daemon_id=daemon_id),
+        "daemons_path": pool.daemons_path,
+    }
 
 
 __all__ = ["router"]
