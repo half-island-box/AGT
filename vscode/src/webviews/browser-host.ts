@@ -150,6 +150,7 @@ function toChatSession(run: RunInfo): ChatSessionInfo {
     job_id: run.root_job_id,
     provider: run.provider,
     identity_did: run.identity_did,
+    daemon_id: run.daemon_id,
     dir: run.cwd,
     first_prompt: run.title ?? run.root_job_id,
     last_seen_at: run.updated_at,
@@ -257,15 +258,22 @@ async function settingsBoot() {
   };
 }
 
-async function chatSessions(
-  project: string,
-  daemonId?: string,
-): Promise<ChatSessionInfo[]> {
-  const runs = await api.listRuns({
-    mode: 'chat',
-    cwd: project,
-    daemonId: daemonId || undefined,
-  });
+/**
+ * Run-history directories a project's chat sessions live under.
+ *
+ * Every run records the project's local path; runs created before that was
+ * decoupled recorded the project's pinned remote directory instead, so both
+ * are queried until those rows age out.
+ */
+function projectCwds(project: ConsoleProjectInfo | null, fallback: string): string[] {
+  if (!project) return [fallback];
+  return [project.path, project.remote_path].filter(
+    (value): value is string => Boolean(value),
+  );
+}
+
+async function chatSessions(cwds: string[]): Promise<ChatSessionInfo[]> {
+  const runs = await api.listRuns({ mode: 'chat', cwds });
   return runs.runs.map(toChatSession);
 }
 
@@ -341,6 +349,9 @@ async function runChatTurn(
           targetDaemonId: daemonId ?? '',
           identityDid: params.identityDid ? String(params.identityDid) : null,
           agentCwd: effectiveProject,
+          // The run belongs to the project, not to the directory it happens
+          // to execute in, so remote turns stay grouped under the project.
+          cwd: project?.path ?? fallbackProject,
           message,
         });
     emit('chat', { kind: 'started', ...job });
@@ -375,8 +386,7 @@ async function runChatTurn(
     }
     const [jobStatus, sessions] = await Promise.all([
       api.jobStatus(job.job_id).catch(() => null),
-      chatSessions(effectiveProject, params.daemonId ? String(params.daemonId) : undefined)
-        .catch(() => []),
+      chatSessions(projectCwds(project, fallbackProject)).catch(() => []),
     ]);
     emit('chat', { kind: 'settled', jobStatus, sessions });
   } catch (err) {
@@ -736,17 +746,12 @@ export async function browserCall<T>(
     case 'sessions': {
       const boot = await bootstrapContext();
       const project = await activeProject();
-      const daemonId = String(p.daemonId ?? '') || null;
-      const fallback = projectPath(boot.bootstrap.default_project);
+      // Sessions belong to the project, not to the daemon currently selected,
+      // so a remote run shows up next to local ones (each row carries its
+      // own daemon_id for display and resume).
       return {
         sessions: await chatSessions(
-          dirForDaemon(
-            project,
-            daemonId,
-            preferredDaemon(boot.daemons)?.daemon_id ?? null,
-            fallback,
-          ) || fallback,
-          daemonId ?? undefined,
+          projectCwds(project, projectPath(boot.bootstrap.default_project)),
         ),
       } as T;
     }
@@ -756,6 +761,13 @@ export async function browserCall<T>(
         String(p.jobId),
         p.dir ? String(p.dir) : null,
       );
+      // A run row's ``cwd`` is the project's local path (its run-history
+      // key); the working directory a resumed session actually uses lives
+      // on the owning daemon and only the Server knows it.
+      const session = await api
+        .resolveSession(resolved.session_id)
+        .catch(() => null);
+      resolved.dir = session?.dir ?? resolved.dir;
       const [jobStatus, history] = await Promise.all([
         api.jobStatus(resolved.job_id),
         api.sessionHistory(resolved.session_id).catch((err: unknown) => err),
@@ -799,30 +811,26 @@ export async function browserCall<T>(
       const jobId = String(p.jobId ?? '');
       let sessionId = String(p.sessionId ?? '');
       let provider = String(p.provider ?? '');
+      let daemonId = String(p.daemonId ?? '');
       if (jobId) {
         const resolved = await resolveChatRun(jobId, null);
         sessionId = resolved.session_id;
         provider = resolved.provider;
+        // The owning daemon scopes the delete; the webview's selected
+        // daemon is only a fallback (it may not own this session).
+        daemonId = resolved.daemon_id ?? daemonId;
       }
       const deleted = await api.deleteSession(sessionId, {
         provider,
-        daemonId: String(p.daemonId ?? ''),
+        daemonId,
         finalizeActive: true,
       });
       const boot = await bootstrapContext();
       const project = await activeProject();
-      const daemonId = String(p.daemonId ?? '') || null;
-      const fallback = projectPath(boot.bootstrap.default_project);
       return {
         deleted,
         sessions: await chatSessions(
-          dirForDaemon(
-            project,
-            daemonId,
-            preferredDaemon(boot.daemons)?.daemon_id ?? null,
-            fallback,
-          ) || fallback,
-          daemonId ?? undefined,
+          projectCwds(project, projectPath(boot.bootstrap.default_project)),
         ),
       } as T;
     }

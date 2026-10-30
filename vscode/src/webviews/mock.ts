@@ -227,6 +227,7 @@ function toChatSessionInfo(run: RunInfo): ChatSessionInfo {
     job_id: run.root_job_id,
     provider: run.provider,
     identity_did: run.identity_did,
+    daemon_id: run.daemon_id,
     dir: run.cwd,
     first_prompt: run.title ?? run.root_job_id,
     last_seen_at: run.updated_at,

@@ -519,6 +519,8 @@ export class AgtApi {
     targetDaemonId: string;
     identityDid?: string | null;
     agentCwd?: string | null;
+    /** Run-history directory (the console project's local path). */
+    cwd?: string | null;
     message?: ChatInputMessage | null;
   }): Promise<JobInfo> {
     return this.post<JobInfo>('/api/jobs', {
@@ -527,6 +529,7 @@ export class AgtApi {
       target_daemon_id: input.targetDaemonId,
       identity_did: input.identityDid ?? null,
       agent_cwd: input.agentCwd ?? null,
+      cwd: input.cwd ?? null,
       message: input.message ?? null,
     });
   }
@@ -598,6 +601,11 @@ export class AgtApi {
   async listRuns(input: {
     mode?: 'chat' | 'sop' | 'goal';
     cwd?: string | null;
+    /**
+     * Several run-history directories to match at once. A console project
+     * passes its local path plus the remote directory older runs recorded.
+     */
+    cwds?: (string | null | undefined)[] | null;
     daemonId?: string | null;
     provider?: string | null;
     templatePath?: string | null;
@@ -609,7 +617,12 @@ export class AgtApi {
       offset: String(input.offset ?? 0),
     });
     if (input.mode) params.set('mode', input.mode);
-    if (input.cwd) params.set('cwd', input.cwd);
+    const cwds = (input.cwds ?? []).filter((value): value is string => Boolean(value));
+    if (cwds.length > 0) {
+      for (const value of new Set(cwds)) params.append('cwd', value);
+    } else if (input.cwd) {
+      params.set('cwd', input.cwd);
+    }
     if (input.daemonId) params.set('daemon_id', input.daemonId);
     if (input.provider) params.set('provider', input.provider);
     if (input.templatePath) params.set('template_path', input.templatePath);

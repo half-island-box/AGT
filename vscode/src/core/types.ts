@@ -182,6 +182,8 @@ export interface ChatSessionInfo {
   task_id: string;
   provider: string;
   identity_did: string | null;
+  /** Daemon that ran this session; null for legacy rows without one. */
+  daemon_id: string | null;
   dir: string | null;
   first_prompt: string;
   last_seen_at: string;

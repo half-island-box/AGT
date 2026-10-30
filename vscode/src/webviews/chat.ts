@@ -144,6 +144,8 @@ let selectedIdentityDid = '';
 let agentCwd = '';
 let sessions: ChatSessionInfo[] = [];
 let sessionsLoading = false;
+/** Guards against a slow list overwriting a newer one. */
+let sessionsRequestSeq = 0;
 let pendingDeleteSession: ChatSessionInfo | null = null;
 let pendingDeleteDaemonId: string | null = null;
 let deletingSession = false;
@@ -287,6 +289,32 @@ function iconLogo(kind: 'daemon' | 'identity'): string {
 
 function daemonLabel(daemon: DaemonInfo): string {
   return daemon.daemon_name ?? daemon.device_name ?? daemon.daemon_id;
+}
+
+/**
+ * Daemon a session ran on, when it is not this machine's daemon.
+ *
+ * A console project lists runs from every daemon (local and remote), so each
+ * row says which one executed it; the local daemon is the default and needs
+ * no tag. Hosts without a project already scope the list to one daemon, so
+ * the tag would only repeat the selector there.
+ */
+function sessionDaemonLabel(session: ChatSessionInfo): string | null {
+  if (!sessionsAreProjectScoped()) return null;
+  const daemonId = session.daemon_id;
+  if (!daemonId || daemonId === boot?.localDaemonId) return null;
+  const daemon = boot?.daemons.find((item) => item.daemon_id === daemonId);
+  return daemon ? daemonLabel(daemon) : daemonId;
+}
+
+/**
+ * True when the host lists a project's runs across daemons.
+ *
+ * A console project owns its runs, wherever they executed. The VS Code chat
+ * panel has no project and stays scoped to the selected daemon.
+ */
+function sessionsAreProjectScoped(): boolean {
+  return Boolean(boot && boot.project !== undefined);
 }
 
 function agentLabel(runtime: RuntimeInfo): string {
@@ -595,14 +623,16 @@ function renderSidebar(): void {
   oldSidebar.replaceWith(sidebar);
   if (!sidebar) return;
   const sessionItems = sessions
-    .map((session) => `
+    .map((session) => {
+      const daemon = sessionDaemonLabel(session);
+      return `
       <div class="agd-session ${session.job_id === activeSessionId ? 'is-selected' : ''}" data-job-id="${esc(session.job_id)}" data-session-id="${esc(session.session_id)}" data-dir="${esc(session.dir ?? '')}">
         <button type="button" class="agd-session-main">
           <span class="agd-session-line">
             ${providerLogo(session.provider)}
             <strong>${esc(firstLine(session.first_prompt) || session.session_id)}</strong>
           </span>
-          <small>${esc(session.last_seen_at)}${session.dir ? ` · ${esc(session.dir)}` : ''}</small>
+          <small>${esc(session.last_seen_at)}${daemon ? ` · ${esc(daemon)}` : ''}${session.dir ? ` · ${esc(session.dir)}` : ''}</small>
         </button>
         <button
           type="button"
@@ -612,7 +642,8 @@ function renderSidebar(): void {
           aria-label="${tr('chat.deleteSession')}: ${esc(firstLine(session.first_prompt) || session.session_id)}"
         >${trashIcon()}</button>
       </div>
-    `)
+    `;
+    })
     .join('');
 
   sidebar.innerHTML = `
@@ -1332,24 +1363,28 @@ function clearConversation(): void {
 }
 
 async function loadSessions(): Promise<void> {
-  if (!selectedDaemonId) {
+  const projectScoped = sessionsAreProjectScoped();
+  if (!projectScoped && !selectedDaemonId) {
     sessions = [];
     renderSidebar();
     return;
   }
-  const daemonId = selectedDaemonId;
+  const seq = ++sessionsRequestSeq;
   sessionsLoading = true;
   renderSidebar();
   try {
-    const res = await bridge.call<{ sessions: ChatSessionInfo[] }>('sessions', { daemonId });
-    if (daemonId === selectedDaemonId) {
+    const res = await bridge.call<{ sessions: ChatSessionInfo[] }>(
+      'sessions',
+      projectScoped ? {} : { daemonId: selectedDaemonId },
+    );
+    if (seq === sessionsRequestSeq) {
       sessions = res.sessions;
     }
   } catch (err) {
     notice = err instanceof Error ? err.message : String(err);
     renderControls();
   } finally {
-    sessionsLoading = false;
+    if (seq === sessionsRequestSeq) sessionsLoading = false;
     renderSidebar();
   }
 }
@@ -1399,9 +1434,11 @@ function renderDeleteModal(): void {
 }
 
 function openDeleteSessionDialog(session: ChatSessionInfo): void {
-  if (deletingSession || !selectedDaemonId) return;
+  if (deletingSession) return;
   pendingDeleteSession = session;
-  pendingDeleteDaemonId = selectedDaemonId;
+  // Delete under the daemon that owns the session, not whichever daemon the
+  // user has selected for new chats: a project lists runs from every daemon.
+  pendingDeleteDaemonId = session.daemon_id ?? selectedDaemonId;
   renderDeleteModal();
 }
 
@@ -1413,9 +1450,9 @@ function closeDeleteSessionDialog(): void {
 }
 
 async function confirmDeleteSession(): Promise<void> {
-  if (!pendingDeleteSession || !pendingDeleteDaemonId || deletingSession) return;
+  if (!pendingDeleteSession || deletingSession) return;
   const target = pendingDeleteSession;
-  const daemonId = pendingDeleteDaemonId;
+  const daemonId = pendingDeleteDaemonId ?? '';
   deletingSession = true;
   renderDeleteModal();
   try {
@@ -1446,7 +1483,7 @@ async function confirmDeleteSession(): Promise<void> {
 }
 
 async function selectSession(jobId: string, dir?: string): Promise<void> {
-  if (!selectedDaemonId || busy !== 'idle') return;
+  if (busy !== 'idle') return;
   activeSessionId = jobId;
   sessionsLoading = true;
   renderSidebar();
