@@ -18,7 +18,14 @@ router = APIRouter(prefix="/api/runs", tags=["runs"])
 
 @router.get("", response_model=RunListResponse)
 async def list_runs(
-    cwd: str | None = Query(None, description="Project directory to filter by"),
+    cwd: list[str] | None = Query(
+        None,
+        description=(
+            "Project directory to filter by. Repeat the parameter to match "
+            "several directories — a console project sends its local path and "
+            "the remote directory its earlier runs recorded."
+        ),
+    ),
     mode: Literal["chat", "sop", "goal"] | None = Query(None, description="Mode filter"),
     daemon_id: str | None = Query(None, description="Optional daemon filter"),
     template_path: str | None = Query(
@@ -32,8 +39,10 @@ async def list_runs(
     """List runs across chat/sop/goal modes, optionally filtered by cwd.
 
     When ``mode`` is omitted, results from all three modes are merged and
-    paginated together. The ``cwd`` parameter is the execution directory
-    (client cwd for local runs, daemon-side ``--dir`` for remote runs).
+    paginated together. Each ``cwd`` is a run-history directory: the
+    submitter's project path (``JobModel.cwd``). A console project passes two
+    values when it has a pinned remote directory, because chat runs created
+    before that directory was decoupled recorded the remote path instead.
     """
     if template_path is not None and mode != "sop":
         raise HTTPException(
@@ -43,6 +52,7 @@ async def list_runs(
     modes: list[Literal["chat", "sop", "goal"]] = (
         [mode] if mode is not None else ["chat", "sop", "goal"]
     )
+    cwds: list[str] | None = [value for value in (cwd or []) if value] or None
     normalized_template_path: str | None = None
     if template_path is not None:
         try:
@@ -56,7 +66,7 @@ async def list_runs(
     for m in modes:
         if m == "goal":
             runs, total = await list_goal_runs(
-                db, cwd=cwd, daemon_id=daemon_id, limit=limit, offset=offset
+                db, cwds=cwds, daemon_id=daemon_id, limit=limit, offset=offset
             )
             chunks.append(
                 (
@@ -81,7 +91,7 @@ async def list_runs(
         elif m == "sop":
             runs, total = await list_sop_runs(
                 db,
-                cwd=cwd,
+                cwds=cwds,
                 daemon_id=daemon_id,
                 template_path=normalized_template_path,
                 limit=limit,
@@ -112,7 +122,7 @@ async def list_runs(
         else:  # chat
             runs, total = await list_chat_runs(
                 db,
-                cwd=cwd,
+                cwds=cwds,
                 daemon_id=daemon_id,
                 provider=provider,
                 limit=limit,

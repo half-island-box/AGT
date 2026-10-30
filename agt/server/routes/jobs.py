@@ -134,6 +134,7 @@ async def create_job_route(
         target_daemon_id=effective_target,
         work_dir=payload.work_dir,
         agent_cwd=payload.agent_cwd,
+        cwd=payload.cwd,
         identity_did=payload.identity_did,
         job_type="chat",
         message=payload.message,

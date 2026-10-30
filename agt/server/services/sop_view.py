@@ -29,7 +29,7 @@ def normalize_sop_template_path(raw: str) -> str:
 async def list_sop_runs(
     db: AsyncSession,
     *,
-    cwd: str | None = None,
+    cwds: list[str] | None = None,
     daemon_id: str | None = None,
     template_path: str | None = None,
     limit: int,
@@ -40,8 +40,8 @@ async def list_sop_runs(
         JobModel.root_job_id == JobModel.job_id,
         JobModel.job_type == "sop",
     ]
-    if cwd is not None:
-        filters.append(JobModel.cwd == cwd)
+    if cwds:
+        filters.append(JobModel.cwd.in_(cwds))
     if daemon_id is not None:
         filters.append(JobModel.target_daemon_id == daemon_id)
     if template_path is not None:
@@ -109,7 +109,7 @@ async def list_sop_runs(
 async def list_sop_runs_response(
     db: AsyncSession,
     *,
-    cwd: str | None = None,
+    cwds: list[str] | None = None,
     daemon_id: str | None = None,
     template_path: str | None = None,
     limit: int,
@@ -117,7 +117,7 @@ async def list_sop_runs_response(
 ) -> SopRunListResponse:
     runs, total = await list_sop_runs(
         db,
-        cwd=cwd,
+        cwds=cwds,
         daemon_id=daemon_id,
         template_path=template_path,
         limit=limit,
