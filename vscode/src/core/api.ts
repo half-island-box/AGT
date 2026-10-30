@@ -17,6 +17,11 @@ import type {
   JobLogInfo,
   JobInfo,
   JobStatusInfo,
+  PairingAddDaemonInfo,
+  PairingInviteInfo,
+  PairingRemoveInfo,
+  PairingSecretInfo,
+  PairingStateInfo,
   RuntimeInfo,
   RunListInfo,
   SessionHistoryInfo,
@@ -159,6 +164,67 @@ export class AgtApi {
         work_dir: input.workDir,
         agent_cwd_allowlist: input.agentCwdAllowlist,
       },
+      10_000,
+    );
+  }
+
+  /**
+   * Loopback-only pairing endpoints (see ``agt/server/routes/pairing.py``).
+   * They return the Server's HMAC secret, so a remote console is refused
+   * with 403 by the Server itself — the UI surfaces that as an error.
+   */
+  async pairingState(): Promise<PairingStateInfo> {
+    return this.request<PairingStateInfo>('/api/pairing/state', {}, 10_000);
+  }
+
+  async pairingSecret(reveal = false): Promise<PairingSecretInfo> {
+    const query = reveal ? '?reveal=true' : '';
+    return this.request<PairingSecretInfo>(`/api/pairing/secret${query}`, {}, 10_000);
+  }
+
+  async pairingInvite(
+    name: string,
+    url: string,
+    daemonId?: string | null,
+  ): Promise<PairingInviteInfo> {
+    const params = new URLSearchParams({ name, url });
+    if (daemonId) params.set('daemon_id', daemonId);
+    return this.request<PairingInviteInfo>(`/api/pairing/invite?${params}`, {}, 10_000);
+  }
+
+  async pairingAddDaemon(input: {
+    name: string;
+    url: string;
+    capabilities?: string | null;
+  }): Promise<PairingAddDaemonInfo> {
+    return this.post<PairingAddDaemonInfo>(
+      '/api/pairing/daemons',
+      {
+        name: input.name,
+        url: input.url,
+        capabilities: input.capabilities ?? null,
+      },
+      10_000,
+    );
+  }
+
+  /**
+   * Remove a registered target: deletes its ``~/.agt/daemons`` entry and
+   * stops the Server's live link to it. The in-memory catalog still lists
+   * it until the next Server restart (``restart_required``).
+   */
+  async pairingRemoveDaemon(input: {
+    name?: string;
+    url?: string;
+    daemonId?: string;
+  }): Promise<PairingRemoveInfo> {
+    const params = new URLSearchParams();
+    if (input.name) params.set('name', input.name);
+    if (input.url) params.set('url', input.url);
+    if (input.daemonId) params.set('daemon_id', input.daemonId);
+    return this.request<PairingRemoveInfo>(
+      `/api/pairing/daemons?${params}`,
+      { method: 'DELETE' },
       10_000,
     );
   }
@@ -443,8 +509,7 @@ export class AgtApi {
    *
    * ``cwd`` should be the project directory used to isolate runs. The server
    * returns one flat ``RunInfo`` per run regardless of mode.
-   */
-  async listRuns(input: {
+   */  async listRuns(input: {
     mode?: 'chat' | 'sop' | 'goal';
     cwd?: string | null;
     daemonId?: string | null;
@@ -560,6 +625,15 @@ async function errorMessage(res: Response): Promise<string> {
     const detail = body.detail ?? body.message;
     if (typeof detail === 'string' && detail.trim()) {
       return `HTTP ${res.status}: ${detail}`;
+    }
+    if (
+      typeof detail === 'object'
+      && detail !== null
+      && 'message' in detail
+      && typeof detail.message === 'string'
+      && detail.message.trim()
+    ) {
+      return `HTTP ${res.status}: ${detail.message}`;
     }
     if (detail) {
       return `HTTP ${res.status}: ${JSON.stringify(detail)}`;

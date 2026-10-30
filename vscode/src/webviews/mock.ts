@@ -196,6 +196,7 @@ function toChatSessionInfo(run: RunInfo): ChatSessionInfo {
     job_id: run.root_job_id,
     provider: run.provider,
     identity_did: run.identity_did,
+    daemon_id: run.daemon_id,
     dir: run.cwd,
     first_prompt: run.title ?? run.root_job_id,
     last_seen_at: run.updated_at,
@@ -647,6 +648,27 @@ export async function mockCall<T>(_method: string, params?: Record<string, unkno
       }
       return sopBoot() as T;
     }
+    case 'sop.renameFile': {
+      const source = String(params?.path ?? '');
+      const newName = String(params?.newName ?? '').trim();
+      if (!source || !newName || newName.includes('/')) {
+        throw new Error('invalid SOP filename');
+      }
+      const destination = `${source.slice(0, source.lastIndexOf('/') + 1)}${newName}`;
+      const template = sopTemplates.find((item) => item.path === source);
+      if (!template) throw new Error('SOP file not found');
+      if (sopTemplates.some((item) => item.path === destination)) {
+        throw new Error('SOP filename already exists');
+      }
+      template.path = destination;
+      template.label = newName;
+      if (sopDocs[source]) {
+        sopDocs[destination] = sopDocs[source];
+        delete sopDocs[source];
+      }
+      if (sopPath === source) sopPath = destination;
+      return sopBoot() as T;
+    }
     case 'sop.save':
       sopDirty = false;
       return sopBoot() as T;
@@ -746,6 +768,33 @@ export async function mockCall<T>(_method: string, params?: Record<string, unkno
       return { ok: true } as T;
     case 'boot':
       return boot() as T;
+    case 'projects.directories': {
+      const remoteDaemon = params?.daemonId ? String(params.daemonId) : null;
+      if (remoteDaemon) {
+        const root = remoteDaemon === 'dev-box-2' ? '/srv/docs' : '/srv';
+        return {
+          roots: [root],
+          parent: root === '/srv' ? null : '/srv',
+          current: String(params?.path ?? root),
+          directories: [
+            { name: 'docs', path: '/srv/docs' },
+            { name: 'deploy', path: '/srv/deploy' },
+          ],
+        } as T;
+      }
+      return {
+        roots: ['/home/you'],
+        parent: '/home/you',
+        current: String(params?.path ?? '/home/you/project'),
+        directories: [
+          { name: 'project', path: '/home/you/project' },
+          { name: 'documentation', path: '/home/you/documentation' },
+          { name: 'sandbox', path: '/home/you/sandbox' },
+        ],
+      } as T;
+    }
+    case 'projects.pickDirectory':
+      return { path: '/home/you/project' } as T;
     case 'testConnection':
       return {
         state,
@@ -1167,6 +1216,59 @@ export async function mockCall<T>(_method: string, params?: Record<string, unkno
               .map(toChatSessionInfo),
           },
         ],
+      } as T;
+    }
+    case 'pairingState':
+      return {
+        secret_configured: true,
+        secret_source: 'file',
+        daemons: daemons.map((daemon) => ({
+          name: daemon.device_name,
+          url: daemon.url ?? 'ws://127.0.0.1:8422',
+          daemon_id: daemon.daemon_id,
+          capabilities: daemon.capabilities,
+          connected: daemon.online,
+        })),
+        daemons_path: '/home/you/.agt/daemons',
+      } as T;
+    case 'pairingSecret': {
+      const reveal = (params as { reveal?: boolean } | undefined)?.reveal === true;
+      return {
+        secret: reveal ? 'mock-server-secret-0123456789abcdef' : null,
+        masked: 'mock…cdef',
+        source: 'file',
+      } as T;
+    }
+    case 'pairingAddDaemon': {
+      const p = (params ?? {}) as { name?: string; url?: string; capabilities?: string };
+      const name = p.name || 'new-daemon';
+      const url = p.url || 'ws://192.168.1.30:8422';
+      const daemonId = `mock-${Math.random().toString(16).slice(2, 10)}`;
+      const code = `agt1.${btoa(JSON.stringify({ v: 1, url, id: daemonId, name })).replaceAll('=', '')}`;
+      return {
+        daemon_id: daemonId,
+        invite_code: code,
+        command: `agt daemon init ${code}`,
+        added: 'added',
+        daemons_path: '/home/you/.agt/daemons',
+        restart_required: true,
+      } as T;
+    }
+    case 'pairingRemoveDaemon': {
+      const url = String((params as { url?: string } | undefined)?.url ?? '');
+      const index = daemons.findIndex((daemon) => daemon.url === url);
+      const name = index >= 0 ? daemons[index].device_name : 'remote-daemon';
+      // pairingState derives its target list from `daemons`, so drop the
+      // entry here too or it would reappear on the next load.
+      if (index >= 0) daemons.splice(index, 1);
+      return {
+        removed: true,
+        name,
+        url,
+        daemon_id: 'mock-removed',
+        daemons_path: '/home/you/.agt/daemons',
+        disconnected: true,
+        restart_required: true,
       } as T;
     }
     case 'addDaemon': {

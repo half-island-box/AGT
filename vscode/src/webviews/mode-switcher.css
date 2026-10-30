@@ -1,4 +1,24 @@
 /* Shared top-left mode switcher used by Chat, SOP, and Goal. */
+.agd-brand-home {
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.agd-brand-home:hover {
+  color: var(--vscode-textLink-foreground, #3794ff);
+}
+
+.agd-brand-home:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder, #3794ff);
+  outline-offset: 3px;
+}
+
 .agd-modes {
   display: inline-flex;
   flex: none;

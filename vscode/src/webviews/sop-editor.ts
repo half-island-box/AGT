@@ -16,6 +16,7 @@ import type {
 } from '../core/types';
 import { SopCanvas } from './sop-canvas';
 import { bridge } from './bridge';
+import { openDirPicker } from './dir-picker';
 
 interface SopTemplateInfo {
   path: string;
@@ -116,6 +117,8 @@ let nodeLog: SopNodeLog | null = null;
 let nodeLogFor: string | null = null;
 let pollTimer: number | null = null;
 let editorMode: 'edit' | 'inspect' = 'edit';
+let sidebarCollapsed = false;
+let inspectorCollapsed = true;
 const DEFAULT_SIDEBAR_WIDTH = 248;
 const MIN_SIDEBAR_WIDTH = 200;
 const MAX_SIDEBAR_WIDTH = 520;
@@ -196,6 +199,37 @@ function esc(value: unknown): string {
     .replaceAll('<', '&lt;')
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;');
+}
+
+function updatePanelLayout(): void {
+  const root = document.querySelector<HTMLElement>('.agd-sop');
+  root?.classList.toggle('is-sidebar-collapsed', sidebarCollapsed);
+  root?.classList.toggle('is-inspector-collapsed', inspectorCollapsed);
+
+  const sidebarToggle = document.getElementById('agd-sop-sidebar-toggle');
+  if (sidebarToggle) {
+    sidebarToggle.textContent = sidebarCollapsed ? '›' : '‹';
+    sidebarToggle.setAttribute('aria-expanded', String(!sidebarCollapsed));
+    sidebarToggle.setAttribute(
+      'title',
+      tr(sidebarCollapsed ? 'sop.expandSidebar' : 'sop.collapseSidebar'),
+    );
+  }
+  const inspectorToggle = document.getElementById('agd-sop-inspector-toggle');
+  if (inspectorToggle) {
+    inspectorToggle.textContent = inspectorCollapsed ? '‹' : '›';
+    inspectorToggle.setAttribute('aria-expanded', String(!inspectorCollapsed));
+    inspectorToggle.setAttribute(
+      'title',
+      tr(inspectorCollapsed ? 'sop.expandInspector' : 'sop.collapseInspector'),
+    );
+  }
+}
+
+function revealInspector(): void {
+  if (!inspectorCollapsed) return;
+  inspectorCollapsed = false;
+  updatePanelLayout();
 }
 
 function model(): SopDoc | null {
@@ -398,6 +432,7 @@ function applyBoot(next: SopBoot): void {
     nodeLogFor = null;
     selected = null;
     selectedInstanceId = null;
+    inspectorCollapsed = true;
     validation = null;
     showPreview = false;
     viewInitialized = false;
@@ -422,6 +457,7 @@ function applyBoot(next: SopBoot): void {
   if (selected && !next.model?.nodes.some((node) => node.name === selected)) {
     selected = null;
     selectedInstanceId = null;
+    inspectorCollapsed = true;
   }
   if (
     loopSettingsName &&
@@ -499,7 +535,13 @@ function wireSidebarResizer(): void {
   if (!handle || !container) return;
 
   handle.addEventListener('pointerdown', (event) => {
-    if (event.button !== 0) return;
+    if (
+      event.button !== 0 ||
+      sidebarCollapsed ||
+      (event.target as Element | null)?.closest('[data-sop-panel-toggle]')
+    ) {
+      return;
+    }
     event.preventDefault();
     container.classList.add('is-resizing');
     handle.setPointerCapture(event.pointerId);
@@ -551,7 +593,11 @@ function wireInspectorResizer(): void {
   }
 
   handle.addEventListener('pointerdown', (event) => {
-    if (event.button !== 0) {
+    if (
+      event.button !== 0 ||
+      inspectorCollapsed ||
+      (event.target as Element | null)?.closest('[data-sop-panel-toggle]')
+    ) {
       return;
     }
     event.preventDefault();
@@ -863,7 +909,9 @@ function render(): void {
       </header>
       <div class="agd-sop-body">
         <aside class="agd-sop-side">${renderTemplates()}</aside>
-        <div class="agd-sop-splitter agd-sop-sidebar-resizer" id="agd-sop-sidebar-resizer" role="separator" aria-orientation="vertical" title="${tr('sop.resizeSidebar')}"></div>
+        <div class="agd-sop-splitter agd-sop-sidebar-resizer" id="agd-sop-sidebar-resizer" role="separator" aria-orientation="vertical" title="${tr('sop.resizeSidebar')}">
+          <button type="button" class="agd-sop-panel-toggle" id="agd-sop-sidebar-toggle" data-sop-panel-toggle="sidebar" aria-label="${tr('sop.collapseSidebar')}">‹</button>
+        </div>
         <section class="agd-sop-main">
           <div class="agd-sop-empty-state">
             <h2>${tr('sop.emptyTitle')}</h2>
@@ -875,6 +923,7 @@ function render(): void {
       </div>
       ${toast ? `<div class="agd-sop-toast ${toast.kind === 'error' ? 'is-error' : ''}">${esc(toast.text)}</div>` : ''}
     </div>`;
+    updatePanelLayout();
     wireEvents();
     wireSidebarResizer();
     return;
@@ -900,14 +949,18 @@ function render(): void {
         ${renderTemplates()}
         ${renderIdentities(doc)}
       </aside>
-      <div class="agd-sop-splitter agd-sop-sidebar-resizer" id="agd-sop-sidebar-resizer" role="separator" aria-orientation="vertical" title="${tr('sop.resizeSidebar')}"></div>
+      <div class="agd-sop-splitter agd-sop-sidebar-resizer" id="agd-sop-sidebar-resizer" role="separator" aria-orientation="vertical" title="${tr('sop.resizeSidebar')}">
+        <button type="button" class="agd-sop-panel-toggle" id="agd-sop-sidebar-toggle" data-sop-panel-toggle="sidebar" aria-label="${tr('sop.collapseSidebar')}">‹</button>
+      </div>
       <section class="agd-sop-main">
         ${renderToolbar()}
         <div class="agd-sop-canvas" id="agd-sop-canvas"></div>
         ${showPreview ? renderPreview() : ''}
         ${renderProblems()}
       </section>
-      <div class="agd-sop-splitter" id="agd-sop-inspector-resizer" role="separator" aria-orientation="vertical" title="${tr('sop.resizeInspector')}"></div>
+      <div class="agd-sop-splitter agd-sop-inspector-resizer" id="agd-sop-inspector-resizer" role="separator" aria-orientation="vertical" title="${tr('sop.resizeInspector')}">
+        <button type="button" class="agd-sop-panel-toggle" id="agd-sop-inspector-toggle" data-sop-panel-toggle="inspector" aria-label="${tr('sop.collapseInspector')}">›</button>
+      </div>
       <aside class="agd-sop-inspector">
         ${renderInspector()}
       </aside>
@@ -918,6 +971,7 @@ function render(): void {
     ${loopSettingsName ? renderLoopSettings() : ''}
   </div>`;
 
+  updatePanelLayout();
   mountCanvas();
   wireEvents();
   wireInspector();
@@ -1297,7 +1351,13 @@ function renderInspector(): string {
       <select class="agd-input agd-mono" id="agd-sop-node-provider">${providerOptions(node)}</select>
       <small class="agd-dim">${pinHint(node)}</small>
     </label>
-    <label class="agd-sop-field">${tr('sop.field.dir')}<input class="agd-input agd-mono" id="agd-sop-node-dir" value="${esc(node.dir)}"></label>
+    <div class="agd-sop-field">
+      <span>${tr('sop.field.dir')}</span>
+      <div class="agd-dir-input-row">
+        <input class="agd-input agd-mono" id="agd-sop-node-dir" value="${esc(node.dir)}" placeholder="/absolute/path">
+        ${bridge.canBrowseDirectories ? `<button type="button" class="agd-btn" id="agd-sop-node-browse-dir">${tr('projects.browse')}</button>` : ''}
+      </div>
+    </div>
     <div class="agd-sop-field">
       <span>${tr('sop.dependencies')}</span>
     <div class="agd-sop-deps">${deps}</div>
@@ -1609,10 +1669,13 @@ function mountCanvas(): void {
         const base = baseNodeName(name);
         selected = doc?.nodes.some((node) => node.name === base) ? base : name;
         selectedInstanceId = runtime ? name : null;
+        inspectorCollapsed = false;
       } else {
         selected = null;
         selectedInstanceId = null;
+        inspectorCollapsed = true;
       }
+      updatePanelLayout();
       refreshSelectionUI();
       if (name && activeStatusGraph()) {
         void loadNodeLog(selected ?? name);
@@ -1640,6 +1703,7 @@ function mountCanvas(): void {
     },
     onRename: (name: string) => {
       selected = name;
+      revealInspector();
       refreshSelectionUI();
       document.getElementById('agd-sop-node-name')?.focus();
     },
@@ -1669,6 +1733,16 @@ function wireEvents(): void {
     await bridge.call('setLanguage', { language: lang });
   });
   document.getElementById('agd-sop-settings')?.addEventListener('click', () => void bridge.call('openSettings'));
+  document.getElementById('agd-sop-sidebar-toggle')?.addEventListener('click', (event) => {
+    event.stopPropagation();
+    sidebarCollapsed = !sidebarCollapsed;
+    updatePanelLayout();
+  });
+  document.getElementById('agd-sop-inspector-toggle')?.addEventListener('click', (event) => {
+    event.stopPropagation();
+    inspectorCollapsed = !inspectorCollapsed;
+    updatePanelLayout();
+  });
   document.querySelectorAll<HTMLElement>('[data-editor-mode]').forEach((element) => {
     element.addEventListener('click', () => {
       const next = element.dataset.editorMode as 'edit' | 'inspect';
@@ -1755,6 +1829,8 @@ function wireEvents(): void {
     element.addEventListener('click', () => {
       selected = element.dataset.problemNode ?? null;
       selectedInstanceId = null;
+      inspectorCollapsed = selected === null;
+      updatePanelLayout();
       refreshSelectionUI();
     });
   });
@@ -1875,6 +1951,22 @@ function wireInspector(): void {
     const element = document.getElementById(id) as HTMLInputElement | HTMLTextAreaElement | null;
     element?.addEventListener('change', () => commit(field, element.value));
   }
+  document.getElementById('agd-sop-node-browse-dir')?.addEventListener('click', () => {
+    const node = selectedNode();
+    if (!node) {
+      return;
+    }
+    // A local daemon shares the Server's filesystem, so browse it directly;
+    // ``projects.directories`` only understands remote daemon ids.
+    const remote = node.daemon && node.daemon !== boot?.localDaemonId ? node.daemon : null;
+    openDirPicker({
+      language: lang,
+      title: tr('sop.field.dir'),
+      daemonId: remote,
+      startPath: node.dir || null,
+      onSelect: (path) => commit('dir', path),
+    });
+  });
 
   const input = document.getElementById('agd-sop-node-input') as HTMLElement | null;
   const suggestions = document.getElementById('agd-sop-input-suggestions');

@@ -413,6 +413,14 @@ body {
   gap: 8px;
   flex: none;
 }
+.agd-goal-export-path {
+  max-width: 280px;
+  overflow: hidden;
+  color: var(--agd-color-success);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 /* Dynamic tree visualization. */
 .agd-goal-tree {

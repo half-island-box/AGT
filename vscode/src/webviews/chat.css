@@ -159,6 +159,33 @@ body.agd-chat-body {
   font-weight: 650;
   letter-spacing: 0.03em;
 }
+.agd-cwd-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.agd-cwd-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground, #8b8b8b);
+}
+.agd-cwd-pick {
+  flex: none;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--vscode-input-border, #3a3a3a);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--vscode-foreground, #ccc);
+  font-size: 10.5px;
+  cursor: pointer;
+}
+.agd-cwd-pick:hover { background: var(--vscode-list-hoverBackground, #2a2d2e); }
 .agd-mini-btn {
   width: 21px;
   height: 21px;

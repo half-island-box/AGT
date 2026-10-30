@@ -2,6 +2,7 @@ import './mode-switcher.css';
 import './markdown.css';
 import './chat.css';
 import { renderMarkdown } from './markdown';
+import { isLocalDaemon } from '../core/daemons';
 import { providerLogo } from '../core/icons';
 import { t, type MessageKey } from '../core/i18n';
 import type {
@@ -18,6 +19,7 @@ import type {
   UiLanguage,
 } from '../core/types';
 import { bridge } from './bridge';
+import { openDirPicker } from './dir-picker';
 
 interface ChatBoot {
   language: UiLanguage;
@@ -140,6 +142,8 @@ let agentCwd = '';
 let agentCwdTouched = false;
 let sessions: ChatSessionInfo[] = [];
 let sessionsLoading = false;
+/** Guards against a slow list overwriting a newer one. */
+let sessionsRequestSeq = 0;
 let pendingDeleteSession: ChatSessionInfo | null = null;
 let pendingDeleteDaemonId: string | null = null;
 let deletingSession = false;
@@ -289,6 +293,20 @@ function agentLabel(runtime: RuntimeInfo): string {
   return runtime.name || runtime.type;
 }
 
+/**
+ * Working directory for the selected daemon: the host's workspace root.
+ * A remote daemon needs an explicit directory, which the user enters in
+ * the working-directory field.
+ */
+function defaultCwdFor(): string {
+  return boot?.workspaceRoot || boot?.workspaceFolders[0] || '';
+}
+
+function syncWorkspaceRoot(): void {
+  if (agentCwdTouched || activeSessionId || currentJob) return;
+  agentCwd = defaultCwdFor();
+}
+
 function identityLabel(identity: IdentityWithBindings): string {
   return identity.name || identity.did;
 }
@@ -310,12 +328,13 @@ function identitiesForSelection(): IdentityWithBindings[] {
   if (!boot) return [];
   // Bindings are optional routing preferences. A selected identity may
   // run on any live daemon/provider the user chooses.
-  return boot.identities.filter((identity) => identity.status === 'active');
-}
-
-function syncWorkspaceRoot(): void {
-  if (agentCwdTouched || activeSessionId || currentJob) return;
-  agentCwd = boot?.workspaceRoot || boot?.workspaceFolders[0] || '';
+  return (boot.identities ?? [])
+    .filter((identity) => identity.status === 'active')
+    .map((identity) => ({
+      ...identity,
+      capabilities: identity.capabilities ?? [],
+      bindings: identity.bindings ?? [],
+    }));
 }
 
 function applyChatSelection(selection: ChatSelection): void {
@@ -343,10 +362,10 @@ function normalizeInitialSelection(): void {
     selectedProvider = boot.selection.provider ?? null;
     selectedIdentityDid = '';
   }
-  const daemons = boot.daemons.filter((daemon) => daemon.online);
+  const daemons = (boot.daemons ?? []).filter((daemon) => daemon.online);
   if (!selectedDaemonId || !daemons.some((daemon) => daemon.daemon_id === selectedDaemonId)) {
     const withAgent = daemons.find((daemon) =>
-      boot?.runtimes.some((runtime) => runtime.daemon_id === daemon.daemon_id),
+      (boot?.runtimes ?? []).some((runtime) => runtime.daemon_id === daemon.daemon_id),
     );
     selectedDaemonId = withAgent?.daemon_id ?? daemons[0]?.daemon_id ?? null;
     selectedProvider = null;
@@ -388,10 +407,15 @@ function normalizeInitialSelection(): void {
 }
 
 function canSend(): boolean {
+  const daemon = selectedDaemon();
+  // A remote daemon needs an explicit directory (its default cwd is often
+  // unrelated to the workspace): the working-directory field must be filled.
+  const needsCwd = Boolean(daemon && !isLocalDaemon(daemon));
   return Boolean(
     boot?.state === 'online' &&
-      selectedDaemon() &&
+      daemon &&
       selectedAgent() &&
+      (!needsCwd || agentCwd.trim() !== '') &&
       busy === 'idle' &&
       (!currentJob || currentJob.status === 'waiting_input'),
   );
@@ -578,8 +602,13 @@ function renderSidebar(): void {
     ${selectorHtml('agent')}
     <label class="agd-side-label">${tr('chat.identity')}</label>
     ${selectorHtml('identity')}
-    <label class="agd-side-label">${tr('chat.workdir')}</label>
-    <input id="agd-chat-cwd" class="agd-input agd-mono" value="${esc(agentCwd)}" placeholder="${tr('chat.workdirPh')}" autocomplete="off" spellcheck="false">
+    <label class="agd-side-label">${tr('chat.workingDir')}</label>
+    ${bridge.canBrowseDirectories
+      ? `<div class="agd-cwd-row">
+      <span class="agd-cwd-path agd-mono" title="${esc(agentCwd)}">${esc(agentCwd || tr('chat.noWorkingDir'))}</span>
+      <button type="button" id="agd-chat-pick-dir" class="agd-cwd-pick" title="${tr('chat.pickDir')}">${tr('chat.pickDir')}</button>
+    </div>`
+      : `<input id="agd-chat-cwd" class="agd-input agd-mono" value="${esc(agentCwd)}" placeholder="${tr('chat.workdirPh')}" autocomplete="off" spellcheck="false">`}
   </div>
   <div class="agd-side-section agd-side-sessions">
     <div class="agd-side-title">
@@ -855,7 +884,8 @@ function renderMessages(): void {
       ${assistantBodyHtml(message)}
       <div class="agd-msg-actions"><button type="button" class="agd-mini-btn" data-copy-message="${message.id}" title="${tr('chat.copyMessage')}" aria-label="${tr('chat.copyMessage')}">${copyIcon()}</button></div>
     </div>
-    `;  }).join('');
+    `;
+  }).join('');
   container.querySelectorAll<HTMLButtonElement>('[data-copy-message]').forEach((button) => {
     button.addEventListener('click', () => {
       const message = messages.find((item) => item.id === Number(button.dataset.copyMessage));
@@ -1230,6 +1260,21 @@ function wireSidebar(): void {
       renderControls();
     }
   });
+  document.getElementById('agd-chat-pick-dir')?.addEventListener('click', () => {
+    const daemon = selectedDaemon();
+    if (!daemon) return;
+    openDirPicker({
+      language: lang,
+      title: tr('chat.pickDirTitle'),
+      daemonId: isLocalDaemon(daemon) ? null : daemon.daemon_id,
+      startPath: agentCwd || null,
+      onSelect: (path) => {
+        agentCwd = path;
+        renderSidebar();
+        renderControls();
+      },
+    });
+  });
 }
 
 function selectOption(kind: string, value: string): void {
@@ -1241,6 +1286,7 @@ function selectOption(kind: string, value: string): void {
     selectedIdentityDid = '';
     normalizeInitialSelection();
     clearConversation();
+    syncWorkspaceRoot();
     void loadSessions();
   } else if (kind === 'agent' && value !== selectedProvider) {
     selectedProvider = value;
@@ -1273,19 +1319,22 @@ async function loadSessions(): Promise<void> {
     renderSidebar();
     return;
   }
-  const daemonId = selectedDaemonId;
+  const seq = ++sessionsRequestSeq;
   sessionsLoading = true;
   renderSidebar();
   try {
-    const res = await bridge.call<{ sessions: ChatSessionInfo[] }>('sessions', { daemonId });
-    if (daemonId === selectedDaemonId) {
+    const res = await bridge.call<{ sessions: ChatSessionInfo[] }>(
+      'sessions',
+      { daemonId: selectedDaemonId },
+    );
+    if (seq === sessionsRequestSeq) {
       sessions = res.sessions;
     }
   } catch (err) {
     notice = err instanceof Error ? err.message : String(err);
     renderControls();
   } finally {
-    sessionsLoading = false;
+    if (seq === sessionsRequestSeq) sessionsLoading = false;
     renderSidebar();
   }
 }
@@ -1335,9 +1384,11 @@ function renderDeleteModal(): void {
 }
 
 function openDeleteSessionDialog(session: ChatSessionInfo): void {
-  if (deletingSession || !selectedDaemonId) return;
+  if (deletingSession) return;
   pendingDeleteSession = session;
-  pendingDeleteDaemonId = selectedDaemonId;
+  // Delete under the daemon that owns the session, not whichever daemon the
+  // user has selected for new chats.
+  pendingDeleteDaemonId = session.daemon_id ?? selectedDaemonId;
   renderDeleteModal();
 }
 
@@ -1349,9 +1400,9 @@ function closeDeleteSessionDialog(): void {
 }
 
 async function confirmDeleteSession(): Promise<void> {
-  if (!pendingDeleteSession || !pendingDeleteDaemonId || deletingSession) return;
+  if (!pendingDeleteSession || deletingSession) return;
   const target = pendingDeleteSession;
-  const daemonId = pendingDeleteDaemonId;
+  const daemonId = pendingDeleteDaemonId ?? '';
   deletingSession = true;
   renderDeleteModal();
   try {
@@ -1382,7 +1433,7 @@ async function confirmDeleteSession(): Promise<void> {
 }
 
 async function selectSession(jobId: string, dir?: string): Promise<void> {
-  if (!selectedDaemonId || busy !== 'idle') return;
+  if (busy !== 'idle') return;
   activeSessionId = jobId;
   sessionsLoading = true;
   renderSidebar();

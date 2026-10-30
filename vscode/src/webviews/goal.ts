@@ -2,6 +2,7 @@ import './styles.css';
 import './mode-switcher.css';
 import './markdown.css';
 import './goal.css';
+import { isLocalDaemon } from '../core/daemons';
 import { providerLogo } from '../core/icons';
 import { renderMarkdown } from './markdown';
 import { t, type MessageKey } from '../core/i18n';
@@ -18,6 +19,7 @@ import type {
   UiLanguage,
 } from '../core/types';
 import { bridge } from './bridge';
+import { openDirPicker } from './dir-picker';
 
 interface GoalBoot {
   language: UiLanguage;
@@ -48,6 +50,7 @@ let treeLoading = false;
 let logLoading = false;
 const logRequests = new Map<string, Promise<void>>();
 let notice: string | null = null;
+let exportedPath: string | null = null;
 let pollTimer: number | null = null;
 let draft = {
   goal: '',
@@ -534,9 +537,14 @@ async function exportSop(): Promise<void> {
   const rootId = boot?.selectedRunId;
   if (!rootId || busy) return;
   busy = 'export';
+  exportedPath = null;
+  notice = null;
   render();
   try {
-    await bridge.call('goal.export', { rootJobId: rootId });
+    const result = await bridge.call<{ path: string }>('goal.export', {
+      rootJobId: rootId,
+    });
+    exportedPath = result.path;
   } catch (err) {
     notice = err instanceof Error ? err.message : String(err);
     render();
@@ -596,7 +604,12 @@ function renderSubmitForm(): string {
       <label class="agd-sop-field"><span>${tr('goal.provider')}</span><select id="agd-goal-provider" class="agd-input">${providerOptions}</select></label>
       <label class="agd-sop-field"><span>${tr('goal.daemon')}</span><select id="agd-goal-daemon" class="agd-input">${daemonOptions}</select></label>
     </div>
-    <label class="agd-sop-field"><span>${tr('goal.dir')}</span><input id="agd-goal-dir" class="agd-input agd-mono" value="${esc(draft.dir)}" placeholder="/absolute/path"></label>
+    <div class="agd-sop-field"><span>${tr('goal.dir')}</span>
+      <div class="agd-dir-input-row">
+        <input id="agd-goal-dir" class="agd-input agd-mono" value="${esc(draft.dir)}" placeholder="/absolute/path">
+        ${bridge.canBrowseDirectories ? `<button type="button" class="agd-btn" id="agd-goal-browse-dir">${tr('projects.browse')}</button>` : ''}
+      </div>
+    </div>
     <div class="agd-goal-grid">
       <label class="agd-sop-field"><span>${tr('goal.maxDepth')}</span><input id="agd-goal-depth" class="agd-input" type="number" min="1" max="10" value="${draft.maxDepth}"></label>
       <label class="agd-sop-field"><span>${tr('goal.maxDescendants')}</span><input id="agd-goal-descendants" class="agd-input" type="number" min="1" max="512" value="${draft.maxDescendants}"></label>
@@ -686,6 +699,7 @@ function renderTree(): string {
         </div>
       </div>
       <div class="agd-goal-hero-actions">
+        ${exportedPath ? `<span class="agd-goal-export-path" title="${esc(exportedPath)}">${tr('goal.exportSaved')} ${esc(exportedPath)}</span>` : ''}
         <button type="button" class="agd-btn" id="agd-goal-export" ${busy ? 'disabled' : ''}>${busy === 'export' ? tr('goal.exporting') : tr('goal.export')}</button>
         <button type="button" class="agd-btn agd-btn-danger" id="agd-goal-cancel" ${busy || !runRunning() ? 'disabled' : ''}>${busy === 'cancel' ? tr('goal.cancelling') : tr('goal.cancel')}</button>
       </div>
@@ -1018,6 +1032,20 @@ function wireEvents(): void {
   });
   document.getElementById('agd-goal-dir')?.addEventListener('input', (event) => {
     draft.dir = (event.target as HTMLInputElement).value;
+  });
+  document.getElementById('agd-goal-browse-dir')?.addEventListener('click', () => {
+    const daemon = boot?.daemons.find((item) => item.daemon_id === draft.daemonId);
+    openDirPicker({
+      language: lang,
+      title: tr('goal.dir'),
+      // A local daemon shares the Server's filesystem, so browse it directly.
+      daemonId: daemon && !isLocalDaemon(daemon) ? daemon.daemon_id : null,
+      startPath: draft.dir || null,
+      onSelect: (path) => {
+        draft.dir = path;
+        render();
+      },
+    });
   });
   document.getElementById('agd-goal-depth')?.addEventListener('input', (event) => {
     draft.maxDepth = Number((event.target as HTMLInputElement).value) || 5;

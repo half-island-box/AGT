@@ -21,6 +21,17 @@ export interface BootInfo {
   daemons: DaemonInfo[];
   identities: IdentityWithBindings[];
   localDaemonId: string | null;
+  /**
+   * Host-provided limits. Absent means "everything the extension can do";
+   * a console host sets these to hide process-lifecycle controls.
+   */
+  capabilities?: {
+    lifecycleControl?: boolean;
+    daemonLifecycle?: boolean;
+    addDaemon?: boolean;
+    pairing?: boolean;
+    console?: boolean;
+  };
 }
 
 declare function acquireVsCodeApi(): {
@@ -78,6 +89,13 @@ if (vscodeApi) {
 export const bridge = {
   /** True when running in a plain browser (npm run dev:web). */
   isMock: vscodeApi === undefined,
+
+  /**
+   * True when the host answers ``projects.directories``. The VS Code
+   * extension host has no such handler, so its webviews hide the browse
+   * buttons instead of failing the call; the browser mock provides it.
+   */
+  canBrowseDirectories: vscodeApi === undefined,
 
   call<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T> {
     if (!vscodeApi) {
