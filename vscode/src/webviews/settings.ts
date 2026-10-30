@@ -1,5 +1,6 @@
 import './mode-switcher.css';
 import './styles.css';
+import { isMissingEndpoint } from '../core/api';
 import { t, type MessageKey } from '../core/i18n';
 import { providerLogo } from '../core/icons';
 import type {
@@ -7,9 +8,6 @@ import type {
   DaemonInfo,
   IdentityWithBindings,
   PairingAddDaemonInfo,
-  PairingDaemonInfo,
-  PairingRemoveInfo,
-  PairingSecretInfo,
   PairingStateInfo,
   UiLanguage,
 } from '../core/types';
@@ -69,39 +67,22 @@ function syncDaemonHostHint(inputId: string, raw: string): void {
 let boot: BootInfo | undefined;
 let lang: UiLanguage = 'zh';
 let busyAction: string | null = null;
-let daemonForm: {
-  open: boolean;
-  busy: boolean;
-  error: string | null;
-  result: { command: string; daemonsPath: string } | null;
-  draft: { name: string; host: string; capabilities: string };
-} = { open: false, busy: false, error: null, result: null, draft: { name: '', host: '', capabilities: '' } };
-let copiedAt = 0;
 let pairingCopiedAt = 0;
-let pairingSecretCopiedAt = 0;
 
 /**
- * "Connection & pairing" state.
+ * Add-daemon (invite code) state.
  *
- * The secret is fetched masked on load; the plaintext only arrives after
- * an explicit "show"/"copy" (the loopback pairing API keeps ``reveal``
- * opt-in so the value does not travel to the UI by default).
+ * The flow lives behind the daemons card's "Add daemon" button and is
+ * rendered as a modal: form → invite code. There is no separate
+ * "Connection & pairing" card anymore.
  */
 let pairing: {
-  loaded: boolean;
+  probed: boolean;
   loading: boolean;
-  secretConfigured: boolean;
-  secretMasked: string | null;
-  secretPlain: string | null;
-  secretSource: string;
-  revealBusy: boolean;
   busy: boolean;
   error: string | null;
+  addOpen: boolean;
   daemonsPath: string;
-  targets: PairingDaemonInfo[];
-  confirmRemove: string | null;
-  removing: string | null;
-  removedNotice: { name: string; restartRequired: boolean } | null;
   result: {
     daemonId: string;
     added: string;
@@ -111,20 +92,12 @@ let pairing: {
   } | null;
   draft: { name: string; host: string; capabilities: string };
 } = {
-  loaded: false,
+  probed: false,
   loading: false,
-  secretConfigured: false,
-  secretMasked: null,
-  secretPlain: null,
-  secretSource: '',
-  revealBusy: false,
   busy: false,
   error: null,
+  addOpen: false,
   daemonsPath: '',
-  targets: [],
-  confirmRemove: null,
-  removing: null,
-  removedNotice: null,
   result: null,
   draft: { name: '', host: '', capabilities: '' },
 };
@@ -228,34 +201,16 @@ function configDraft(info: DaemonConfigInfo): DaemonConfigDraft {
   };
 }
 
-function renderDaemonForm(): string {
-  if (daemonForm.result) {
-    const copied = Date.now() - copiedAt < 1600;
-    return `
-      <div class="agd-daemon-form">
-        <p class="agd-form-ok">${tr('settings.addDaemonOk', { path: esc(daemonForm.result.daemonsPath) })}</p>
-        <pre class="agd-cmd"><code>${esc(daemonForm.result.command)}</code></pre>
-        <div class="agd-actions">
-          <button type="button" id="agd-copy-cmd" class="agd-btn">${copied ? tr('settings.copied') : tr('settings.copy')}</button>
-          <button type="button" id="agd-daemon-close" class="agd-btn">${tr('settings.cancel')}</button>
-        </div>
-      </div>`;
-  }
-  return `
-    <div class="agd-daemon-form">
-      <label class="agd-field">${tr('settings.daemonName')}<input id="agd-daemon-name" class="agd-input" value="${esc(daemonForm.draft.name)}" autocomplete="off"></label>
-      <label class="agd-field">${tr('settings.daemonUrl')}<input id="agd-daemon-host" class="agd-input agd-mono" placeholder="1.2.3.4" value="${esc(daemonForm.draft.host)}" autocomplete="off"><span id="agd-daemon-host-hint" class="agd-daemon-config-meta">${daemonUrl(daemonForm.draft.host) ? tr('settings.daemonHostHint', { url: daemonUrl(daemonForm.draft.host) }) : ''}</span></label>
-      <label class="agd-field">${tr('settings.daemonCaps')}<input id="agd-daemon-caps" class="agd-input" placeholder="${tr('settings.daemonCapsPh')}" value="${esc(daemonForm.draft.capabilities)}" autocomplete="off"></label>
-      ${daemonForm.error ? `<p class="agd-form-err">${esc(daemonForm.error)}</p>` : ''}
-      <div class="agd-actions">
-        <button type="button" id="agd-daemon-submit" class="agd-btn agd-btn-primary" ${daemonForm.busy ? 'disabled' : ''}>${daemonForm.busy ? spinner() : ''}${tr('settings.addDaemonSubmit')}</button>
-        <button type="button" id="agd-daemon-cancel" class="agd-btn" ${daemonForm.busy ? 'disabled' : ''}>${tr('settings.cancel')}</button>
-      </div>
-    </div>`;
-}
+/**
+ * False once the Server answered 404 for the pairing endpoints. Older
+ * Servers predate them; hiding the card beats showing an endpoint error
+ * the user cannot act on.
+ */
+let pairingSupported = true;
 
 function pairingEnabled(): boolean {
-  return boot !== undefined
+  return pairingSupported
+    && boot !== undefined
     && boot.state === 'online'
     && boot.capabilities?.pairing !== false;
 }
@@ -273,7 +228,11 @@ async function copyText(value: string): Promise<void> {
   }
 }
 
-/** Fetch pairing state once per online Server; called from applyBoot. */
+/**
+ * Probe the pairing API once per online Server; called from applyBoot.
+ * Kept only to detect Servers that predate it (404 → the Add-daemon
+ * button stays hidden instead of failing on submit).
+ */
 async function loadPairing(): Promise<void> {
   if (!pairingEnabled() || pairing.loading) {
     return;
@@ -281,62 +240,16 @@ async function loadPairing(): Promise<void> {
   pairing.loading = true;
   try {
     const state = await bridge.call<PairingStateInfo>('pairingState');
-    pairing.secretConfigured = state.secret_configured;
     pairing.daemonsPath = state.daemons_path;
-    pairing.secretSource = state.secret_source;
-    pairing.targets = state.daemons;
-    if (state.secret_configured) {
-      const secret = await bridge.call<PairingSecretInfo>('pairingSecret', { reveal: false });
-      pairing.secretMasked = secret.masked;
-      pairing.secretSource = secret.source;
-    }
-    pairing.loaded = true;
-    pairing.error = null;
+    pairing.probed = true;
   } catch (err) {
-    pairing.error = pairingErrorText(err);
+    if (isMissingEndpoint(err)) {
+      pairingSupported = false;
+    }
   } finally {
     pairing.loading = false;
     render();
   }
-}
-
-async function toggleRevealSecret(): Promise<void> {
-  if (pairing.secretPlain) {
-    pairing.secretPlain = null;
-    render();
-    return;
-  }
-  pairing.revealBusy = true;
-  render();
-  try {
-    const secret = await bridge.call<PairingSecretInfo>('pairingSecret', { reveal: true });
-    pairing.secretPlain = secret.secret;
-    pairing.secretMasked = secret.masked;
-    pairing.secretSource = secret.source;
-  } catch (err) {
-    pairing.error = pairingErrorText(err);
-  } finally {
-    pairing.revealBusy = false;
-    render();
-  }
-}
-
-async function copyPairingSecret(): Promise<void> {
-  if (!pairing.secretPlain) {
-    try {
-      const secret = await bridge.call<PairingSecretInfo>('pairingSecret', { reveal: true });
-      pairing.secretPlain = secret.secret;
-      pairing.secretMasked = secret.masked;
-      pairing.secretSource = secret.source;
-    } catch (err) {
-      pairing.error = pairingErrorText(err);
-      render();
-      return;
-    }
-  }
-  await copyText(pairing.secretPlain ?? '');
-  pairingSecretCopiedAt = Date.now();
-  render();
 }
 
 async function submitPairingForm(): Promise<void> {
@@ -384,144 +297,84 @@ async function submitPairingForm(): Promise<void> {
   }
 }
 
-async function removePairingTarget(url: string): Promise<void> {
-  pairing.removing = url;
-  pairing.error = null;
-  render();
-  try {
-    const res = await bridge.call<PairingRemoveInfo>('pairingRemoveDaemon', { url });
-    pairing.removedNotice = { name: res.name, restartRequired: res.restart_required };
-    pairing.targets = pairing.targets.filter((target) => target.url !== res.url);
-    pairing.confirmRemove = null;
-    pairing.loaded = false;
-    void loadPairing();
-    void call('refresh');
-  } catch (err) {
-    pairing.error = pairingErrorText(err);
-  } finally {
-    pairing.removing = null;
-    render();
-  }
-}
-
-async function restartServer(): Promise<void> {
-  await call('stopServer');
-  await call('startServer');
-  pairing.result = null;
-  pairing.removedNotice = null;
-  pairing.loaded = false;
-  void loadPairing();
-  render();
-}
-
-async function restartServerForPairing(): Promise<void> {
-  if (!pairing.result) {
+/**
+ * Make the Server re-read its daemon target file so a freshly registered
+ * target starts being dialed now (``POST /api/daemons/refresh``) instead
+ * of after a restart. Updates the daemon list as a side effect.
+ */
+async function connectPairingTarget(): Promise<void> {
+  if (!pairing.result || pairing.result.restarting) {
     return;
   }
   pairing.result = { ...pairing.result, restarting: true };
+  pairing.error = null;
   render();
-  await restartServer();
+  try {
+    await bridge.call('refreshDaemons');
+    pairing.result = { ...pairing.result, restarting: false, restartRequired: false };
+  } catch (err) {
+    pairing.error = pairingErrorText(err);
+    pairing.result = { ...pairing.result, restarting: false };
+  } finally {
+    render();
+    void call('refresh');
+  }
 }
 
-function renderPairingCard(): string {
-  if (!pairingEnabled()) {
+/**
+ * "Add daemon" modal: opened by the daemons card's button, hosts the
+ * invite-code flow (form → generated command). Replaces the old separate
+ * "Connection & pairing" card and the legacy file-append form.
+ */
+function renderAddDaemonModal(): string {
+  if (!pairing.addOpen || !pairingEnabled()) {
     return '';
   }
-  const lifecycleControl = boot?.capabilities?.lifecycleControl !== false;
-  const secretValue = pairing.secretPlain ?? pairing.secretMasked ?? '';
-  const sourceLabel = pairing.secretSource === 'env'
-    ? tr('settings.pairingSourceEnv')
-    : tr('settings.pairingSourceFile');
   const invite = pairing.result;
   const copied = Date.now() - pairingCopiedAt < 1600;
-  const secretCopied = Date.now() - pairingSecretCopiedAt < 1600;
 
-  const form = invite
-    ? `
-    <div class="agd-daemon-form">
+  let body: string;
+  if (invite) {
+    body = `
       <p class="agd-form-ok">${tr('settings.pairingAdded', { path: esc(pairing.daemonsPath) })}</p>
       <p class="agd-note">${tr('settings.pairingRunOnDaemon')}</p>
       <pre class="agd-cmd"><code>${esc(invite.command)}</code></pre>
       <p class="agd-note agd-dim">${tr('settings.pairingWarning')}</p>
-      <div class="agd-actions">
+      ${pairing.error ? `<p class="agd-form-err">${esc(pairing.error)}</p>` : ''}
+      <div class="agd-actions agd-modal-actions">
         <button type="button" id="agd-pairing-copy-cmd" class="agd-btn">${copied ? tr('settings.copied') : tr('settings.copy')}</button>
-        ${invite.restartRequired && lifecycleControl
-          ? `<button type="button" id="agd-pairing-restart" class="agd-btn agd-btn-primary" ${invite.restarting ? 'disabled' : ''}>${invite.restarting ? spinner() + tr('settings.pairingRestarting') : tr('settings.pairingRestart')}</button>`
+        <span class="agd-flex"></span>
+        ${invite.restartRequired
+          ? `<button type="button" id="agd-pairing-connect" class="agd-btn" ${invite.restarting ? 'disabled' : ''}>${invite.restarting ? spinner() + tr('settings.pairingConnecting') : tr('settings.pairingConnect')}</button>`
           : ''}
-        <button type="button" id="agd-pairing-done" class="agd-btn" ${invite.restarting ? 'disabled' : ''}>${tr('settings.pairingDone')}</button>
-      </div>
-    </div>`
-    : `
-    <div class="agd-daemon-form">
+        <button type="button" id="agd-pairing-done" class="agd-btn agd-btn-primary" ${invite.restarting ? 'disabled' : ''}>${tr('settings.pairingDone')}</button>
+      </div>`;
+  } else {
+    body = `
       <p class="agd-note">${tr('settings.pairingAddTitle')}</p>
       <label class="agd-field">${tr('settings.daemonName')}<input id="agd-pairing-name" class="agd-input" value="${esc(pairing.draft.name)}" autocomplete="off"></label>
       <label class="agd-field">${tr('settings.daemonUrl')}<input id="agd-pairing-host" class="agd-input agd-mono" placeholder="1.2.3.4" value="${esc(pairing.draft.host)}" autocomplete="off"><span id="agd-pairing-host-hint" class="agd-daemon-config-meta">${daemonUrl(pairing.draft.host) ? tr('settings.daemonHostHint', { url: daemonUrl(pairing.draft.host) }) : ''}</span></label>
       <label class="agd-field">${tr('settings.daemonCaps')}<input id="agd-pairing-caps" class="agd-input" placeholder="${tr('settings.daemonCapsPh')}" value="${esc(pairing.draft.capabilities)}" autocomplete="off"></label>
-      <div class="agd-actions">
-        <button type="button" id="agd-pairing-submit" class="agd-btn agd-btn-primary" ${pairing.busy ? 'disabled' : ''}>${pairing.busy ? spinner() : ''}${tr('settings.pairingAddSubmit')}</button>
-      </div>
-    </div>`;
-
-  const targetRows = pairing.targets
-    .map(
-      (target) => `
-      <tr>
-        <td>${esc(target.name)}</td>
-        <td><span class="agd-mono">${esc(target.url)}</span></td>
-        <td><span class="agd-pill ${target.connected ? 'agd-pill-ok' : 'agd-pill-err'}">${target.connected ? tr('settings.pairingConnected') : tr('settings.disconnected')}</span></td>
-        <td class="agd-table-actions">${renderPairingTargetActions(target)}</td>
-      </tr>`,
-    )
-    .join('');
-  const targets = pairing.targets.length
-    ? `<table class="agd-table">
-        <thead><tr><th>${tr('settings.daemonName')}</th><th>${tr('settings.daemonUrl')}</th><th>${tr('settings.status')}</th><th></th></tr></thead>
-        <tbody>${targetRows}</tbody>
-      </table>`
-    : `<p class="agd-note agd-dim">${tr('settings.pairingNoTargets')}</p>`;
-
-  const removedNotice = pairing.removedNotice
-    ? `<div class="agd-actions">
-        <span class="agd-form-ok">${tr('settings.pairingRemoved', { name: esc(pairing.removedNotice.name) })}</span>
+      ${pairing.error ? `<p class="agd-form-err">${esc(pairing.error)}</p>` : ''}
+      <div class="agd-actions agd-modal-actions">
         <span class="agd-flex"></span>
-        ${pairing.removedNotice.restartRequired && lifecycleControl
-          ? `<button type="button" id="agd-pairing-removed-restart" class="agd-btn agd-btn-primary">${tr('settings.pairingRestart')}</button>`
-          : ''}
-        <button type="button" id="agd-pairing-removed-done" class="agd-btn">${tr('settings.pairingDone')}</button>
-      </div>`
-    : '';
+        <button type="button" id="agd-pairing-cancel" class="agd-btn" ${pairing.busy ? 'disabled' : ''}>${tr('settings.cancel')}</button>
+        <button type="button" id="agd-pairing-submit" class="agd-btn agd-btn-primary" ${pairing.busy ? 'disabled' : ''}>${pairing.busy ? spinner() : ''}${tr('settings.pairingAddSubmit')}</button>
+      </div>`;
+  }
 
   return `
-    <section class="agd-card">
-      <div class="agd-card-head">
-        <span>${tr('settings.pairing')}</span>
-        <span class="agd-flex"></span>
-        ${pairing.loading ? spinner() : ''}
-        <span class="agd-dim agd-daemon-state">${pairing.secretConfigured ? esc(sourceLabel) : tr('settings.pairingNoSecret')}</span>
-      </div>
-      <label class="agd-field agd-field-row">
-        <span>${tr('settings.pairingSecret')}</span>
-        <input id="agd-pairing-secret" class="agd-input agd-mono" readonly value="${esc(secretValue)}">
-        <button type="button" id="agd-pairing-reveal" class="agd-btn" ${pairing.revealBusy ? 'disabled' : ''}>${pairing.revealBusy ? spinner() : (pairing.secretPlain ? tr('settings.pairingHide') : tr('settings.pairingShow'))}</button>
-        <button type="button" id="agd-pairing-copy-secret" class="agd-btn">${secretCopied ? tr('settings.copied') : tr('settings.copy')}</button>
-      </label>
-      <p class="agd-note agd-dim">${tr('settings.pairingSecretHint')}</p>
-      <p class="agd-note">${tr('settings.pairingTargets')}</p>
-      ${targets}
-      ${removedNotice}
-      ${pairing.error ? `<p class="agd-form-err">${esc(pairing.error)}</p>` : ''}
-      ${form}
-    </section>`;
-}
-
-function renderPairingTargetActions(target: PairingDaemonInfo): string {
-  const url = esc(target.url);
-  if (pairing.confirmRemove === target.url) {
-    return `
-      <button type="button" class="agd-btn agd-btn-danger" data-pairing-remove="${url}" ${pairing.removing ? 'disabled' : ''}>${pairing.removing === target.url ? spinner() : ''}${tr('settings.pairingRemoveConfirm')}</button>
-      <button type="button" class="agd-btn" data-pairing-remove-cancel="${url}" ${pairing.removing ? 'disabled' : ''}>${tr('settings.cancel')}</button>`;
-  }
-  return `<button type="button" class="agd-btn agd-btn-danger" data-pairing-remove-arm="${url}">${tr('settings.pairingRemove')}</button>`;
+  <div class="agd-modal-backdrop" id="agd-add-daemon-backdrop">
+    <section class="agd-modal" role="dialog" aria-modal="true" aria-labelledby="agd-add-daemon-title">
+      <header class="agd-modal-head">
+        <div>
+          <h3 id="agd-add-daemon-title">${tr('settings.addDaemon')}</h3>
+        </div>
+        <button type="button" id="agd-add-daemon-close" class="agd-btn" ${pairing.busy || invite?.restarting ? 'disabled' : ''}>${tr('settings.daemonConfigClose')}</button>
+      </header>
+      ${body}
+    </section>
+  </div>`;
 }
 
 function renderDaemonConfigField(
@@ -916,7 +769,6 @@ function render(): void {
   }
   const currentBoot = boot;
   const lifecycleControl = currentBoot.capabilities?.lifecycleControl !== false;
-  const addDaemon = currentBoot.capabilities?.addDaemon !== false;
   const daemonRows = currentBoot.daemons
     .map(
       (d) => `
@@ -994,17 +846,14 @@ function render(): void {
       </div>` : `<p class="agd-note agd-dim">${tr('settings.consoleLifecycleHint')}</p>`}
     </section>
 
-    ${renderPairingCard()}
-
     ${renderIdentitiesCard()}
 
     <section class="agd-card">
       <div class="agd-card-head">
         <span>${tr('settings.daemons')}</span>
         <span class="agd-flex"></span>
-        ${addDaemon ? `<button type="button" id="agd-add-daemon" class="agd-btn">${tr('settings.addDaemon')}</button>` : ''}
+        <button type="button" id="agd-add-daemon" class="agd-btn" ${pairingEnabled() ? '' : 'disabled'}>${tr('settings.addDaemon')}</button>
       </div>
-      ${daemonForm.open ? renderDaemonForm() : ''}
       <table class="agd-table">
         <thead>
           <tr><th>ID</th><th>${tr('settings.host')}</th><th>${tr('settings.providers')}</th><th>${tr('settings.status')}</th><th>${tr('settings.lastSeen')}</th><th></th></tr>
@@ -1017,6 +866,7 @@ function render(): void {
 
     ${bridge.isMock ? `<p class="agd-mock-note">browser preview · mock data</p>` : ''}
   </div>
+  ${renderAddDaemonModal()}
   ${renderDaemonConfigModal()}
   ${renderIdentityModal()}`;
 
@@ -1337,7 +1187,7 @@ async function removeIdentityBinding(bindingId: number): Promise<void> {
 function applyBoot(next: BootInfo): void {
   boot = next;
   lang = next.language;
-  if (pairingEnabled() && !pairing.loaded && !pairing.loading) {
+  if (pairingEnabled() && !pairing.probed && !pairing.loading) {
     void loadPairing();
   }
 }
@@ -1528,88 +1378,24 @@ function wireEvents(): void {
       void removeIdentityBinding(Number(button.dataset.bindingRemove));
     });
   });
+  const closeAddDaemon = (): void => {
+    pairing.addOpen = false;
+    pairing.error = null;
+    pairing.result = null;
+    render();
+  };
   document.getElementById('agd-add-daemon')?.addEventListener('click', () => {
-    daemonForm = { ...daemonForm, open: !daemonForm.open, error: null, result: null };
+    pairing.addOpen = true;
+    pairing.error = null;
+    pairing.result = null;
     render();
+    document.getElementById('agd-pairing-name')?.focus();
   });
-  document.getElementById('agd-daemon-cancel')?.addEventListener('click', () => {
-    daemonForm = { open: false, busy: false, error: null, result: null, draft: daemonForm.draft };
-    render();
+  document.getElementById('agd-add-daemon-close')?.addEventListener('click', closeAddDaemon);
+  document.getElementById('agd-add-daemon-backdrop')?.addEventListener('mousedown', (event) => {
+    if (event.target === event.currentTarget && !pairing.busy) closeAddDaemon();
   });
-  document.getElementById('agd-daemon-close')?.addEventListener('click', () => {
-    daemonForm = { open: false, busy: false, error: null, result: null, draft: daemonForm.draft };
-    render();
-  });
-  for (const [id, key] of [
-    ['agd-daemon-name', 'name'],
-    ['agd-daemon-host', 'host'],
-    ['agd-daemon-caps', 'capabilities'],
-  ] as const) {
-    document.getElementById(id)?.addEventListener('input', (e) => {
-      const value = (e.target as HTMLInputElement).value;
-      daemonForm.draft[key] = value;
-      if (key === 'host') syncDaemonHostHint(id, value);
-    });
-  }
-  document.getElementById('agd-daemon-submit')?.addEventListener('click', async () => {
-    const { name, host, capabilities } = daemonForm.draft;
-    if (!name.trim()) {
-      daemonForm.error = tr('settings.addDaemonNeedName');
-      render();
-      return;
-    }
-    if (!/^[A-Za-z0-9_.-]+$/.test(name.trim())) {
-      daemonForm.error = tr('settings.addDaemonBadName');
-      render();
-      return;
-    }
-    if (!isValidDaemonHost(host)) {
-      daemonForm.error = tr('settings.addDaemonBadUrl');
-      render();
-      return;
-    }
-    daemonForm.busy = true;
-    daemonForm.error = null;
-    render();
-    try {
-      daemonForm.result = await bridge.call<{ command: string; daemonsPath: string }>('addDaemon', {
-        name: name.trim(),
-        url: daemonUrl(host),
-        capabilities,
-      });
-    } catch (err) {
-      const code = err instanceof Error ? err.message : '';
-      const errors: Record<string, string> = {
-        'duplicate-url': tr('settings.addDaemonDup'),
-        'bad-url': tr('settings.addDaemonBadUrl'),
-        'name-required': tr('settings.addDaemonNeedName'),
-        'bad-name': tr('settings.addDaemonBadName'),
-      };
-      daemonForm.error = errors[code] ?? `${code || String(err)}`;
-    } finally {
-      daemonForm.busy = false;
-      render();
-    }
-  });
-  document.getElementById('agd-copy-cmd')?.addEventListener('click', async () => {
-    const command = daemonForm.result?.command;
-    if (!command) {
-      return;
-    }
-    try {
-      await navigator.clipboard?.writeText(command);
-    } catch {
-      // Clipboard may be unavailable in the webview; the command stays selectable.
-    }
-    copiedAt = Date.now();
-    render();
-  });
-  document.getElementById('agd-pairing-reveal')?.addEventListener('click', () => {
-    void toggleRevealSecret();
-  });
-  document.getElementById('agd-pairing-copy-secret')?.addEventListener('click', () => {
-    void copyPairingSecret();
-  });
+  document.getElementById('agd-pairing-cancel')?.addEventListener('click', closeAddDaemon);
   for (const [id, key] of [
     ['agd-pairing-name', 'name'],
     ['agd-pairing-host', 'host'],
@@ -1624,33 +1410,6 @@ function wireEvents(): void {
   document.getElementById('agd-pairing-submit')?.addEventListener('click', () => {
     void submitPairingForm();
   });
-  document.querySelectorAll<HTMLElement>('[data-pairing-remove-arm]').forEach((button) => {
-    button.addEventListener('click', () => {
-      pairing.confirmRemove = button.dataset.pairingRemoveArm ?? null;
-      pairing.error = null;
-      render();
-    });
-  });
-  document.querySelectorAll<HTMLElement>('[data-pairing-remove-cancel]').forEach((button) => {
-    button.addEventListener('click', () => {
-      pairing.confirmRemove = null;
-      render();
-    });
-  });
-  document.querySelectorAll<HTMLElement>('[data-pairing-remove]').forEach((button) => {
-    button.addEventListener('click', () => {
-      if (pairing.removing) return;
-      void removePairingTarget(button.dataset.pairingRemove ?? '');
-    });
-  });
-  document.getElementById('agd-pairing-removed-restart')?.addEventListener('click', () => {
-    void restartServer();
-  });
-  document.getElementById('agd-pairing-removed-done')?.addEventListener('click', () => {
-    pairing.removedNotice = null;
-    pairing.error = null;
-    render();
-  });
   document.getElementById('agd-pairing-copy-cmd')?.addEventListener('click', async () => {
     const command = pairing.result?.command;
     if (!command) {
@@ -1660,13 +1419,11 @@ function wireEvents(): void {
     pairingCopiedAt = Date.now();
     render();
   });
-  document.getElementById('agd-pairing-restart')?.addEventListener('click', () => {
-    void restartServerForPairing();
+  document.getElementById('agd-pairing-connect')?.addEventListener('click', () => {
+    void connectPairingTarget();
   });
   document.getElementById('agd-pairing-done')?.addEventListener('click', () => {
-    pairing.result = null;
-    pairing.error = null;
-    render();
+    closeAddDaemon();
   });
 }
 
