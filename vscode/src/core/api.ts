@@ -3,6 +3,7 @@ import type {
   ChatSessionInfo,
   ConsoleDirectoryListing,
   DaemonConfigInfo,
+  DaemonRefreshInfo,
   ArtifactInfo,
   DaemonInfo,
   IdentityBindingInfo,
@@ -145,6 +146,25 @@ export class AgtApi {
   async daemons(): Promise<DaemonInfo[]> {
     const res = await this.request<{ daemons: DaemonInfo[] }>('/api/daemons');
     return res.daemons;
+  }
+
+  /**
+   * Re-read ``~/.agt/daemons`` on the Server and reconcile its live links:
+   * new targets start being dialed, dropped ones stop, and an offline target
+   * is re-dialed now instead of waiting out its reconnect backoff. Healthy
+   * links are untouched, so in-flight work is never interrupted.
+   *
+   * ``daemonId`` narrows the forced re-dial to one target (per-row button).
+   * The Server waits up to ~1.5 s for the re-dial before answering, so this
+   * uses a longer timeout than the plain listing calls.
+   */
+  async refreshDaemons(daemonId?: string | null): Promise<DaemonRefreshInfo> {
+    const query = daemonId ? `?daemon_id=${encodeURIComponent(daemonId)}` : '';
+    return this.request<DaemonRefreshInfo>(
+      `/api/daemons/refresh${query}`,
+      { method: 'POST' },
+      10_000,
+    );
   }
 
   async daemonConfig(): Promise<DaemonConfigInfo> {

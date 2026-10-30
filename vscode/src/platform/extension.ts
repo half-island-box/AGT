@@ -79,8 +79,25 @@ export function activate(context: vscode.ExtensionContext): void {
     });
   }
 
-  async function refresh(opts?: { ensure?: boolean }): Promise<void> {
+  /**
+   * Ask the Server to re-read ``~/.agt/daemons`` and reconcile its live
+   * links (new targets dialed, offline ones re-dialed immediately instead
+   * of waiting out the up-to-60 s backoff). Best-effort: a Server that
+   * predates the endpoint, or a slow one, must not break the sidebar
+   * refresh — the plain listing below still runs.
+   */
+  async function rescanDaemons(daemonId?: string): Promise<void> {
+    try {
+      await lifecycle.api.refreshDaemons(daemonId);
+    } catch (err) {
+      console.log(`[agt] daemon rescan failed: ${String(err)}`);
+    }
+  }
+
+  async function refresh(opts?: { ensure?: boolean; rescan?: boolean }): Promise<void> {
     const online = opts?.ensure ? await lifecycle.ensureStarted() : await lifecycle.probe();
+    // Reconcile *before* listing so the tree shows what the rescan found.
+    if (online && opts?.rescan) await rescanDaemons();
     if (online && opts?.ensure) {
       // A server we just started should run with a local daemon; don't make
       // the tree/status bar wait for the daemon's own startup.
@@ -203,7 +220,11 @@ export function activate(context: vscode.ExtensionContext): void {
       openSopEditor(uri),
     ),
     vscode.commands.registerCommand('agt.newSop', () => void workspaceView.newSop()),
-    vscode.commands.registerCommand('agt.refresh', () => void refresh({ ensure: false })),
+    // The sidebar title-bar refresh re-scans the Server's daemon targets,
+    // not just our local view of them.
+    vscode.commands.registerCommand('agt.refresh', () =>
+      void refresh({ ensure: false, rescan: true }),
+    ),
     vscode.commands.registerCommand('agt.startServer', () => void refresh({ ensure: true })),
     vscode.commands.registerCommand('agt.stopServer', async () => {
       await lifecycle.stop();
