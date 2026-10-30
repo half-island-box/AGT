@@ -631,6 +631,12 @@ export async function browserCall<T>(
       return { ...(await settingsBoot()), ok: true } as T;
     case 'refresh':
       return await settingsBoot() as T;
+    case 'refreshDaemons': {
+      // Re-read ~/.agt/daemons on the Server and reconcile its links; a
+      // per-row click narrows the forced re-dial to that daemon.
+      const rescan = await api.refreshDaemons(p.daemonId ? String(p.daemonId) : null);
+      return { ...(await settingsBoot()), rescan } as T;
+    }
     case 'startServer':
     case 'stopServer':
     case 'startDaemon':

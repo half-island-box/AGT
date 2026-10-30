@@ -929,6 +929,13 @@ function render(): void {
         <td class="agd-table-action">
           <button
             type="button"
+            class="agd-btn agd-daemon-refresh-button"
+            data-refresh-daemon-id="${esc(d.daemon_id)}"
+            ${busyAction ? 'disabled' : ''}
+            title="${tr('settings.daemonRefresh')}"
+          >${busyAction === 'refreshDaemons' ? spinner() : '⟳'}</button>
+          <button
+            type="button"
             class="agd-btn agd-daemon-config-button"
             data-config-daemon-id="${esc(d.daemon_id)}"
             ${d.online ? '' : 'disabled'}
@@ -1363,6 +1370,15 @@ function wireEvents(): void {
     row.addEventListener('click', () => {
       if (row.querySelector('button:disabled')) return;
       void openDaemonConfig(row.dataset.configDaemonId ?? '');
+    });
+  });
+  // Per-row refresh: re-scan the daemon target file on the Server and force
+  // an immediate reconnect for this daemon. Enabled even when it is offline —
+  // that is exactly the case the button exists for.
+  document.querySelectorAll<HTMLButtonElement>('button[data-refresh-daemon-id]').forEach((btn) => {
+    btn.addEventListener('click', (event) => {
+      event.stopPropagation();
+      void call('refreshDaemons', { daemonId: btn.dataset.refreshDaemonId ?? '' });
     });
   });
   document.getElementById('agd-url')?.addEventListener('change', (e) => {

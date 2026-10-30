@@ -64,6 +64,18 @@ export interface PairingRemoveInfo {
   restart_required: boolean;
 }
 
+/** One row of ``POST /api/daemons/refresh``. */
+export interface DaemonRefreshRow {
+  daemon_id: string;
+  action: 'added' | 'removed' | 'replaced' | 'redialled' | 'unchanged' | string;
+  connected: boolean;
+}
+
+export interface DaemonRefreshInfo {
+  daemons: DaemonRefreshRow[];
+  daemons_path: string;
+}
+
 export type DaemonConfigValue = number | string | string[];
 
 export interface DaemonConfigSetting {
