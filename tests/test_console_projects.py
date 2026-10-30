@@ -301,8 +301,11 @@ def test_console_project_api_disabled_for_non_loopback_or_opt_out(
     )
     try:
         assert loopback.get("/api/console/projects").status_code == 200
+        assert loopback.get("/console/icon.svg").status_code == 200
         assert remote.get("/api/console/projects").status_code == 404
+        assert remote.get("/console/icon.svg").status_code == 404
         assert disabled.get("/api/console/projects").status_code == 404
+        assert disabled.get("/console/icon.svg").status_code == 404
     finally:
         dispose_loopback()
         dispose_remote()
@@ -323,6 +326,12 @@ def test_console_project_routes_and_assets(tmp_path: Path) -> None:
         projects = client.get("/console/projects")
         assert projects.status_code == 200
         assert "/console/assets/webview-console-projects.js" in projects.text
+        assert '<link rel="icon" type="image/svg+xml" href="/console/icon.svg">' in projects.text
+
+        icon = client.get("/console/icon.svg")
+        assert icon.status_code == 200
+        assert icon.headers["content-type"].startswith("image/svg+xml")
+        assert "<svg" in icon.text
 
         legacy_chat = client.get("/console/chat", follow_redirects=False)
         assert legacy_chat.status_code == 302
