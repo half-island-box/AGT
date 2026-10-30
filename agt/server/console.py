@@ -18,6 +18,9 @@ router = APIRouter(tags=["console"])
 
 _PAGES = {"chat", "settings", "sop", "goal", "projects"}
 _PROJECT_PAGES = {"chat", "sop", "goal"}
+# Ships with the Python package (unlike ``assets/``, which
+# ``npm run build:console`` generates): the tab icon is not a webview bundle.
+_ICON_PATH = Path(__file__).resolve().parent.parent / "web_console" / "agt.svg"
 _MAX_SOP_BYTES = 2 * 1024 * 1024
 _SOP_NAME_RE = re.compile(r"^[^\0]+\.ya?ml$", re.IGNORECASE)
 _EXCLUDED_DIRS = {
@@ -89,6 +92,7 @@ def _console_html(page: str, config: ServerConfig) -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="color-scheme" content="dark light">
 <title>AGT Console</title>
+<link rel="icon" type="image/svg+xml" href="/console/icon.svg">
 {css_link}
 </head>
 <body>
@@ -166,6 +170,16 @@ async def console_project_mode_page(project_id: str, page: str, request: Request
     if not _config(request).console_enabled or page not in _PROJECT_PAGES:
         raise HTTPException(status_code=404, detail="Not Found")
     return _page_response(page, request)
+
+
+@router.get("/console/icon.svg", include_in_schema=False)
+async def console_icon(request: Request):
+    """Browser tab icon — the same glyph as the VS Code extension."""
+    if not _config(request).console_enabled:
+        raise HTTPException(status_code=404, detail="Not Found")
+    response = FileResponse(_ICON_PATH, media_type="image/svg+xml")
+    response.headers["Cache-Control"] = "no-cache"
+    return _security_headers(response)
 
 
 @router.get("/console/{page}", include_in_schema=False)
