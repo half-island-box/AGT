@@ -88,7 +88,7 @@ def build_goal_run_summary(
 async def list_goal_runs(
     db: AsyncSession,
     *,
-    cwd: str | None = None,
+    cwds: list[str] | None = None,
     daemon_id: str | None = None,
     limit: int,
     offset: int,
@@ -98,8 +98,8 @@ async def list_goal_runs(
         JobModel.root_job_id == JobModel.job_id,
         JobModel.job_type == "goal",
     ]
-    if cwd is not None:
-        filters.append(JobModel.cwd == cwd)
+    if cwds:
+        filters.append(JobModel.cwd.in_(cwds))
     if daemon_id is not None:
         filters.append(JobModel.target_daemon_id == daemon_id)
     roots = (

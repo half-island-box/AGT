@@ -69,6 +69,12 @@ class SubmitTaskRequest(BaseModel):
     # AGENTS.md are injected when an identity is set. NULL means "let
     # the daemon pick" (legacy: ``work_dir_root / provider / task_id``).
     agent_cwd: str | None = None
+    # Run-history directory: the submitter's project path. A console project
+    # always sends its local path here, even when ``agent_cwd`` points at a
+    # remote daemon's directory, so the project's chat history and run counts
+    # stay grouped under one key. Takes precedence over ``work_dir`` /
+    # ``agent_cwd`` when deriving ``JobModel.cwd``.
+    cwd: str | None = None
 
 
 class SubmitTaskResponse(BaseModel):

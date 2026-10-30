@@ -115,6 +115,32 @@ async def _run_counts(
     return result
 
 
+def _counts_for(
+    counts: dict[str, dict[str, int]],
+    project: ConsoleProjectModel,
+) -> dict[str, int] | None:
+    """Sum run counts recorded under the project's local and remote paths.
+
+    Chat runs created before the console sent an explicit run-history ``cwd``
+    recorded the remote working directory instead of the project path, so a
+    project's history can sit under both keys. Returns ``None`` when neither
+    path has any run, letting ``_project_dict`` fall back to zeros.
+    """
+    paths = [project.path]
+    if project.remote_path:
+        paths.append(project.remote_path)
+    merged = {mode: 0 for mode in _RUN_MODES}
+    seen = False
+    for path in paths:
+        value = counts.get(path)
+        if value is None:
+            continue
+        seen = True
+        for mode in _RUN_MODES:
+            merged[mode] += value.get(mode, 0)
+    return merged if seen else None
+
+
 def _project_dict(
     project: ConsoleProjectModel,
     counts: dict[str, int] | None = None,
@@ -138,8 +164,9 @@ async def list_projects(
     db: AsyncSession, config: ServerConfig
 ) -> list[dict[str, Any]]:
     rows = (await db.execute(select(ConsoleProjectModel))).scalars().all()
-    counts = await _run_counts(db, [row.path for row in rows])
-    projects = [_project_dict(row, counts.get(row.path)) for row in rows]
+    paths = [path for row in rows for path in (row.path, row.remote_path) if path]
+    counts = await _run_counts(db, paths)
+    projects = [_project_dict(row, _counts_for(counts, row)) for row in rows]
     projects.sort(
         key=lambda item: (
             item["last_opened_at"] or item["updated_at"],
@@ -156,8 +183,9 @@ async def get_project(
     project = await db.get(ConsoleProjectModel, project_id)
     if project is None:
         return None
-    counts = await _run_counts(db, [project.path])
-    return _project_dict(project, counts.get(project.path))
+    paths = [path for path in (project.path, project.remote_path) if path]
+    counts = await _run_counts(db, paths)
+    return _project_dict(project, _counts_for(counts, project))
 
 
 def _clean_remote_path(value: str | None) -> str | None:

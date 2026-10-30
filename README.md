@@ -149,7 +149,11 @@ projects; local directory browsing is constrained by
 remote daemon (`remote_daemon_id` + `remote_path`): listing it goes over the
 reverse-dial link (`GET /api/console/directories?daemon_id=…`) and is bounded by
 that daemon's `AGT_AGENT_CWD_ALLOWLIST`, so every selectable directory is also
-runnable. See the
+runnable. Runs always record the project's local path as their run-history
+directory (`jobs.cwd`) while keeping the remote directory as the execution
+directory (`jobs.agent_cwd`), so chat, SOP and Goal history — including remote
+runs — and run counts stay grouped under the project; `GET /api/runs` accepts a
+repeated `cwd` to match older rows that recorded a remote path. See the
 [quick-start guide](<docs/guide%20docs/quick_start.md>) for deployment
 topologies and configuration.
 

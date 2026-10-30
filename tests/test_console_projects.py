@@ -11,7 +11,7 @@ from agt.server.config import ServerConfig
 from agt.server.database import make_engine, make_session_factory
 from agt.server.main import create_app
 from agt.server.migrate_schema import ensure_schema
-from agt.server.models import Base, JobModel
+from agt.server.models import Base, ConsoleProjectModel, JobModel
 
 
 SECRET = "console-projects-test-secret-0123456789"
@@ -63,7 +63,7 @@ def _build_app(
     return TestClient(create_app(cfg)), _dispose, workspace
 
 
-def _add_runs(engine, cwd: str) -> None:
+def _add_runs(engine, cwd: str, prefix: str = "") -> None:
     factory = make_session_factory(engine)
 
     async def _insert() -> None:
@@ -71,8 +71,8 @@ def _add_runs(engine, cwd: str) -> None:
             for index, mode in enumerate(("chat", "sop", "goal", "task")):
                 db.add(
                     JobModel(
-                        job_id=f"job-{index}",
-                        root_job_id=f"job-{index}",
+                        job_id=f"{prefix}job-{index}",
+                        root_job_id=f"{prefix}job-{index}",
                         status="done",
                         job_type=mode,
                         provider="claude",
@@ -137,6 +137,62 @@ def test_project_crud_lifecycle_and_run_counts(tmp_path: Path) -> None:
         assert deleted.status_code == 204
         assert project_dir.is_dir()
         assert client.get("/api/console/projects").json()["projects"] == []
+    finally:
+        dispose()
+
+
+def _add_project(
+    engine,
+    *,
+    project_id: str,
+    path: str,
+    remote_daemon_id: str | None = None,
+    remote_path: str | None = None,
+) -> None:
+    factory = make_session_factory(engine)
+
+    async def _insert() -> None:
+        async with factory() as db:
+            db.add(
+                ConsoleProjectModel(
+                    id=project_id,
+                    name="Remote project",
+                    path=path,
+                    remote_daemon_id=remote_daemon_id,
+                    remote_path=remote_path,
+                    created_at="2026-01-01T00:00:00",
+                    updated_at="2026-01-01T00:00:00",
+                )
+            )
+            await db.commit()
+
+    asyncio.run(_insert())
+
+
+def test_run_counts_merge_legacy_remote_directory(tmp_path: Path) -> None:
+    """Runs recorded under the remote directory still count for the project."""
+    client, dispose, workspace = _build_app(tmp_path)
+    project_dir = workspace / "remote-project"
+    project_dir.mkdir()
+    try:
+        engine = client.app.state.session_factory().bind
+        _add_project(
+            engine,
+            project_id="project-remote",
+            path=str(project_dir),
+            remote_daemon_id="dev-box-2",
+            remote_path="/srv/remote-project",
+        )
+        # Local runs use the project path; legacy chat runs used the remote
+        # directory as their run-history cwd.
+        _add_runs(engine, str(project_dir), prefix="local-")
+        _add_runs(engine, "/srv/remote-project", prefix="remote-")
+
+        listed = client.get("/api/console/projects").json()["projects"]
+        assert listed[0]["run_counts"] == {"chat": 2, "sop": 2, "goal": 2}
+
+        detail = client.get("/api/console/projects/project-remote").json()
+        assert detail["run_counts"] == {"chat": 2, "sop": 2, "goal": 2}
     finally:
         dispose()
 
