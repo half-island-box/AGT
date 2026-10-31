@@ -3,8 +3,12 @@
   "displayName": "AGT — Multi-Agent Bridge",
   "description": "VS Code client for the local agt server: daemons, agent runtimes, chat, SOP and goal orchestration.",
   "version": "0.1.0",
-  "publisher": "agt",
+  "publisher": "half-island-box",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/half-island-box/agent-team.git"
+  },
   "private": true,
   "engines": {
     "vscode": "^1.104.0"
