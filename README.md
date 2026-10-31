@@ -1,7 +1,5 @@
 # agt
 
-![AGT — a local bridge and orchestrator for AI coding-agent CLIs](docs/assets/banner.png)
-
 [中文文档](README_zh.md) | **English**
 
 `agt` is a local bridge and orchestrator for AI coding-agent CLIs. It gives
@@ -91,7 +89,7 @@ it to another machine or network.
 | `agt identity` | Manage identities and routing preferences |
 
 Run `agt --help` or see the
-[CLI reference](docs/guide%20docs/commands.md) for all options.
+[CLI reference](docs/guide/commands.md) for all options.
 
 ## Architecture
 
@@ -114,11 +112,9 @@ reimplement or embed their models.
 
 ## Documentation
 
-- [Quick start and deployment](docs/guide%20docs/quick_start.md)
-- [CLI reference](docs/guide%20docs/commands.md)
-- [Provider registration](docs/guide%20docs/provider-registration.md)
-- [Orchestration design](docs/impl/agent-orchestration-design.md)
-- [Goal mode design](docs/impl/goal-mode-design.md)
+- [Quick start and deployment](docs/guide/quick_start.md)
+- [CLI reference](docs/guide/commands.md)
+- [Provider registration](docs/guide/provider-registration.md)
 
 ## Development
 
