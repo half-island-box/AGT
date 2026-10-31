@@ -25,11 +25,18 @@ uv.lock
 .coverage
 htmlcov/
 
+# Local agent instructions and generated scratch outputs
+CLAUDE.md
+/out.txt
+/result.md
+/dl/
+/test-goal/
+/*.sop.yaml
+
 # Runtime artifacts (Phase 1 sessions + workspaces)
 .agt/
 
 openspec/
-tests/
 .agents/
 .claude/
 .codex/
