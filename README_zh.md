@@ -1,7 +1,5 @@
 # agt
 
-![AGT — 本地 AI coding-agent CLI 桥接与编排器](docs/assets/banner.png)
-
 **中文** | [English](README.md)
 
 `agt` 是一个本地 AI coding-agent CLI 桥接与编排器。它为 Claude Code、
@@ -88,7 +86,7 @@ Server API 默认优先面向本机回环地址。将服务暴露到其他机器
 | `agt identity` | 管理身份与路由偏好 |
 
 运行 `agt --help`，或查看
-[CLI 参考](docs/guide%20docs/commands.md) 了解全部参数。
+[CLI 参考](docs/guide/commands.md) 了解全部参数。
 
 ## 架构
 
@@ -110,11 +108,9 @@ Agent CLI 始终以子进程方式运行；`agt` 不重新实现模型能力，�
 
 ## 文档
 
-- [快速开始与部署](docs/guide%20docs/quick_start.md)
-- [CLI 参考](docs/guide%20docs/commands.md)
-- [Provider 注册](docs/guide%20docs/provider-registration.md)
-- [编排架构设计](docs/impl/agent-orchestration-design.md)
-- [Goal 模式设计](docs/impl/goal-mode-design.md)
+- [快速开始与部署](docs/guide/quick_start.md)
+- [CLI 参考](docs/guide/commands.md)
+- [Provider 注册](docs/guide/provider-registration.md)
 
 ## 开发
 

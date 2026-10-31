@@ -33,6 +33,10 @@ CLAUDE.md
 /test-goal/
 /*.sop.yaml
 
+# Public documentation: only the user guide is tracked.
+docs/*
+!docs/guide/
+
 # Runtime artifacts (Phase 1 sessions + workspaces)
 .agt/
 
