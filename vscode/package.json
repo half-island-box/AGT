@@ -214,12 +214,12 @@
   "devDependencies": {
     "@types/node": "^22.10.0",
     "@types/vscode": "^1.104.0",
-    "esbuild": "^0.24.0",
+    "esbuild": "0.28.2",
     "typescript": "^5.7.0"
   },
   "dependencies": {
     "@lobehub/icons-static-svg": "^1.95.1",
-    "dompurify": "^3.4.16",
+    "dompurify": "3.4.17",
     "marked": "^18.0.14",
     "yaml": "^2.9.1"
   }
