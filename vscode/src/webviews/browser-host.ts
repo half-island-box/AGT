@@ -564,6 +564,14 @@ export async function browserCall<T>(
             label: daemon.daemon_name || daemon.device_name || daemon.daemon_id,
             online: daemon.online,
           })),
+        // Usage history refers to daemons by id; resolve it to the same
+        // human-readable name the rest of the console shows.
+        daemonNames: Object.fromEntries(
+          daemons.map((daemon) => [
+            daemon.daemon_id,
+            daemon.daemon_name || daemon.device_name || daemon.daemon_id,
+          ]),
+        ),
         capabilities: { lifecycleControl: false, console: true },
       } as T;
     }

@@ -811,6 +811,12 @@ export async function mockCall<T>(_method: string, params?: Record<string, unkno
             label: daemon.daemon_name || daemon.device_name || daemon.daemon_id,
             online: daemon.online,
           })),
+        daemonNames: Object.fromEntries(
+          daemons.map((daemon) => [
+            daemon.daemon_id,
+            daemon.daemon_name || daemon.device_name || daemon.daemon_id,
+          ]),
+        ),
       } as T;
     case 'projects.directories': {
       const remoteDaemon = params?.daemonId ? String(params.daemonId) : null;

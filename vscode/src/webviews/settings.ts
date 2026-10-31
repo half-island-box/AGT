@@ -833,7 +833,7 @@ function render(): void {
     .map(
       (d) => `
       <tr class="${d.online ? 'is-clickable' : ''}" data-config-daemon-id="${esc(d.daemon_id)}">
-        <td><span class="agd-mono">${esc(d.daemon_id)}</span></td>
+        <td title="${esc(d.daemon_id)}">${esc(d.daemon_name || d.device_name || d.daemon_id)}</td>
         <td>${esc(d.device_name)}</td>
         <td><span class="agd-chips">${providerChips(d)}</span></td>
         <td><span class="agd-pill ${d.online ? 'agd-pill-ok' : 'agd-pill-err'}">${d.online ? 'online' : 'offline'}</span></td>
@@ -929,7 +929,7 @@ function render(): void {
       </div>
       <table class="agd-table">
         <thead>
-          <tr><th>ID</th><th>${tr('settings.host')}</th><th>${tr('settings.providers')}</th><th>${tr('settings.status')}</th><th>${tr('settings.lastSeen')}</th><th></th></tr>
+          <tr><th>${tr('settings.daemonName')}</th><th>${tr('settings.host')}</th><th>${tr('settings.providers')}</th><th>${tr('settings.status')}</th><th>${tr('settings.lastSeen')}</th><th></th></tr>
         </thead>
         <tbody>${daemonRows || `<tr><td colspan="6" class="agd-dim">${tr('tree.noDaemons')}</td></tr>`}</tbody>
       </table>

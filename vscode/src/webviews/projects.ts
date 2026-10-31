@@ -22,6 +22,8 @@ interface ProjectsBoot {
   state: ServerState;
   projects: ConsoleProjectInfo[];
   remoteDaemons: RemoteDaemonOption[];
+  /** ``daemon_id → human-readable name`` for every known daemon. */
+  daemonNames: Record<string, string>;
 }
 
 interface ProjectModal {
@@ -109,6 +111,12 @@ function formatDate(value: string | null): string {
 function remoteDaemonLabel(daemonId: string | null): string {
   if (!daemonId) return '';
   return boot?.remoteDaemons.find((daemon) => daemon.id === daemonId)?.label ?? daemonId;
+}
+
+/** Name for a daemon in usage rows; historical ids may no longer be known. */
+function daemonDisplayName(daemonId: string | null): string {
+  if (!daemonId) return tr('projects.usage.unknownDaemon');
+  return boot?.daemonNames[daemonId] ?? daemonId;
 }
 
 function renderProject(project: ConsoleProjectInfo): string {
@@ -254,7 +262,7 @@ function renderBreakdown(items: UsageSummary['breakdown']): string {
   if (!items.length) return '';
   const rows = items.map((item) => `
     <tr>
-      <td class="agd-mono">${esc(item.daemon_id ?? tr('projects.usage.unknownDaemon'))}</td>
+      <td>${esc(daemonDisplayName(item.daemon_id))}</td>
       <td>${esc(agentLabel(item.agent))}</td>
       <td class="agd-mono">${esc(item.model ?? '—')}</td>
       <td class="agd-num">${fmtNum(item.input_tokens)}</td>
