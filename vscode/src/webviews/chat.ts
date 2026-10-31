@@ -309,10 +309,15 @@ function agentLabel(runtime: RuntimeInfo): string {
 
 /**
  * Working directory for the selected daemon: the host's workspace root.
- * A remote daemon needs an explicit directory, which the user enters in
- * the working-directory field.
+ *
+ * That path only exists on this machine, so it is the default for a local
+ * daemon only. A remote daemon's disk is a different machine — starting
+ * the picker there would request a path its ``agent_cwd_allowlist``
+ * rejects — so the field starts empty and the user picks a directory.
  */
 function defaultCwdFor(): string {
+  const daemon = boot?.daemons.find((item) => item.daemon_id === selectedDaemonId);
+  if (daemon && !isLocalDaemon(daemon)) return '';
   return boot?.workspaceRoot || boot?.workspaceFolders[0] || '';
 }
 
@@ -1287,6 +1292,10 @@ function wireSidebar(): void {
       startPath: agentCwd || null,
       onSelect: (path) => {
         agentCwd = path;
+        // A remote pick must survive later ``workspaceRoot`` syncs — that
+        // path exists on another machine, not in this workspace. A local
+        // pick keeps tracking the open folder, as before.
+        if (!isLocalDaemon(daemon)) agentCwdTouched = true;
         renderSidebar();
         renderControls();
       },
@@ -1301,6 +1310,9 @@ function selectOption(kind: string, value: string): void {
     selectedDaemonId = value;
     selectedProvider = null;
     selectedIdentityDid = '';
+    // A directory is machine-specific: drop the previous daemon's choice so
+    // the next sync starts from the new daemon's default (empty for remote).
+    agentCwdTouched = false;
     normalizeInitialSelection();
     clearConversation();
     syncWorkspaceRoot();
