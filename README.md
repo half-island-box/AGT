@@ -66,7 +66,9 @@ uv run agt run --provider claude --prompt "Summarize the current repository"
 
 - **Web console** — start the server and open
   `http://127.0.0.1:8420/console/` to manage projects, agents, chat, SOPs,
-  goals, daemons, identities, and usage.
+  goals, daemons, identities, and usage. The page bundles ship inside the
+  package (and in a source checkout one that is missing is built for you), so
+  no separate `npm` step is needed to serve it.
 - **VS Code extension** — connect the AGT extension to the same local server
   for editor-native chat, SOP editing, Goal runs, daemon management, and
   settings.

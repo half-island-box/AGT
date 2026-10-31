@@ -336,6 +336,24 @@ Sent SIGTERM to server pid 48201
 > `--pid-file <path>` 指定（或读 `AGT_SERVER_PID_FILE` 环境变量），用于非默认
 > 路径的 detach server。
 
+### 浏览器控制台（Web console）
+
+Server 启动后即可用浏览器访问 `http://127.0.0.1:8420/console/`（项目、Chat、
+SOP、Goal、设置）。页面 bundle 随 Python 包一起发布，**安装版不需要 `npm`**。
+
+从包含 `vscode/` 源码的 checkout 启动时，若 `agt/web_console/assets` 里的
+bundle 缺失（新克隆、切分支），`agt server start` 会在启动前自动在 `vscode/`
+工作区执行一次 `npm run build:console`，失败也不阻塞 Server 启动（页面返回
+503，日志里给出原因）。相关环境变量：
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `AGT_CONSOLE_ASSETS` | 包内 `agt/web_console/assets` | 覆盖 bundle 目录 |
+| `AGT_CONSOLE_AUTOBUILD` | 开启 | 设为 `0` / `false` / `no` / `off` 关闭自动构建 |
+| `AGT_CONSOLE_SOURCE_DIR` | 自动向上查找 `vscode/` | 指定可构建控制台的 `vscode/` 工作区 |
+
+修改 webview 源码后仍需手动重新构建并提交 bundle。
+
 ### Daemon 接入方式（Phase 3.2+）
 
 - **本地 daemon**（与 Server 同一台机器）继续走 HTTP，不需要 WS。

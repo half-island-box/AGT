@@ -1899,6 +1899,67 @@ def _stop_if_running(pid: int, label: str, timeout: float = 10.0) -> None:
     )
 
 
+def _prepare_console_assets(cfg) -> None:
+    """Make the browser console servable without a separate build step.
+
+    Release installs carry the bundles inside the package, so this is a
+    no-op there. A source checkout may not (fresh clone, or a branch that
+    does not track ``agt/web_console/assets``): build them once here, before
+    the detached child is spawned, so the output lands in the terminal the
+    user is looking at.
+    """
+    from ..web_console.build import ensure_console_assets, missing_bundles
+
+    assets = Path(cfg.console_assets_dir).expanduser()
+    if not missing_bundles(assets):
+        return
+    result = ensure_console_assets(assets)
+    if result.status == "built":
+        click.echo(
+            f"Built web console assets in {result.seconds:.1f}s (npm run build:console)"
+        )
+        return
+    if result.status == "present":
+        return
+    if result.status == "disabled":
+        click.echo(
+            "Web console assets are missing and autobuild is disabled "
+            "(AGT_CONSOLE_AUTOBUILD=0); run `npm run build:console` in the "
+            "vscode/ workspace.",
+            err=True,
+        )
+        return
+    if result.status == "locked":
+        click.echo(
+            "Another process is building the web console assets; the console "
+            "becomes available when it finishes.",
+            err=True,
+        )
+        return
+    if result.status == "no-npm":
+        click.echo(
+            "Web console assets are missing and npm is not on PATH; run "
+            "`npm run build:console` in the vscode/ workspace.",
+            err=True,
+        )
+        return
+    if result.status == "no-source":
+        click.echo(
+            "Web console assets are missing and this install has no vscode/ "
+            "sources to build them; the console will answer 503. Reinstall a "
+            "release build or run from a source checkout.",
+            err=True,
+        )
+        return
+    detail = f": {result.detail}" if result.detail else ""
+    click.echo(f"Building web console assets failed{detail}", err=True)
+    click.echo(
+        "The Server starts anyway; the console answers 503 until "
+        "`npm run build:console` succeeds in the vscode/ workspace.",
+        err=True,
+    )
+
+
 @server.command("start")
 @click.option(
     "--host",
@@ -1970,10 +2031,14 @@ def server_start(
         click.echo(f"Generated server secret at {secret_path}")
 
     try:
-        ServerConfig.from_env()
+        cfg = ServerConfig.from_env()
     except ServerConfigError as exc:
         click.echo(f"Error: {exc}", err=True)
         sys.exit(1)
+
+    # The browser console is served from this package; build the bundles when
+    # a source checkout is missing them, so `agt server start` is enough.
+    _prepare_console_assets(cfg)
 
     # Replace any already-running server first (both modes). Foreground
     # would otherwise fail to bind the port ("address already in use");

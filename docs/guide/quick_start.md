@@ -87,6 +87,13 @@ $ agt task status e2d812c3
 $ agt runtime list    # 看 daemon 注册的 agent
 ```
 
+> **Web 控制台**：Server 启动后浏览器打开 `http://127.0.0.1:8420/console/`
+> 即可使用项目、Chat、SOP、Goal、设置等页面，**不需要额外跑 `npm`**——页面
+> bundle 随包发布；从含 `vscode/` 源码的 checkout 启动且 bundle 缺失时，
+> `agt server start` 会自动在 `vscode/` 里执行一次 `npm run build:console`（设
+> `AGT_CONSOLE_AUTOBUILD=0` 可关闭，`AGT_CONSOLE_SOURCE_DIR=<path>` 可指定
+> 源码位置）。修改 webview 源码后仍需手动重新构建。
+
 > **Phase 5 本地流式**：直接跑 `agt run -p "..."` / `agt chat`（**不带 `--daemon`**）会在终端看到逐 token 的 agent 输出。Claude Code 默认走 `--output-format stream-json --verbose`，codex 走 `codex app-server` 的 JSON-RPC 流（thinking / 工具调用 / token 用量与 claude 同通道），session_id / resume_rejected 从结构化字段读取；没有 `app-server` 的旧版 codex 自动回退到 `codex exec` pipe 文本，其它 provider 仍走老路径。详见 [commands.md `agt run`](commands.md#agt-run)。
 
 > **SOP 静态流水线**：把确定的多 agent 流程写成 YAML DAG（`agt sop validate /

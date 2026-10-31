@@ -47,6 +47,7 @@ from .routes.uploads import router as uploads_router
 from .routes.usage import router as usage_router
 from .services.input_service import sweep_expired_uploads
 from .services.runtime_service import prune_stale_runtimes
+from ..web_console.build import missing_bundles
 
 log = logging.getLogger(__name__)
 
@@ -114,6 +115,17 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         log.info("agt-server ready on %s:%d (db=%s)", cfg.host, cfg.port, cfg.db_path)
         if cfg.console_enabled:
             log.info("AGT console: http://127.0.0.1:%d/", cfg.port)
+            # ``agt server start`` builds missing bundles before serving; this
+            # catches the direct ``uvicorn agt.server.main:app`` path and a
+            # build that failed, so the 503 is explainable from the log.
+            missing = missing_bundles(cfg.console_assets_dir)
+            if missing:
+                log.warning(
+                    "Web console assets are missing (%s); the console answers "
+                    "503 until `npm run build:console` runs in the vscode/ "
+                    "workspace.",
+                    ", ".join(missing),
+                )
 
         # Optional PID file (detached mode): write the live pid so that
         # ``agt server stop`` / ``status`` can find and signal us. Only
