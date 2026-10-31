@@ -317,6 +317,15 @@ function sessionsAreProjectScoped(): boolean {
   return Boolean(boot && boot.project !== undefined);
 }
 
+/**
+ * Daemon a run belongs to. Runs recorded before the daemon id was stored
+ * have none; those are the project's local runs, so they count as the local
+ * daemon rather than disappearing from every daemon's list.
+ */
+function sessionDaemonId(session: ChatSessionInfo): string | null {
+  return session.daemon_id ?? boot?.localDaemonId ?? null;
+}
+
 function agentLabel(runtime: RuntimeInfo): string {
   return runtime.name || runtime.type;
 }
@@ -1378,7 +1387,11 @@ async function loadSessions(): Promise<void> {
       projectScoped ? {} : { daemonId: selectedDaemonId },
     );
     if (seq === sessionsRequestSeq) {
-      sessions = res.sessions;
+      // The project's run history is keyed by directory only, so the host
+      // returns runs from every daemon. The list follows the daemon selector.
+      sessions = projectScoped && selectedDaemonId
+        ? res.sessions.filter((session) => sessionDaemonId(session) === selectedDaemonId)
+        : res.sessions;
     }
   } catch (err) {
     notice = err instanceof Error ? err.message : String(err);
