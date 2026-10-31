@@ -183,6 +183,36 @@ async def list_daemon_artifacts_route(
     return await artifacts_for_daemon(db, daemon_id)
 
 
+@router.get("/{daemon_id}/directories")
+async def list_daemon_directories_route(
+    daemon_id: str,
+    request: Request,
+    path: str | None = Query(None),
+) -> dict:
+    """List directories on a remote daemon's filesystem.
+
+    Backs the plugin's remote-daemon working-directory picker. The daemon's
+    disk is unreachable from the console, so this proxies an ``fs.list`` RPC
+    over the reverse-dial link; ``path=None`` starts at the daemon's first
+    ``agent_cwd_allowlist`` root. Only configured remote targets (those with
+    a live ``DaemonLink``) are browsable — local daemons have no link and are
+    browsed by the extension host directly.
+    """
+    link = _daemon_links(request).get(daemon_id)
+    if link is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "type": "unknown_remote_daemon",
+                "message": f"'{daemon_id}' is not a configured remote daemon",
+            },
+        )
+    try:
+        return await link.list_directory(path)
+    except (WSRPCUnavailable, WSRPCUncertain, RPCRejected) as exc:
+        raise _rpc_error(exc) from None
+
+
 @router.post("/refresh")
 async def refresh_daemons_route(
     request: Request,

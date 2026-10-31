@@ -41,7 +41,7 @@ def test_claude_sink_consumes_sample_and_finalizes():
 
     assert isinstance(result, SinkResult)
     assert result.is_error is False
-    # Sample fixture was produced with a real session, so we should have
+    # The terminal fixture event is authoritative, so we should have
     # captured the session_id from the terminal ``result`` event.
     assert result.session_id is not None
     assert isinstance(result.session_id, str)
