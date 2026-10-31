@@ -476,6 +476,13 @@ export class AgtApi {
     targetDaemonId: string;
     identityDid?: string | null;
     agentCwd?: string | null;
+    /**
+     * Run-history directory (``JobModel.cwd``): the submitter's project
+     * path. A remote daemon cannot see it, so ``agentCwd`` keeps carrying
+     * the directory the run executes in — the run still belongs to this
+     * workspace for listing/resume.
+     */
+    cwd?: string | null;
     message?: ChatInputMessage | null;
   }): Promise<JobInfo> {
     return this.post<JobInfo>('/api/jobs', {
@@ -484,6 +491,7 @@ export class AgtApi {
       target_daemon_id: input.targetDaemonId,
       identity_did: input.identityDid ?? null,
       agent_cwd: input.agentCwd ?? null,
+      cwd: input.cwd ?? null,
       message: input.message ?? null,
     });
   }

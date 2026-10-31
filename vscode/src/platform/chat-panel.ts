@@ -64,6 +64,13 @@ function toChatSessionInfo(run: RunInfo): ChatSessionInfo {
   };
 }
 
+/**
+ * Sessions of the open workspace on one daemon.
+ *
+ * ``cwd`` is the run-history key, not where the run executed: every chat
+ * Job this panel creates records the workspace root, even when a remote
+ * daemon runs it, so remote turns group with the workspace's own history.
+ */
 async function chatSessions(
   api: AgtApi,
   daemonId: string,
@@ -305,6 +312,15 @@ export class ChatPanel {
           const resolved = jobId
             ? await resolveChatRun(this.ctx.lifecycle.api, jobId, dirHint)
             : await this.ctx.lifecycle.api.resolveSession(sessionId);
+          // A row's ``dir`` is the run-history key (the workspace root), not
+          // the directory the run used — a remote resume would send the local
+          // path to a daemon that cannot see it. The Server knows the real one.
+          if (jobId) {
+            const session = await this.ctx.lifecycle.api
+              .resolveSession(resolved.session_id)
+              .catch(() => null);
+            resolved.dir = session?.dir ?? resolved.dir;
+          }
           const [job, history] = await Promise.all([
             this.ctx.lifecycle.api.jobStatus(resolved.job_id),
             this.ctx.lifecycle.api
@@ -428,6 +444,9 @@ export class ChatPanel {
             targetDaemonId: input.daemonId,
             identityDid: input.identityDid,
             agentCwd: input.agentCwd,
+            // History key = the workspace, so a remote turn shows up next to
+            // local ones instead of under the remote directory it ran in.
+            cwd: activeWorkspaceRoot() || null,
             message: input.message,
           });
       await this.emitChat({ kind: 'started', ...job });

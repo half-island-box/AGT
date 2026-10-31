@@ -289,6 +289,20 @@ function daemonLabel(daemon: DaemonInfo): string {
   return daemon.daemon_name ?? daemon.device_name ?? daemon.daemon_id;
 }
 
+/**
+ * Where a session ran, for the sidebar's second line.
+ *
+ * A run's ``dir`` is its history key — this workspace's path — so it says
+ * nothing useful about a remote run; name the daemon instead.
+ */
+function sessionLocationLabel(session: ChatSessionInfo): string {
+  const daemon = session.daemon_id
+    ? boot?.daemons.find((item) => item.daemon_id === session.daemon_id)
+    : undefined;
+  if (daemon && !isLocalDaemon(daemon)) return daemonLabel(daemon);
+  return session.dir ?? '';
+}
+
 function agentLabel(runtime: RuntimeInfo): string {
   return runtime.name || runtime.type;
 }
@@ -570,14 +584,16 @@ function renderSidebar(): void {
   oldSidebar.replaceWith(sidebar);
   if (!sidebar) return;
   const sessionItems = sessions
-    .map((session) => `
+    .map((session) => {
+      const location = sessionLocationLabel(session);
+      return `
       <div class="agd-session ${session.job_id === activeSessionId ? 'is-selected' : ''}" data-job-id="${esc(session.job_id)}" data-session-id="${esc(session.session_id)}" data-dir="${esc(session.dir ?? '')}">
         <button type="button" class="agd-session-main">
           <span class="agd-session-line">
             ${providerLogo(session.provider)}
             <strong>${esc(firstLine(session.first_prompt) || session.session_id)}</strong>
           </span>
-          <small>${esc(session.last_seen_at)}${session.dir ? ` · ${esc(session.dir)}` : ''}</small>
+          <small>${esc(session.last_seen_at)}${location ? ` · ${esc(location)}` : ''}</small>
         </button>
         <button
           type="button"
@@ -587,7 +603,8 @@ function renderSidebar(): void {
           aria-label="${tr('chat.deleteSession')}: ${esc(firstLine(session.first_prompt) || session.session_id)}"
         >${trashIcon()}</button>
       </div>
-    `)
+    `;
+    })
     .join('');
 
   sidebar.innerHTML = `
