@@ -166,10 +166,6 @@ function fmtTokens(value: number): string {
   return String(value);
 }
 
-function fmtCost(value: number): string {
-  return `$${value.toFixed(4)}`;
-}
-
 function pad2(n: number): string {
   return String(n).padStart(2, '0');
 }
@@ -264,8 +260,6 @@ function renderBreakdown(items: UsageSummary['breakdown']): string {
       <td class="agd-num">${fmtNum(item.input_tokens)}</td>
       <td class="agd-num">${fmtNum(item.output_tokens)}</td>
       <td class="agd-num">${fmtNum(item.cache_read_input_tokens)}</td>
-      <td class="agd-num">${fmtNum(item.cache_creation_input_tokens)}</td>
-      <td class="agd-num">${fmtCost(item.cost_usd)}</td>
       <td class="agd-num">${fmtNum(item.steps)}</td>
     </tr>`).join('');
   return `
@@ -279,8 +273,6 @@ function renderBreakdown(items: UsageSummary['breakdown']): string {
             <th class="agd-num">${esc(tr('projects.usage.input'))}</th>
             <th class="agd-num">${esc(tr('projects.usage.output'))}</th>
             <th class="agd-num">${esc(tr('projects.usage.cacheRead'))}</th>
-            <th class="agd-num">${esc(tr('projects.usage.cacheWrite'))}</th>
-            <th class="agd-num">${esc(tr('projects.usage.cost'))}</th>
             <th class="agd-num">${esc(tr('projects.usage.steps'))}</th>
           </tr>
         </thead>
@@ -322,8 +314,6 @@ function renderDashboard(): string {
       renderStatCard(tr('projects.usage.input'), fmtNum(totals.input_tokens), '↓'),
       renderStatCard(tr('projects.usage.output'), fmtNum(totals.output_tokens), '↑'),
       renderStatCard(tr('projects.usage.cacheRead'), fmtNum(totals.cache_read_input_tokens), '↻'),
-      renderStatCard(tr('projects.usage.cacheWrite'), fmtNum(totals.cache_creation_input_tokens), '＋'),
-      renderStatCard(tr('projects.usage.cost'), fmtCost(totals.cost_usd), '$'),
       renderStatCard(tr('projects.usage.steps'), fmtNum(totals.steps), '#'),
     ].join('');
     body = `
