@@ -10,6 +10,7 @@ import type { GoalBridgeContext } from './goal-panel';
 import { looksLikeSop } from '../core/sop/document';
 import type { SopBridgeContext } from './sop-editor-panel';
 import { WorkspacePanel } from './workspace-panel';
+import { UsagePanel } from './usage-panel';
 
 interface AgtConfig {
   serverUrl: string;
@@ -67,6 +68,8 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   let workspaceView: WorkspacePanel;
+  let usageView: UsagePanel;
+  let lastOnline: boolean | null = null;
 
   /**
    * Clicking a daemon or provider in the activity-bar tree jumps straight to
@@ -79,8 +82,25 @@ export function activate(context: vscode.ExtensionContext): void {
     });
   }
 
-  async function refresh(opts?: { ensure?: boolean }): Promise<void> {
+  /**
+   * Ask the Server to re-read ``~/.agt/daemons`` and reconcile its live
+   * links (new targets dialed, offline ones re-dialed immediately instead
+   * of waiting out the up-to-60 s backoff). Best-effort: a Server that
+   * predates the endpoint, or a slow one, must not break the sidebar
+   * refresh — the plain listing below still runs.
+   */
+  async function rescanDaemons(daemonId?: string): Promise<void> {
+    try {
+      await lifecycle.api.refreshDaemons(daemonId);
+    } catch (err) {
+      console.log(`[agt] daemon rescan failed: ${String(err)}`);
+    }
+  }
+
+  async function refresh(opts?: { ensure?: boolean; rescan?: boolean }): Promise<void> {
     const online = opts?.ensure ? await lifecycle.ensureStarted() : await lifecycle.probe();
+    // Reconcile *before* listing so the tree shows what the rescan found.
+    if (online && opts?.rescan) await rescanDaemons();
     if (online && opts?.ensure) {
       // A server we just started should run with a local daemon; don't make
       // the tree/status bar wait for the daemon's own startup.
@@ -95,6 +115,13 @@ export function activate(context: vscode.ExtensionContext): void {
     tree.setServerInfo(lifecycle.state, config.serverUrl, lifecycle.latencyMs);
     statusbar.update(lifecycle.state, tree.daemonCount, language);
     workspaceView.notifyActive(bridgeContext);
+    // Usage lives in its own view; refetch only when the server comes up or
+    // goes down, not on every poll.
+    const onlineNow = lifecycle.state === 'online';
+    if (lastOnline !== null && lastOnline !== onlineNow) {
+      usageView.reload();
+    }
+    lastOnline = onlineNow;
   }
 
   const bridgeContext: BridgeContext = {
@@ -185,6 +212,11 @@ export function activate(context: vscode.ExtensionContext): void {
     goal: goalContext,
     settings: bridgeContext,
   });
+  usageView = new UsagePanel({
+    extensionUri: context.extensionUri,
+    lifecycle,
+    language: () => language,
+  });
 
   const pollTimer = setInterval(() => void refresh(), 15000);
 
@@ -203,7 +235,11 @@ export function activate(context: vscode.ExtensionContext): void {
       openSopEditor(uri),
     ),
     vscode.commands.registerCommand('agt.newSop', () => void workspaceView.newSop()),
-    vscode.commands.registerCommand('agt.refresh', () => void refresh({ ensure: false })),
+    // The sidebar title-bar refresh re-scans the Server's daemon targets,
+    // not just our local view of them.
+    vscode.commands.registerCommand('agt.refresh', () =>
+      void refresh({ ensure: false, rescan: true }),
+    ),
     vscode.commands.registerCommand('agt.startServer', () => void refresh({ ensure: true })),
     vscode.commands.registerCommand('agt.stopServer', async () => {
       await lifecycle.stop();
@@ -218,6 +254,8 @@ export function activate(context: vscode.ExtensionContext): void {
       await refresh();
     }),
     vscode.window.registerWebviewViewProvider('agt.workspace', workspaceView),
+    vscode.window.registerWebviewViewProvider('agt.usage', usageView),
+    usageView,
     vscode.window.onDidChangeActiveTextEditor(() => workspaceView.notifyWorkspaceRoot()),
     vscode.workspace.onDidChangeWorkspaceFolders(() => workspaceView.notifyWorkspaceRoot()),
     vscode.workspace.onDidChangeConfiguration((e) => {
@@ -228,6 +266,7 @@ export function activate(context: vscode.ExtensionContext): void {
       language = config.language;
       lifecycle.updateOptions(config);
       workspaceView.notifyLanguage(config.language);
+      usageView.notifyLanguage(config.language);
       void refresh();
     }),
     { dispose: () => clearInterval(pollTimer) },

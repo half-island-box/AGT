@@ -926,6 +926,21 @@ export async function mockCall<T>(_method: string, params?: Record<string, unkno
       return boot() as T;
     case 'refresh':
       return boot() as T;
+    case 'refreshDaemons': {
+      await delay(400);
+      const daemonId = params?.daemonId ? String(params.daemonId) : null;
+      return {
+        ...boot(),
+        rescan: {
+          daemons: daemons.map((d) => ({
+            daemon_id: d.daemon_id,
+            action: daemonId && daemonId !== d.daemon_id ? 'unchanged' : 'redialled',
+            connected: d.online,
+          })),
+          daemons_path: '/home/you/.agt/daemons',
+        },
+      } as T;
+    }
     case 'setLanguage':
       if (params?.language === 'zh' || params?.language === 'en') {
         language = params.language;

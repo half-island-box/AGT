@@ -234,6 +234,25 @@ export class SettingsPanel {
           result = await this.bootPayload();
           break;
         }
+        case 'refreshDaemons': {
+          // Re-read ~/.agt/daemons on the Server and reconcile its links:
+          // a newly registered target starts being dialed, an offline one
+          // is re-dialed now instead of after its up-to-60 s backoff.
+          // ``daemonId`` (per-row button) narrows the forced re-dial.
+          const daemonId = msg.params?.daemonId ? String(msg.params.daemonId) : null;
+          let rescan: unknown;
+          try {
+            rescan = await this.ctx.lifecycle.api.refreshDaemons(daemonId);
+          } catch (err) {
+            // Older Server without the endpoint, or a timeout: the listing
+            // below still runs, and the UI reports what went wrong.
+            rescan = { error: err instanceof Error ? err.message : String(err) };
+          }
+          await this.ctx.lifecycle.probe();
+          this.ctx.onConfigOrStateChange();
+          result = { ...(await this.bootPayload()), rescan };
+          break;
+        }
         case 'addDaemon': {
           const p = msg.params ?? {};
           const name = String(p.name ?? '').trim();

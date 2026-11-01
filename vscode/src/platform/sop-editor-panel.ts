@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { basename, join } from 'node:path';
 import { openArtifact } from './artifact-view';
+import { listDirectories } from './directories';
 import { isMissingEndpoint } from '../core/api';
 import type { ServerLifecycle } from '../core/lifecycle';
 import { looksLikeSop, minimalSpan } from '../core/sop/document';
@@ -852,6 +853,13 @@ export class SopEditorPanel {
             await this.ctx.setLanguage(language);
           }
           result = { ok: true };
+          break;
+        }
+
+        case 'projects.directories': {
+          const daemonId = msg.params?.daemonId ? String(msg.params.daemonId) : null;
+          const path = msg.params?.path ? String(msg.params.path) : null;
+          result = await listDirectories(this.ctx.lifecycle.api, daemonId, path);
           break;
         }
 

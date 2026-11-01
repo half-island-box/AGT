@@ -96,6 +96,20 @@ const consoleSop = consoleWebview('sop-editor.ts', 'sop');
 const consoleGoal = consoleWebview('goal.ts', 'goal');
 const consoleProjects = consoleWebview('projects.ts', 'projects');
 
+/** Usage webview entry — the activity-bar usage view. */
+const webviewUsage = {
+  entryPoints: ['src/webviews/usage.ts'],
+  bundle: true,
+  platform: 'browser',
+  format: 'iife',
+  target: 'es2022',
+  outfile: 'dist/webview-usage.js',
+  sourcemap: false,
+  minify: production,
+  logLevel: 'info',
+  loader: { '.svg': 'text' },
+};
+
 async function main() {
   if (consoleOnly) {
     await Promise.all([
@@ -113,12 +127,14 @@ async function main() {
     const ctxChat = await esbuild.context(webviewChat);
     const ctxSop = await esbuild.context(webviewSop);
     const ctxGoal = await esbuild.context(webviewGoal);
+    const ctxUsage = await esbuild.context(webviewUsage);
     await Promise.all([
       ctxExt.watch(),
       ctxWeb.watch(),
       ctxChat.watch(),
       ctxSop.watch(),
       ctxGoal.watch(),
+      ctxUsage.watch(),
     ]);
   } else {
     await esbuild.build(extension);
@@ -126,6 +142,7 @@ async function main() {
     await esbuild.build(webviewChat);
     await esbuild.build(webviewSop);
     await esbuild.build(webviewGoal);
+    await esbuild.build(webviewUsage);
   }
 }
 

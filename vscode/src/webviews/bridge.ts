@@ -23,6 +23,10 @@ export interface BootInfo {
   identities: IdentityWithBindings[];
   localDaemonId: string | null;
   workspaceRoot?: string;
+  /**
+   * Host-provided limits. Absent means "everything the extension can do";
+   * a console host sets these to hide process-lifecycle controls.
+   */
   capabilities?: {
     lifecycleControl?: boolean;
     daemonLifecycle?: boolean;
@@ -95,11 +99,11 @@ export const bridge = {
   isMock: browserMock,
 
   /**
-   * True when the host answers ``projects.directories`` (console + mock).
-   * The VSCode extension host has no such handler, so its webviews hide the
-   * browse buttons instead of failing the call.
+   * True when the host answers ``projects.directories``. Every host does:
+   * the extension host (local via ``node:fs``, remote via the Server's
+   * ``fs.list`` proxy), the browser console, and the browser mock.
    */
-  canBrowseDirectories: browserConsole || browserMock,
+  canBrowseDirectories: true,
 
   call<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T> {
     if (browserConsole) {

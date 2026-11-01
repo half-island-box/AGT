@@ -518,6 +518,7 @@ export interface JobLogInfo {
   steps: SopNodeLogStep[];
 }
 
+/** Aggregate of ``GET /api/usage/summary``: totals, series and breakdown. */
 export interface UsageTotals {
   input_tokens: number;
   output_tokens: number;

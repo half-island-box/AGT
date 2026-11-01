@@ -3,8 +3,12 @@
   "displayName": "AGT — Multi-Agent Bridge",
   "description": "VS Code client for the local agt server: daemons, agent runtimes, chat, SOP and goal orchestration.",
   "version": "0.1.0",
-  "publisher": "agt",
+  "publisher": "half-island-box",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/half-island-box/agent-team.git"
+  },
   "private": true,
   "engines": {
     "vscode": "^1.104.0"
@@ -40,6 +44,11 @@
         {
           "id": "agt.daemons",
           "name": "Daemons"
+        },
+        {
+          "id": "agt.usage",
+          "name": "Usage",
+          "type": "webview"
         }
       ],
       "agt-sidebar": [
@@ -212,12 +221,12 @@
   "devDependencies": {
     "@types/node": "^22.10.0",
     "@types/vscode": "^1.104.0",
-    "esbuild": "^0.24.0",
+    "esbuild": "0.28.2",
     "typescript": "^5.7.0"
   },
   "dependencies": {
     "@lobehub/icons-static-svg": "^1.95.1",
-    "dompurify": "^3.4.16",
+    "dompurify": "3.4.17",
     "marked": "^18.0.14",
     "yaml": "^2.9.1"
   }

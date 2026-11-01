@@ -142,6 +142,7 @@ let selectedDaemonId: string | null = null;
 let selectedProvider: string | null = null;
 let selectedIdentityDid = '';
 let agentCwd = '';
+let agentCwdTouched = false;
 let sessions: ChatSessionInfo[] = [];
 let sessionsLoading = false;
 /** Guards against a slow list overwriting a newer one. */
@@ -292,22 +293,6 @@ function daemonLabel(daemon: DaemonInfo): string {
 }
 
 /**
- * Daemon a session ran on, when it is not this machine's daemon.
- *
- * A console project lists runs from every daemon (local and remote), so each
- * row says which one executed it; the local daemon is the default and needs
- * no tag. Hosts without a project already scope the list to one daemon, so
- * the tag would only repeat the selector there.
- */
-function sessionDaemonLabel(session: ChatSessionInfo): string | null {
-  if (!sessionsAreProjectScoped()) return null;
-  const daemonId = session.daemon_id;
-  if (!daemonId || daemonId === boot?.localDaemonId) return null;
-  const daemon = boot?.daemons.find((item) => item.daemon_id === daemonId);
-  return daemon ? daemonLabel(daemon) : daemonId;
-}
-
-/**
  * True when the host lists a project's runs across daemons.
  *
  * A console project owns its runs, wherever they executed. The VS Code chat
@@ -326,10 +311,58 @@ function sessionDaemonId(session: ChatSessionInfo): string | null {
   return session.daemon_id ?? boot?.localDaemonId ?? null;
 }
 
+/**
+ * Where a session ran, for the sidebar's second line.
+ *
+ * A run's ``dir`` is its history key — this workspace's path — so it says
+ * nothing useful about a remote run; name the daemon instead.
+ */
+function sessionLocationLabel(session: ChatSessionInfo): string {
+  const daemon = session.daemon_id
+    ? boot?.daemons.find((item) => item.daemon_id === session.daemon_id)
+    : undefined;
+  if (daemon && !isLocalDaemon(daemon)) return daemonLabel(daemon);
+  return session.dir ?? '';
+}
+
 function agentLabel(runtime: RuntimeInfo): string {
   return runtime.name || runtime.type;
 }
 
+/**
+ * Working directory for the selected daemon.
+ *
+ * A console project's local path only exists on the Server machine, so its
+ * remote daemon defaults to the project's pinned remote path; any other
+ * remote daemon needs the user to pick one (returns '').
+ *
+ * Without a project (the VS Code chat panel) the default is the host's
+ * workspace root, which likewise only exists on this machine: a remote
+ * daemon starts empty and the user picks a directory.
+ */
+function defaultCwdFor(daemonId: string | null): string {
+  const project = boot?.project;
+  if (!project) {
+    const daemon = daemonId
+      ? boot?.daemons.find((item) => item.daemon_id === daemonId)
+      : undefined;
+    if (daemon && !isLocalDaemon(daemon)) return '';
+    return boot?.workspaceRoot || boot?.workspaceFolders[0] || '';
+  }
+  if (!daemonId) {
+    return boot?.workspaceRoot || boot?.workspaceFolders[0] || '';
+  }
+  if (project.remote_daemon_id && project.remote_path && daemonId === project.remote_daemon_id) {
+    return project.remote_path;
+  }
+  if (!boot?.localDaemonId || daemonId === boot.localDaemonId) return project.path;
+  return '';
+}
+
+function syncWorkspaceRoot(): void {
+  if (agentCwdTouched || activeSessionId || currentJob) return;
+  agentCwd = defaultCwdFor(selectedDaemonId);
+}
 function identityLabel(identity: IdentityWithBindings): string {
   return identity.name || identity.did;
 }
@@ -360,28 +393,6 @@ function identitiesForSelection(): IdentityWithBindings[] {
     }));
 }
 
-/**
- * Working directory for the selected daemon. A project's local path only
- * exists on the Server machine, so a remote daemon defaults to the
- * project's pinned remote path; any other remote daemon needs the user to
- * pick one (returns '').
- */
-function defaultCwdFor(daemonId: string | null): string {
-  const project = boot?.project;
-  if (!project || !daemonId) {
-    return boot?.workspaceRoot || boot?.workspaceFolders[0] || '';
-  }
-  if (project.remote_daemon_id && project.remote_path && daemonId === project.remote_daemon_id) {
-    return project.remote_path;
-  }
-  if (!boot?.localDaemonId || daemonId === boot.localDaemonId) return project.path;
-  return '';
-}
-
-function syncWorkspaceRoot(): void {
-  if (activeSessionId || currentJob) return;
-  agentCwd = defaultCwdFor(selectedDaemonId);
-}
 
 function applyChatSelection(selection: ChatSelection): void {
   if (busy !== 'idle') return;
@@ -467,8 +478,8 @@ function normalizeInitialSelection(): void {
 function canSend(): boolean {
   const daemon = selectedDaemon();
   // A remote daemon needs an explicit directory (its default cwd is often
-  // unrelated to the project): the project's pinned remote path fills this
-  // automatically, otherwise the user has to pick one.
+  // unrelated to this workspace): the project's pinned remote path fills this
+  // automatically when there is one; otherwise the user must pick one.
   const needsCwd = Boolean(daemon && !isLocalDaemon(daemon));
   return Boolean(
     boot?.state === 'online' &&
@@ -633,7 +644,7 @@ function renderSidebar(): void {
   if (!sidebar) return;
   const sessionItems = sessions
     .map((session) => {
-      const daemon = sessionDaemonLabel(session);
+      const location = sessionLocationLabel(session);
       return `
       <div class="agd-session ${session.job_id === activeSessionId ? 'is-selected' : ''}" data-job-id="${esc(session.job_id)}" data-session-id="${esc(session.session_id)}" data-dir="${esc(session.dir ?? '')}">
         <button type="button" class="agd-session-main">
@@ -641,7 +652,7 @@ function renderSidebar(): void {
             ${providerLogo(session.provider)}
             <strong>${esc(firstLine(session.first_prompt) || session.session_id)}</strong>
           </span>
-          <small>${esc(session.last_seen_at)}${daemon ? ` · ${esc(daemon)}` : ''}${session.dir ? ` · ${esc(session.dir)}` : ''}</small>
+          <small>${esc(session.last_seen_at)}${location ? ` · ${esc(location)}` : ''}</small>
         </button>
         <button
           type="button"
@@ -1310,6 +1321,7 @@ function wireSidebar(): void {
   document.getElementById('agd-chat-new')?.addEventListener('click', () => {
     if (busy !== 'idle') return;
     clearConversation();
+    agentCwdTouched = false;
     syncWorkspaceRoot();
     renderSidebar();
     renderMessages();
@@ -1317,6 +1329,16 @@ function wireSidebar(): void {
   });
   document.getElementById('agd-sessions-refresh')?.addEventListener('click', () => {
     void loadSessions();
+  });
+  document.getElementById('agd-chat-cwd')?.addEventListener('change', (event) => {
+    if (busy !== 'idle') return;
+    agentCwd = (event.target as HTMLInputElement).value.trim();
+    agentCwdTouched = true;
+    if (currentJob) {
+      currentJob = null;
+      activeSessionId = null;
+      renderControls();
+    }
   });
   document.getElementById('agd-chat-pick-dir')?.addEventListener('click', () => {
     const daemon = selectedDaemon();
@@ -1328,6 +1350,10 @@ function wireSidebar(): void {
       startPath: agentCwd || null,
       onSelect: (path) => {
         agentCwd = path;
+        // A remote pick must survive later ``workspaceRoot`` syncs — that
+        // path exists on another machine, not in this workspace. A local
+        // pick keeps tracking the open folder, as before.
+        if (!isLocalDaemon(daemon)) agentCwdTouched = true;
         renderSidebar();
         renderControls();
       },
@@ -1342,6 +1368,9 @@ function selectOption(kind: string, value: string): void {
     selectedDaemonId = value;
     selectedProvider = null;
     selectedIdentityDid = '';
+    // A directory is machine-specific: drop the previous daemon's choice so
+    // the next sync starts from the new daemon's default (empty for remote).
+    agentCwdTouched = false;
     normalizeInitialSelection();
     clearConversation();
     syncWorkspaceRoot();
