@@ -1,5 +1,7 @@
 # agt
 
+![AGT — a local bridge and orchestrator for AI coding-agent CLIs](assets/banner.svg)
+
 [中文文档](README_zh.md) | **English**
 
 `agt` is a local bridge and orchestrator for AI coding-agent CLIs. It gives

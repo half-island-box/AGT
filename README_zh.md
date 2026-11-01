@@ -1,5 +1,7 @@
 # agt
 
+![AGT — 本地 AI coding-agent CLI 桥接与编排器](assets/banner.svg)
+
 **中文** | [English](README.md)
 
 `agt` 是一个本地 AI coding-agent CLI 桥接与编排器。它为 Claude Code、
