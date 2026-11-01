@@ -272,6 +272,21 @@ agt>
 
 在 `127.0.0.1` 上启动 FastAPI Server。Server 是 agent registry、task queue、session DB 的统一 hub，SQLite 持久化。
 
+Server 同时在同源端口提供浏览器控制台：
+
+```text
+http://127.0.0.1:8420/
+```
+
+控制台先进入 Projects 页面。用户可以添加、重命名、移除目录项目，并从项目进入 Chat、SOP 和 Goal；添加项目时“浏览”会由 loopback Server 打开本机系统目录选择器，也可以手动输入绝对路径。Settings 负责 Identity 与运行时偏好。页面复用与 VS Code 客户端相同的 HTTP/SSE API，生产运行不需要单独启动 Node 前端进程。控制台默认只随 loopback Server 开放；绑定非 loopback 地址时默认禁用。
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `AGT_CONSOLE_ENABLED` | `1` | 是否允许托管浏览器控制台 |
+| `AGT_CONSOLE_WORKSPACE_ROOTS` | 用户 home | 使用系统 path separator 分隔，控制可浏览/编辑的 SOP 工作区根 |
+| `AGT_CONSOLE_ASSETS` | Python 包内 `agt/web_console/assets` | 控制台构建产物目录 |
+| `AGT_CONSOLE_ALLOW_REMOTE` | `0` | 非 loopback 监听时允许控制台；仅应在带认证的反向代理后开启 |
+
 启动时自动初始化数据库并创建 `runtimes`、`tasks`、`sessions` 等表。Server 不再读取或写入 `sessions.json`；旧的 `~/.agt/sessions.json` 仅保留为历史迁移输入。
 
 **MCP 工具（运行时目录 + Goal spawn）**：Server 启动时在同一端口挂载 Streamable HTTP 端点 `http://127.0.0.1:8420/mcp/`。`list_runtimes` 用于查询在线 daemon/provider；`spawn_subagents` 只允许运行中的 Goal Step 调用，服务端通过 `Authorization: Bearer ${AGT_TASK_TOKEN}` 反查当前 Step 和 Job，不接受 agent 自报 parent job。每次调用会立即创建子 Job，并通过 `(parent_step_id, idempotency_key)` 防止重试重复创建。远程 daemon 的 loopback 代理会把工具调用和 token 经 reverse-dial 转发到 Server。Claude Code 使用项目 `.mcp.json`，Codex 使用全局 `~/.codex/config.toml` 的 `[mcp_servers.agt-catalog]` 和 `bearer_token_env_var = "AGT_TASK_TOKEN"`；未接 MCP 的 provider 继续使用 `AGT-SPAWN`。给新 provider 接 MCP 见 [provider-registration](provider-registration.md)。
@@ -328,6 +343,7 @@ $ agt task submit -p "hello"
 # 查看 / 停止
 $ agt server status
 Server is running, pid=48201, pidfile=/home/user/.agt/server.pid
+Console: http://127.0.0.1:8420/
 $ agt server stop
 Sent SIGTERM to server pid 48201
 ```

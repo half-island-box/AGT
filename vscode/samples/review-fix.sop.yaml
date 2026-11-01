@@ -1,0 +1,20 @@
+# Sample SOP for the AGT editor — open it in VS Code and run
+# "AGT: Open SOP Editor" to see the DAG on the canvas.
+name: review-fix-sample
+identities:
+  reviewer: {provider: claude}
+  fixer: {provider: codex}
+tasks:
+  - name: review
+    identity: reviewer
+    input: 审查当前 diff，把结论写到 .agt/outputs/
+    output: review-report
+  - name: fix
+    identity: fixer
+    input: 根据 ${review.review-report} 修复问题
+    depends_on: [review]
+    output: patched-diff
+  - name: verify
+    identity: fixer
+    input: 基于 ${fix.patched-diff} 跑一遍测试并汇报
+    depends_on: [fix]

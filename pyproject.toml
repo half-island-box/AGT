@@ -38,6 +38,7 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["agt"]
+artifacts = ["agt/web_console/assets/**"]
 
 [tool.pytest.ini_options]
 markers = [

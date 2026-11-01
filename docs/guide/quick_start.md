@@ -72,6 +72,7 @@ The secret is now auto-loaded by `agt server start` and `agt daemon start`. If y
 # ① 启动 Server（前台阻塞；Ctrl-C 停止）
 $ agt server start
 INFO:     Uvicorn running on http://127.0.0.1:8420 (Press CTRL+C to quit)
+INFO:     AGT console: http://127.0.0.1:8420/
 
 # ② 另开一个 shell，启动 Daemon（后台进程）
 $ agt daemon start
@@ -530,6 +531,7 @@ EOF
 跑完上面的步骤，应该全部满足：
 
 - [ ] `agt server start` 启动后能访问 `http://<server-host>:8420/docs`（FastAPI 自动文档）
+- [ ] loopback Server 启动后能访问 `http://127.0.0.1:8420/`（浏览器控制台）
 - [ ] 每台机器 `agt daemon start` 后，`agt runtime list` 能看到该 daemon 注册的 runtime
 - [ ] `last_seen` 字段每 30s 滚动（heartbeat 活着）
 - [ ] 提交 provider='claude' 的任务，**只有**有 claude 的 daemon claim 到

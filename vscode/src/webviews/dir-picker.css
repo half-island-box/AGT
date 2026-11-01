@@ -1,0 +1,84 @@
+/* Shared in-page directory browser (project modal + chat/SOP/Goal). */
+
+/* Input + "browse" button pair used next to a path field. */
+.agd-dir-input-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.agd-dir-input-row .agd-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.agd-dir-backdrop {
+  z-index: 60;
+}
+
+.agd-dir-picker {
+  width: min(560px, calc(100vw - 32px));
+}
+
+.agd-dir-bar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.agd-dir-bar input {
+  flex: 1;
+  min-width: 0;
+}
+
+.agd-dir-list {
+  max-height: 320px;
+  overflow: auto;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  border-radius: 4px;
+  padding: 4px;
+}
+
+.agd-dir-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+
+.agd-dir-row:hover {
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.18));
+}
+
+.agd-dir-icon {
+  opacity: 0.6;
+}
+
+.agd-dir-empty {
+  padding: 18px 8px;
+  text-align: center;
+  opacity: 0.7;
+}
+
+.agd-dir-error {
+  color: var(--vscode-errorForeground, #f48771);
+  opacity: 1;
+}
+
+.agd-dir-current {
+  margin-top: 8px;
+  font-size: 12px;
+  opacity: 0.75;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
