@@ -29,11 +29,12 @@ knowing which format a provider uses.
 from __future__ import annotations
 
 import contextlib
+import copy
 import hashlib
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 
 # The MCP server name an agent references for AGT's tools.
 # Both profiles write (or would write) an entry under this name.
@@ -69,6 +70,16 @@ class McpConfigProfile(Protocol):
 # ── Project-scoped JSON (Claude Code ``.mcp.json``) ─────────────────────
 
 
+def _claude_env_reference(name: str) -> str:
+    """Claude Code expands ``${VAR}`` inside ``.mcp.json`` headers."""
+    return "${%s}" % name
+
+
+def _opencode_env_reference(name: str) -> str:
+    """OpenCode expands ``{env:VAR}`` (no ``$``) inside ``opencode.json``."""
+    return "{env:%s}" % name
+
+
 @dataclass(frozen=True)
 class ProjectJsonMcpConfig:
     """Register ``agt-catalog`` in a project-scoped JSON MCP config.
@@ -78,9 +89,21 @@ class ProjectJsonMcpConfig:
     ourselves (tracked by a ``managed`` sidecar) is deleted on reclaim.
     Idempotent (reclaim-first, so a leftover from a crashed prior run is
     cleaned before re-injecting). Pure file IO under ``<cwd>/.agt/``.
+
+    The defaults describe Claude Code's ``.mcp.json`` layout
+    (``{"mcpServers": {name: {"type": "http", ...}}}``). OpenCode reuses
+    the same file-IO contract with a nested ``mcp.servers`` table, a
+    ``remote`` server type, and its ``{env:VAR}`` substitution syntax —
+    see :func:`opencode_mcp_profile`.
     """
 
     filename: str = ".mcp.json"
+    #: Key path from the JSON root to the servers mapping.
+    servers_path: tuple[str, ...] = ("mcpServers",)
+    #: Value of the entry's ``type`` field.
+    server_type: str = "http"
+    #: Render a bearer token *reference* (never the token itself).
+    env_reference: Callable[[str], str] = _claude_env_reference
 
     def _sidecars(self, cwd: Path) -> tuple[Path, Path]:
         aagt = cwd / ".agt"
@@ -130,19 +153,42 @@ class ProjectJsonMcpConfig:
         else:
             managed.touch()
 
-        servers = dict(original.get("mcpServers") or {})
-        entry: dict[str, str | dict[str, str]] = {
-            "type": "http",
-            "url": mcp_url,
-        }
+        merged = self._with_server(original, mcp_url, bearer_token_env_var)
+        target.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
+
+    def _entry(
+        self,
+        mcp_url: str,
+        bearer_token_env_var: str | None,
+    ) -> dict[str, object]:
+        entry: dict[str, object] = {"type": self.server_type, "url": mcp_url}
         if bearer_token_env_var:
             entry["headers"] = {
-                "Authorization": f"Bearer ${{{bearer_token_env_var}}}",
+                "Authorization": f"Bearer {self.env_reference(bearer_token_env_var)}",
             }
-        servers[MCP_SERVER_NAME] = entry
-        merged = dict(original)
-        merged["mcpServers"] = servers
-        target.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
+        return entry
+
+    def _with_server(
+        self,
+        original: dict,
+        mcp_url: str,
+        bearer_token_env_var: str | None,
+    ) -> dict:
+        """Return ``original`` with ``MCP_SERVER_NAME`` merged into the
+        configured ``servers_path``, creating intermediate tables."""
+        merged = copy.deepcopy(original)
+        cursor: dict = merged
+        for key in self.servers_path[:-1]:
+            child = cursor.get(key)
+            if not isinstance(child, dict):
+                child = {}
+                cursor[key] = child
+            cursor = child
+        last = self.servers_path[-1]
+        servers = dict(cursor.get(last) or {})
+        servers[MCP_SERVER_NAME] = self._entry(mcp_url, bearer_token_env_var)
+        cursor[last] = servers
+        return merged
 
     def reclaim(self, cwd: Path) -> None:
         """Undo a prior :meth:`inject`. Idempotent.
@@ -175,6 +221,23 @@ class ProjectJsonMcpConfig:
 
 
 # ── Global TOML (Codex ``~/.codex/config.toml``) ────────────────────────
+
+
+def opencode_mcp_profile() -> ProjectJsonMcpConfig:
+    """OpenCode's project config: ``opencode.json`` → ``mcp.servers``.
+
+    OpenCode loads ``opencode.json`` from the spawn cwd (and walks up),
+    so the project-scoped file-IO contract applies unchanged. The entry
+    is a ``remote`` MCP server and the bearer token stays a
+    ``{env:AGT_TASK_TOKEN}`` reference, expanded by OpenCode at load.
+    """
+
+    return ProjectJsonMcpConfig(
+        filename="opencode.json",
+        servers_path=("mcp", "servers"),
+        server_type="remote",
+        env_reference=_opencode_env_reference,
+    )
 
 
 def _strip_table(text: str, header: str) -> str:
@@ -359,6 +422,7 @@ __all__ = [
     "McpConfigProfile",
     "ProjectJsonMcpConfig",
     "GlobalTomlMcpConfig",
+    "opencode_mcp_profile",
     "inject_mcp_config",
     "reclaim_mcp_config",
 ]

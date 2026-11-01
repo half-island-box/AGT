@@ -1285,6 +1285,211 @@ class CodexAppServerSink(StreamingSink):
         return [self._error_message] if self._error_message else []
 
 
+def _opencode_usage_fields(tokens: Any) -> dict[str, int]:
+    """Map OpenCode ``step_finish.tokens`` onto AGT's usage keys.
+
+    Observed shape (opencode 2.2.5)::
+
+        {"input": 778, "output": 18, "reasoning": 34,
+         "cache": {"read": 4352, "write": 0}}
+
+    ``input`` already excludes cache reads/writes, so no subtraction is
+    needed (unlike Codex). ``reasoning`` is not part of the AGT usage
+    schema and is left out of billing counters.
+    """
+    if not isinstance(tokens, dict):
+        return {}
+    cache = tokens.get("cache")
+    if not isinstance(cache, dict):
+        cache = {}
+    return {
+        "input_tokens": _as_int(tokens.get("input")),
+        "output_tokens": _as_int(tokens.get("output")),
+        "cache_read_input_tokens": _as_int(cache.get("read")),
+        "cache_creation_input_tokens": _as_int(cache.get("write")),
+    }
+
+
+class OpenCodeStreamSink(StreamingSink):
+    """Consume OpenCode ``run --format json`` JSON-Lines events.
+
+    Observed event shapes (opencode 2.2.5, ``opencode run --format json``):
+
+    - ``{"type":"step_start","sessionID":"ses_...","part":{...}}``
+    - ``{"type":"text","sessionID":"ses_...","part":{"id","type":"text",
+      "text","time"}}`` — one complete text part per event (no deltas)
+    - ``{"type":"reasoning",...,"part":{"id","type":"reasoning","text"}}``
+      — only emitted when ``--thinking`` is passed
+    - ``{"type":"tool_use",...,"part":{"id","tool","state":{"status",
+      "input","output"|"error",...}}}`` — already completed/failed
+    - ``{"type":"step_finish",...,"part":{"reason","cost","tokens":{...}}}``
+    - ``{"type":"error",...,"error":{"type","message"}}`` — the CLI also
+      exits non-zero, but trusting the in-band error keeps the status
+      independent of the exit code
+
+    Every event carries the top-level ``sessionID``, so the session
+    pointer never needs the (SQLite-backed) disk fallback. Text parts are
+    printed as they arrive; successive parts are separated by a blank
+    line because OpenCode emits whole parts rather than token deltas.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._session_id: str | None = None
+        self._is_error: bool = False
+        self._error_message: str | None = None
+        # ``part id -> text already emitted`` so a replayed/suffix text
+        # event can never duplicate the visible output.
+        self._text_parts: dict[str, str] = {}
+        self._emitted_text: bool = False
+        # Reasoning parts already rendered, keyed by part id.
+        self._thinking_parts: set[str] = set()
+        # Tool calls already rendered (tool_use events are terminal).
+        self._tool_parts: set[str] = set()
+        self._usage_calls: int = 0
+        self._usage_totals: dict[str, int] = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+        }
+        self._cost_total: float = 0.0
+        self._usage_emitted: bool = False
+        self.usage: dict[str, Any] | None = None
+
+    def consume(self, raw: dict[str, Any]) -> None:
+        """Dispatch on event ``type``; unknown types are silently skipped."""
+        if not isinstance(raw, dict):
+            return
+        session_id = raw.get("sessionID")
+        if isinstance(session_id, str) and session_id:
+            self._session_id = session_id
+        mtype = raw.get("type")
+        if mtype == "text":
+            self._consume_text(raw.get("part") or {})
+        elif mtype == "reasoning":
+            self._consume_reasoning(raw.get("part") or {})
+        elif mtype == "tool_use":
+            self._consume_tool(raw.get("part") or {})
+        elif mtype == "step_finish":
+            self._consume_step_finish(raw.get("part") or {})
+        elif mtype == "error":
+            self._consume_error(raw.get("error"))
+
+    def _consume_text(self, part: dict[str, Any]) -> None:
+        text = part.get("text")
+        if not isinstance(text, str) or not text:
+            return
+        part_id = str(part.get("id") or "")
+        previous = self._text_parts.get(part_id, "")
+        if previous and text.startswith(previous):
+            # Reconcile replay: only the not-yet-rendered suffix is new.
+            text = text[len(previous):]
+            if not text:
+                return
+        elif part_id in self._text_parts:
+            return
+        self._text_parts[part_id] = previous + text
+        if not previous and self._emitted_text:
+            # Separate distinct message parts; never split a suffixed part.
+            self.on_text_delta("\n\n")
+        self.on_text_delta(text)
+        self._emitted_text = True
+
+    def _consume_reasoning(self, part: dict[str, Any]) -> None:
+        text = part.get("text")
+        part_id = str(part.get("id") or "")
+        if not isinstance(text, str) or not text or part_id in self._thinking_parts:
+            return
+        self._thinking_parts.add(part_id)
+        self._emit("thinking_start", block_id=part_id)
+        self._emit("thinking_delta", block_id=part_id, text=text)
+        self._emit("thinking_end", block_id=part_id)
+
+    def _consume_tool(self, part: dict[str, Any]) -> None:
+        part_id = str(part.get("id") or "")
+        state = part.get("state") if isinstance(part.get("state"), dict) else {}
+        status = state.get("status")
+        if status not in ("completed", "error") or part_id in self._tool_parts:
+            return
+        self._tool_parts.add(part_id)
+        name = str(part.get("tool") or "")
+        self._emit(
+            "tool_use_start",
+            block_id=part_id,
+            tool_use_id=part_id,
+            name=name,
+        )
+        self._emit(
+            "tool_use_end",
+            block_id=part_id,
+            tool_use_id=part_id,
+            name=name,
+            input=state.get("input") or {},
+        )
+        is_error = status == "error"
+        content = state.get("error") if is_error else state.get("output")
+        self._emit(
+            "tool_result",
+            tool_use_id=part_id,
+            content=_content_text(content),
+            is_error=is_error,
+        )
+
+    def _consume_step_finish(self, part: dict[str, Any]) -> None:
+        fields = _opencode_usage_fields(part.get("tokens"))
+        cost = part.get("cost")
+        if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+            self._cost_total += float(cost)
+        if not fields:
+            return
+        self._usage_calls += 1
+        for key, value in fields.items():
+            self._usage_totals[key] += value
+        fields["scope"] = "message"
+        if self._cost_total:
+            fields["cost_usd"] = round(self._cost_total, 6)
+        self._emit("usage", **fields)
+
+    def _consume_error(self, error: Any) -> None:
+        self._is_error = True
+        message = _error_text(error)
+        if message:
+            self._error_message = message
+            log.warning("opencode: %s", message)
+
+    def _emit_turn_usage(self) -> None:
+        if self._usage_emitted or not self._usage_calls:
+            return
+        self._usage_emitted = True
+        summary: dict[str, Any] = dict(self._usage_totals)
+        summary["scope"] = "turn"
+        summary["num_turns"] = self._usage_calls
+        if self._cost_total:
+            summary["cost_usd"] = round(self._cost_total, 6)
+        self.usage = summary
+        self._emit("usage", **summary)
+
+    def finalize(self) -> SinkResult:
+        self._emit_turn_usage()
+        return SinkResult(
+            session_id=self._session_id,
+            is_error=self._is_error,
+            resume_rejected=False,
+            text="".join(self.accumulated_text),
+            events=list(self.events),
+            usage=dict(self.usage) if self.usage else None,
+        )
+
+    @property
+    def subtype(self) -> str | None:
+        return None
+
+    @property
+    def errors(self) -> list[str]:
+        return [self._error_message] if self._error_message else []
+
+
 __all__ = [
     "MAX_EVENT_BYTES",
     "MAX_EVENTS_PER_STEP",
@@ -1293,4 +1498,5 @@ __all__ = [
     "NoopSink",
     "ClaudeStreamSink",
     "CodexAppServerSink",
+    "OpenCodeStreamSink",
 ]

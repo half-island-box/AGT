@@ -28,6 +28,7 @@ class KnownAgent:
 
     - ``"none"`` — provider does not stream (default)
     - ``"claude_stream_json"`` — Claude Code ``--output-format stream-json``
+    - ``"opencode_json"`` — OpenCode ``run --format json`` JSON-Lines events
     """
 
     command: str
@@ -41,6 +42,7 @@ class KnownAgent:
 KNOWN_AGENTS: list[KnownAgent] = [
     KnownAgent("claude", "claude", "Claude Code", stream_format="claude_stream_json"),
     KnownAgent("codex", "codex", "Codex CLI", cli_style="codex"),
+    KnownAgent("opencode", "opencode", "OpenCode", stream_format="opencode_json"),
 ]
 
 

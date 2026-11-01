@@ -123,3 +123,25 @@ def test_codex_transport_env_override(monkeypatch):
     assert asyncio.run(_codex_app_server_available(binary)) is False
     monkeypatch.setenv("AGT_CODEX_TRANSPORT", "app-server")
     assert asyncio.run(_codex_app_server_available(binary)) is True
+
+
+def test_opencode_adapter_uses_json_streaming():
+    """OpenCode streams ``run --format json`` events through its own sink."""
+    from agt.runtime.command_builders import OpenCodeCommandBuilder
+    from agt.runtime.streaming import OpenCodeStreamSink
+
+    adapter = get_adapter("opencode")
+    assert isinstance(adapter.command_builder, OpenCodeCommandBuilder)
+    assert isinstance(adapter.stream_sink_factory(), OpenCodeStreamSink)
+    assert adapter.permission_args == ("--auto",)
+    # ``--thinking`` makes reasoning events appear; ``--standalone`` keeps
+    # each run on a private server.
+    assert adapter.stream_args == (
+        "--standalone",
+        "--format",
+        "json",
+        "--thinking",
+    )
+    assert adapter.mcp_profile is not None
+    # Sessions live in SQLite, so there is no path-based fallback.
+    assert adapter.session_locator is None

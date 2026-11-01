@@ -28,7 +28,7 @@
   $ agt server --help
   $ agt daemon --help
   ```
-- 一台或多台机器上能跑 agent CLI（claude / codex 任意）
+- 一台或多台机器上能跑 agent CLI（claude / codex / opencode 任意）
 
 ---
 
@@ -95,7 +95,7 @@ $ agt runtime list    # 看 daemon 注册的 agent
 > `AGT_CONSOLE_AUTOBUILD=0` 可关闭，`AGT_CONSOLE_SOURCE_DIR=<path>` 可指定
 > 源码位置）。修改 webview 源码后仍需手动重新构建。
 
-> **Phase 5 本地流式**：直接跑 `agt run -p "..."` / `agt chat`（**不带 `--daemon`**）会在终端看到逐 token 的 agent 输出。Claude Code 默认走 `--output-format stream-json --verbose`，codex 走 `codex app-server` 的 JSON-RPC 流（thinking / 工具调用 / token 用量与 claude 同通道），session_id / resume_rejected 从结构化字段读取；没有 `app-server` 的旧版 codex 自动回退到 `codex exec` pipe 文本，其它 provider 仍走老路径。详见 [commands.md `agt run`](commands.md#agt-run)。
+> **Phase 5 本地流式**：直接跑 `agt run -p "..."` / `agt chat`（**不带 `--daemon`**）会在终端看到流式 agent 输出。Claude Code 默认走 `--output-format stream-json --verbose`，codex 走 `codex app-server` 的 JSON-RPC 流，opencode 走 `run --standalone --format json --thinking` 的 JSON-Lines 事件（thinking / 工具调用 / token 用量与 claude 同通道），session_id / resume_rejected 从结构化字段读取；没有 `app-server` 的旧版 codex 自动回退到 `codex exec` pipe 文本，其它 provider 仍走老路径。opencode 的文本按完整消息段到达（非逐 token），headless 下用 `AGT_OPENCODE_MODEL=<provider/model>` 指定模型。详见 [commands.md `agt run`](commands.md#agt-run)。
 
 > **SOP 静态流水线**：把确定的多 agent 流程写成 YAML DAG（`agt sop validate /
 > submit / run / runs / status / log`）。节点按 `depends_on` 依赖门控激活，`${node.output}`
@@ -105,7 +105,7 @@ $ agt runtime list    # 看 daemon 注册的 agent
 > **goal 动态编排**：把一句开放式需求交给 root 编排者 agent 自主拆解、按预算
 > （`--max-depth` / `--max-descendants`）递归 spawn 子 agent、synthesis 综合交付
 > （`agt goal submit / run / runs / status / log / input / cancel / artifacts / export`）。
-> Claude Code / Codex 优先通过 `spawn_subagents` MCP 工具派生子任务；其他 provider
+> Claude Code / Codex / OpenCode 优先通过 `spawn_subagents` MCP 工具派生子任务；其他 provider
 > 自动使用 `AGT-SPAWN` 兼容路径。两种路径共用同一套预算、路由、幂等和 synthesis 状态机。
 > `goal runs` 按提交任务时的本地 cwd 列出历史运行；`--dir` 只指定 daemon 侧执行目录，不参与历史分组。
 > 运行时可用 `agt goal status` 观测整棵 Job 树、`goal input` 回答 agent 的 `AGT-ASK`

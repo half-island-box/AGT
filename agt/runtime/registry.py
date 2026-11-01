@@ -36,11 +36,13 @@ from .command_builders import (
     CodexAppServerCommandBuilder,
     CodexCommandBuilder,
     CommandBuilder,
+    OpenCodeCommandBuilder,
 )
 from .mcp_config import (
     GlobalTomlMcpConfig,
     McpConfigProfile,
     ProjectJsonMcpConfig,
+    opencode_mcp_profile,
 )
 from .resume_detectors import (
     ClaudeResumeRejectionDetector,
@@ -56,6 +58,7 @@ from .streaming import (
     ClaudeStreamSink,
     CodexAppServerSink,
     NoopSink,
+    OpenCodeStreamSink,
     StreamingSink,
 )
 
@@ -85,6 +88,25 @@ CLAUDE_BYPASS_PERMISSION_ARGS: tuple[str, ...] = (
 # prompt would be invisible and codex exits with empty stdout.
 CODEX_SANDBOX_ARGS: tuple[str, ...] = (
     "--approve-for-me",
+)
+
+# OpenCode counterpart: ``opencode run`` is non-interactive and
+# auto-rejects permission requests it cannot ask about. ``--auto``
+# approves everything not explicitly denied, so the headless run can
+# write deliverables without a TTY prompt.
+OPENCODE_AUTO_APPROVE_ARGS: tuple[str, ...] = ("--auto",)
+
+# ``run --format json`` emits one JSON object per line (text, reasoning,
+# tool_use, step_start/step_finish, error). ``--thinking`` is required
+# for reasoning events to appear; ``--standalone`` runs a private
+# in-process server instead of attaching to the shared background
+# service, so concurrent daemon tasks stay isolated from each other and
+# from a stale service left by an older CLI version.
+OPENCODE_STREAM_ARGS: tuple[str, ...] = (
+    "--standalone",
+    "--format",
+    "json",
+    "--thinking",
 )
 
 
@@ -224,6 +246,27 @@ def _codex_adapter() -> ProviderAdapter:
     )
 
 
+def _opencode_adapter() -> ProviderAdapter:
+    """OpenCode's ``run --format json`` transport.
+
+    OpenCode stores sessions in ``~/.local/share/opencode/opencode.db``
+    (SQLite), so there is no file-path session locator; every event
+    carries its ``sessionID`` instead. ``--session`` creates a missing
+    session rather than rejecting it, so the generic detector (never
+    clears the pointer) is correct.
+    """
+
+    return ProviderAdapter(
+        command_builder=OpenCodeCommandBuilder(),
+        session_locator=None,
+        stream_sink_factory=OpenCodeStreamSink,
+        resume_rejection_detector=GenericResumeRejectionDetector(),
+        permission_args=OPENCODE_AUTO_APPROVE_ARGS,
+        stream_args=OPENCODE_STREAM_ARGS,
+        mcp_profile=opencode_mcp_profile(),
+    )
+
+
 def _claude_default_adapter() -> ProviderAdapter:
     """Default for unknown / unconfigured providers.
 
@@ -244,6 +287,7 @@ def _claude_default_adapter() -> ProviderAdapter:
 _REGISTRY: dict[str, ProviderAdapter] = {
     "claude": _claude_adapter(),
     "codex": _codex_adapter(),
+    "opencode": _opencode_adapter(),
 }
 
 

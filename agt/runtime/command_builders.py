@@ -10,6 +10,7 @@ pre-prompt CLI flags decided by the executor — permission flags (from
 
 from __future__ import annotations
 
+import os
 from abc import ABC, abstractmethod
 from pathlib import Path
 
@@ -87,9 +88,43 @@ class CodexAppServerCommandBuilder(CommandBuilder):
         return [str(binary), "app-server", "--listen", "stdio://", *cli_args]
 
 
+class OpenCodeCommandBuilder(CommandBuilder):
+    """Build ``<bin> run [cli_args...] [--session <sid>] <prompt>``.
+
+    OpenCode's non-interactive mode is the ``run`` subcommand with a
+    positional prompt. Resume uses ``--session <id>``; OpenCode creates
+    that session when it does not exist, so a stale id never fails the
+    run. The streaming/permission flags (``--format json``, ``--auto``,
+    ``--standalone``) arrive through ``cli_args``.
+
+    ``AGT_OPENCODE_MODEL`` (``provider/model``) selects the model. A
+    headless daemon has no UI to pick one, and OpenCode's implicit
+    default can be a free tier that stalls; the env var keeps the choice
+    at the deployment level, like ``AGT_CODEX_TRANSPORT``.
+    """
+
+    model_env_var = "AGT_OPENCODE_MODEL"
+
+    def build(
+        self,
+        binary: Path,
+        task: Task,
+        cli_args: list[str],
+    ) -> list[str]:
+        cmd: list[str] = [str(binary), "run", *cli_args]
+        model = os.environ.get(self.model_env_var, "").strip()
+        if model:
+            cmd += ["--model", model]
+        if task.resume_session_id:
+            cmd += ["--session", task.resume_session_id]
+        cmd += [task.prompt]
+        return cmd
+
+
 __all__ = [
     "CommandBuilder",
     "ClaudeCommandBuilder",
     "CodexCommandBuilder",
     "CodexAppServerCommandBuilder",
+    "OpenCodeCommandBuilder",
 ]

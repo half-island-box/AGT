@@ -74,6 +74,9 @@ Hi there, friend!      # ← 实时逐 token 打印，不再等执行完一次�
 # 指定 provider（codex 通过 app-server 同样流式输出 thinking / 工具调用 / 用量）
 $ agt run --provider codex -p "..."
 
+# OpenCode：run --format json，文本按消息段输出，thinking / 工具调用 / 用量同样上报
+$ AGT_OPENCODE_MODEL=deepseek/deepseek-v4-flash agt run --provider opencode -p "..."
+
 # 带 identity 远程执行（binding 可选，按所选 provider 查找 live runtime）
 $ agt run --identity did:agt:reviewer --daemon d1 -p "review this diff"
 
@@ -83,7 +86,7 @@ $ agt run --identity did:agt:reviewer --provider codex --daemon d1 -p "..."
 
 > **`--identity` 语义**：binding 是可选的运行时路由偏好。匹配的 live binding 优先；没有匹配 binding 时，Server 会从 live runtime 注册表选择显式指定的 `(daemon, provider)`。binding 不会限制 identity 可用于哪些 provider。
 > **本地限制**：不带 `--daemon` 时 `--identity` 会被拒绝，因为 identity 的 runtime 解析和注入内容都由 Server 提供。
-> **本地流式（Phase 5）**：Claude Code 默认启用 `--output-format stream-json --verbose`；codex 通过 `codex app-server`（JSON-RPC over stdio）驱动同一事件通道，thinking / 工具调用 / token 用量都会实时上报。agent 文本增量实时打印到终端，`TaskResult.stdout` 仍存拼接后的纯文本，下游展示 / 落库链路零改动。旧版 codex 没有 `app-server` 时自动回退到 `codex exec` pipe 文本；可用环境变量 `AGT_CODEX_TRANSPORT=exec|app-server` 强制选择。
+> **本地流式（Phase 5）**：Claude Code 默认启用 `--output-format stream-json --verbose`；codex 通过 `codex app-server`（JSON-RPC over stdio）驱动同一事件通道；OpenCode 通过 `opencode run --standalone --format json --thinking` 输出 JSON-Lines 事件。thinking / 工具调用 / token 用量都会实时上报，`TaskResult.stdout` 仍存拼接后的纯文本，下游展示 / 落库链路零改动。OpenCode 的文本按完整消息段到达（不是逐 token），相邻段之间自动空行。旧版 codex 没有 `app-server` 时自动回退到 `codex exec` pipe 文本；可用环境变量 `AGT_CODEX_TRANSPORT=exec|app-server` 强制选择。OpenCode 用 `AGT_OPENCODE_MODEL=<provider/model>` 指定模型（headless 环境没有 UI 选模型）。
 > **远程流式（Phase 5 remote）**：远程 `--daemon` / `--identity` 路径同样实时流式——daemon 每 ~0.5s 采样一次累计 stdout 前缀，经 WS/HTTP 上报到 Server，Server 再以 SSE 推给 CLI 逐字打印（`snapshot → delta* → done`）。读超时自动重连一次，仍无进展则降级为 `wait_task` 轮询兜底（兜底只补打未打印的尾部，不整段重打）。
 
 ### 退出码
@@ -289,7 +292,7 @@ http://127.0.0.1:8420/
 
 启动时自动初始化数据库并创建 `runtimes`、`tasks`、`sessions` 等表。Server 不再读取或写入 `sessions.json`；旧的 `~/.agt/sessions.json` 仅保留为历史迁移输入。
 
-**MCP 工具（运行时目录 + Goal spawn）**：Server 启动时在同一端口挂载 Streamable HTTP 端点 `http://127.0.0.1:8420/mcp/`。`list_runtimes` 用于查询在线 daemon/provider；`spawn_subagents` 只允许运行中的 Goal Step 调用，服务端通过 `Authorization: Bearer ${AGT_TASK_TOKEN}` 反查当前 Step 和 Job，不接受 agent 自报 parent job。每次调用会立即创建子 Job，并通过 `(parent_step_id, idempotency_key)` 防止重试重复创建。远程 daemon 的 loopback 代理会把工具调用和 token 经 reverse-dial 转发到 Server。Claude Code 使用项目 `.mcp.json`，Codex 使用全局 `~/.codex/config.toml` 的 `[mcp_servers.agt-catalog]` 和 `bearer_token_env_var = "AGT_TASK_TOKEN"`；未接 MCP 的 provider 继续使用 `AGT-SPAWN`。给新 provider 接 MCP 见 [provider-registration](provider-registration.md)。
+**MCP 工具（运行时目录 + Goal spawn）**：Server 启动时在同一端口挂载 Streamable HTTP 端点 `http://127.0.0.1:8420/mcp/`。`list_runtimes` 用于查询在线 daemon/provider；`spawn_subagents` 只允许运行中的 Goal Step 调用，服务端通过 `Authorization: Bearer ${AGT_TASK_TOKEN}` 反查当前 Step 和 Job，不接受 agent 自报 parent job。每次调用会立即创建子 Job，并通过 `(parent_step_id, idempotency_key)` 防止重试重复创建。远程 daemon 的 loopback 代理会把工具调用和 token 经 reverse-dial 转发到 Server。Claude Code 使用项目 `.mcp.json`，Codex 使用全局 `~/.codex/config.toml` 的 `[mcp_servers.agt-catalog]` 和 `bearer_token_env_var = "AGT_TASK_TOKEN"`，OpenCode 使用项目 `opencode.json` 的 `mcp.servers.agt-catalog`（`type: "remote"`，header 里写 `Bearer {env:AGT_TASK_TOKEN}`）；未接 MCP 的 provider 继续使用 `AGT-SPAWN`。给新 provider 接 MCP 见 [provider-registration](provider-registration.md)。
 
 **Phase 3 起，Server 与 Daemon 必须使用同一个 `AGT_SERVER_SECRET`**。`agt server start` 首次运行会自动生成并写入 `~/.agt/server.secret`（`0600`），Server 和 Daemon 都按“环境变量 > `~/.agt/server.secret` > 空”加载，因此正常启动时无需 export：
 
