@@ -9,7 +9,6 @@
     "type": "git",
     "url": "https://github.com/half-island-box/agent-team.git"
   },
-  "private": true,
   "engines": {
     "vscode": "^1.104.0"
   },
