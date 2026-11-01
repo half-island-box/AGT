@@ -2,6 +2,7 @@ import './mode-switcher.css';
 import './styles.css';
 import './projects.css';
 import { t, type MessageKey } from '../core/i18n';
+import type { AgentOption } from '../core/daemons';
 import type {
   ConsoleProjectInfo,
   ServerState,
@@ -23,6 +24,8 @@ interface ProjectsBoot {
   remoteDaemons: RemoteDaemonOption[];
   /** ``daemon_id → human-readable name`` for every known daemon. */
   daemonNames: Record<string, string>;
+  /** Union of providers probed across every known daemon. */
+  agents: AgentOption[];
 }
 
 interface ProjectModal {
@@ -50,15 +53,6 @@ interface DashboardState {
   error: string | null;
   data: UsageSummary | null;
 }
-
-const AGENT_LABELS: Record<string, string> = {
-  claude: 'Claude Code',
-  codex: 'Codex',
-  'cursor-agent': 'Cursor',
-  copilot: 'Copilot',
-  qwen: 'Qwen',
-};
-const AGENT_KEYS = Object.keys(AGENT_LABELS);
 
 let dashboard: DashboardState = {
   agent: 'all',
@@ -210,7 +204,7 @@ function usageWindow(range: UsageRange): {
 }
 
 function agentLabel(agent: string): string {
-  return AGENT_LABELS[agent] ?? agent;
+  return boot?.agents.find((option) => option.provider === agent)?.label ?? agent;
 }
 
 function renderStatCard(label: string, value: string, icon: string): string {
@@ -286,12 +280,17 @@ function renderBreakdown(items: UsageSummary['breakdown']): string {
 }
 
 function renderDashboard(): string {
-  const agentOptions = [tr('projects.usage.agentAll'), ...AGENT_KEYS.map(agentLabel)]
-    .map((label, i) => {
-      const value = i === 0 ? 'all' : AGENT_KEYS[i - 1];
-      const selected = dashboard.agent === value ? ' selected' : '';
-      return `<option value="${esc(value)}"${selected}>${esc(label)}</option>`;
-    }).join('');
+  const agentChoices = [
+    { value: 'all', label: tr('projects.usage.agentAll') },
+    ...(boot?.agents ?? []).map((option) => ({
+      value: option.provider,
+      label: option.label,
+    })),
+  ];
+  const agentOptions = agentChoices.map(({ value, label }) => {
+    const selected = dashboard.agent === value ? ' selected' : '';
+    return `<option value="${esc(value)}"${selected}>${esc(label)}</option>`;
+  }).join('');
 
   const ranges: Array<{ value: UsageRange; label: string }> = [
     { value: 'today', label: tr('projects.usage.rangeToday') },
@@ -454,6 +453,14 @@ function render(): void {
 async function refresh(): Promise<void> {
   boot = await bridge.call<ProjectsBoot>('projects.boot');
   lang = boot.language;
+  // A daemon may have gone away or stopped reporting a provider since the
+  // last refresh; keep the select value and the requested filter in sync.
+  if (
+    dashboard.agent !== 'all'
+    && !boot.agents.some((option) => option.provider === dashboard.agent)
+  ) {
+    dashboard.agent = 'all';
+  }
   render();
 }
 

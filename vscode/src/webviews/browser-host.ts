@@ -7,7 +7,7 @@
  */
 
 import { AgtApi } from '../core/api';
-import { isLocalDaemon } from '../core/daemons';
+import { agentOptionsFromDaemons, isLocalDaemon } from '../core/daemons';
 import type {
   ChatInputMessage,
   ChatSessionInfo,
@@ -572,6 +572,9 @@ export async function browserCall<T>(
             daemon.daemon_name || daemon.device_name || daemon.daemon_id,
           ]),
         ),
+        // The usage dashboard's agent filter must reflect what is actually
+        // installed across every daemon, not a hard-coded provider list.
+        agents: agentOptionsFromDaemons(daemons),
         capabilities: { lifecycleControl: false, console: true },
       } as T;
     }

@@ -10,7 +10,7 @@ import type {
   ServerState,
   UiLanguage,
 } from '../core/types';
-import { isLocalDaemon } from '../core/daemons';
+import { agentOptionsFromDaemons, isLocalDaemon } from '../core/daemons';
 import { applyIntentToModel } from '../core/sop/model-ops';
 import type { SopPoint } from '../core/sop/layout';
 import { issues as sopIssues } from '../core/sop/graph';
@@ -817,6 +817,7 @@ export async function mockCall<T>(_method: string, params?: Record<string, unkno
             daemon.daemon_name || daemon.device_name || daemon.daemon_id,
           ]),
         ),
+        agents: agentOptionsFromDaemons(daemons),
       } as T;
     case 'projects.directories': {
       const remoteDaemon = params?.daemonId ? String(params.daemonId) : null;
