@@ -77,8 +77,8 @@ $ agt run --provider codex -p "..."
 # 带 identity 远程执行（binding 可选，按所选 provider 查找 live runtime）
 $ agt run --identity did:agt:reviewer --daemon d1 -p "review this diff"
 
-# identity 没有 cursor binding 也可以运行，只要目标 runtime live
-$ agt run --identity did:agt:reviewer --provider cursor --daemon d1 -p "..."
+# identity 没有 codex binding 也可以运行，只要目标 runtime live
+$ agt run --identity did:agt:reviewer --provider codex --daemon d1 -p "..."
 ```
 
 > **`--identity` 语义**：binding 是可选的运行时路由偏好。匹配的 live binding 优先；没有匹配 binding 时，Server 会从 live runtime 注册表选择显式指定的 `(daemon, provider)`。binding 不会限制 identity 可用于哪些 provider。

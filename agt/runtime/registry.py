@@ -244,45 +244,6 @@ def _claude_default_adapter() -> ProviderAdapter:
 _REGISTRY: dict[str, ProviderAdapter] = {
     "claude": _claude_adapter(),
     "codex": _codex_adapter(),
-    # cursor / copilot / qwen / kimi / opencode / openclaw share the
-    # Claude ``-p`` shape; explicit registry rows document that intent
-    # and let us flip individual fields per-provider later.
-    "cursor": ProviderAdapter(
-        command_builder=ClaudeCommandBuilder(),
-        session_locator=None,
-        stream_sink_factory=NoopSink,
-        resume_rejection_detector=GenericResumeRejectionDetector(),
-    ),
-    "copilot": ProviderAdapter(
-        command_builder=ClaudeCommandBuilder(),
-        session_locator=None,
-        stream_sink_factory=NoopSink,
-        resume_rejection_detector=GenericResumeRejectionDetector(),
-    ),
-    "qwen": ProviderAdapter(
-        command_builder=ClaudeCommandBuilder(),
-        session_locator=None,
-        stream_sink_factory=NoopSink,
-        resume_rejection_detector=GenericResumeRejectionDetector(),
-    ),
-    "kimi": ProviderAdapter(
-        command_builder=ClaudeCommandBuilder(),
-        session_locator=None,
-        stream_sink_factory=NoopSink,
-        resume_rejection_detector=GenericResumeRejectionDetector(),
-    ),
-    "opencode": ProviderAdapter(
-        command_builder=ClaudeCommandBuilder(),
-        session_locator=None,
-        stream_sink_factory=NoopSink,
-        resume_rejection_detector=GenericResumeRejectionDetector(),
-    ),
-    "openclaw": ProviderAdapter(
-        command_builder=ClaudeCommandBuilder(),
-        session_locator=None,
-        stream_sink_factory=NoopSink,
-        resume_rejection_detector=GenericResumeRejectionDetector(),
-    ),
 }
 
 

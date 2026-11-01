@@ -41,12 +41,6 @@ class KnownAgent:
 KNOWN_AGENTS: list[KnownAgent] = [
     KnownAgent("claude", "claude", "Claude Code", stream_format="claude_stream_json"),
     KnownAgent("codex", "codex", "Codex CLI", cli_style="codex"),
-    KnownAgent("cursor-agent", "cursor", "Cursor Agent"),
-    KnownAgent("copilot", "copilot", "GitHub Copilot"),
-    KnownAgent("qwen", "qwen", "Qwen CLI"),
-    KnownAgent("kimi", "kimi", "Kimi CLI"),
-    KnownAgent("opencode", "opencode", "OpenCode CLI"),
-    KnownAgent("openclaw", "openclaw", "OpenClaw CLI"),
 ]
 
 

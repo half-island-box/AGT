@@ -68,8 +68,7 @@ _PROGRESS_FLUSH_INTERVAL = 0.5
 
 # ── Legacy text-regex helpers ────────────────────────────────────────
 #
-# Kept as a fallback for providers on the pipe-text path (cursor /
-# copilot / qwen / kimi / opencode / openclaw and any future provider
+# Kept as a fallback for providers on the pipe-text path (any provider
 # without a streaming implementation). Phase 5 streaming providers
 # (Claude Code) extract session_id / resume-rejection from structured
 # event fields instead — these regexes are not consulted on the

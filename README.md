@@ -5,9 +5,8 @@
 [中文文档](README_zh.md) | **English**
 
 `agt` is a local bridge and orchestrator for AI coding-agent CLIs. It gives
-Claude Code, Codex, Cursor Agent, GitHub Copilot, Qwen, Kimi, OpenCode,
-OpenClaw, and custom CLIs one interface for chat, queued execution, multi-agent
-workflows, artifacts, and distributed routing.
+Claude Code, Codex, and custom CLIs one interface for chat, queued execution,
+multi-agent workflows, artifacts, and distributed routing.
 
 > **Status:** early and under active development. The CLI, server, daemon,
 > Goal orchestration, and SOP workflows are usable; the desktop client is still

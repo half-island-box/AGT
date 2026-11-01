@@ -106,18 +106,6 @@ def test_codex_legacy_fallback_carries_sandbox_args():
     assert fallback.permission_args == ("--approve-for-me",)
 
 
-def test_non_claude_adapters_have_empty_permission_args():
-    """Providers without a headless write-bypass need MUST NOT receive any
-    permission/sandbox flags.
-
-    cursor/copilot/qwen/... reuse ``ClaudeCommandBuilder`` for their ``-p``
-    shape but are not Claude Code — injecting ``--permission-mode`` would
-    make them fail to start.
-    """
-    for provider in ("cursor", "copilot", "qwen", "kimi", "opencode", "openclaw"):
-        assert get_adapter(provider).permission_args == (), provider
-
-
 def test_unknown_provider_has_empty_permission_args():
     """The fallback adapter must not inject Claude-only flags either."""
     assert get_adapter("not-a-real-provider-xyz").permission_args == ()

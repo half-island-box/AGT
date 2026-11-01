@@ -50,12 +50,6 @@
 KNOWN_AGENTS: list[KnownAgent] = [
     KnownAgent("claude", "claude", "Claude Code", stream_format="claude_stream_json"),
     KnownAgent("codex", "codex", "Codex CLI", cli_style="codex"),
-    KnownAgent("cursor-agent", "cursor", "Cursor Agent"),
-    KnownAgent("copilot", "copilot", "GitHub Copilot"),
-    KnownAgent("qwen", "qwen", "Qwen CLI"),
-    KnownAgent("kimi", "kimi", "Kimi CLI"),
-    KnownAgent("opencode", "opencode", "OpenCode CLI"),
-    KnownAgent("openclaw", "openclaw", "OpenClaw CLI"),
     KnownAgent("myagent", "myagent", "My Agent CLI"),  # ← 新增
 ]
 ```
@@ -157,8 +151,6 @@ class MyAgentStreamSink(StreamingSink):
 _REGISTRY: dict[str, ProviderAdapter] = {
     "claude": _claude_adapter(),
     "codex": _codex_adapter(),
-    "cursor": ..., "copilot": ..., "qwen": ..., "kimi": ...,
-    "opencode": ..., "openclaw": ...,
     "myagent": ProviderAdapter(                  # ← 新增一行
         command_builder=MyAgentCommandBuilder(),
         session_locator=None,
@@ -210,7 +202,7 @@ from agt.runtime.mcp_config import GlobalTomlMcpConfig, ProjectJsonMcpConfig
 - 全局文件（TOML）profile 只在目标文件上加/删自己的 `[mcp_servers.agt-catalog]` 表，**绝不整文件备份/还原**，并用 fcntl 锁防止同机并发互相踩。
 - 认证配置只引用环境变量名 `AGT_TASK_TOKEN`：Claude 写 `Authorization: Bearer ${AGT_TASK_TOKEN}`，Codex 写 `bearer_token_env_var = "AGT_TASK_TOKEN"`。真实 token 由 executor 按 Step 注入，不能写入共享配置文件。
 - **Codex 的额外一把开关**：Streamable-HTTP 还得用户自己在 `~/.codex/config.toml` 里开一次 `experimental_use_rmcp_client = true`。这是用户级策略，profile **故意不写**——文档里提示用户即可。其他 provider 若也有类似的"总开关"，同理不要替你写。
-- `mcp_profile` 缺省是 `None`（claude/codex 之外的内置 provider 都是），dispatcher 对 `None` 直接 no-op，所以没接的 provider 行为不受影响。
+- `mcp_profile` 缺省是 `None`，dispatcher 对 `None` 直接 no-op，所以没接的 provider 行为不受影响。
 
 ### 步骤 4 — 验证
 
@@ -341,7 +333,7 @@ class ClaudeV2StreamSink(StreamingSink):
 
 ```bash
 # 这条 grep 必须为空（除注释和类型注解外）
-grep -nE '"claude"|"codex"|"cursor"|"myagent"' agt/task/executor.py
+grep -nE '"claude"|"codex"|"myagent"' agt/task/executor.py
 ```
 
 如果返回的是只有 `# Claude` 注释之类，就是通过。如果有 `provider == "claude"` 这种 if/elif，就破了扩展性闭环。

@@ -28,7 +28,7 @@
   $ agt server --help
   $ agt daemon --help
   ```
-- 一台或多台机器上能跑 agent CLI（claude / codex / copilot 任意）
+- 一台或多台机器上能跑 agent CLI（claude / codex 任意）
 
 ---
 
