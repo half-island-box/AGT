@@ -34,18 +34,10 @@ Codex、OpenCode、Pi 以及自定义 CLI 提供统一接口，覆盖会话、�
 ### 通过 pip 安装
 
 ```bash
-python -m pip install agt-team
+pip install agt-team --upgrade
 
-agt probe
-agt run --provider claude --prompt "总结当前仓库"
-```
-
-如需队列执行和编排能力，启动 Server 与本地 Daemon：
-
-```bash
-agt server start --detach
-agt daemon start --detach
-agt task submit --prompt "Say hello" --provider claude
+agt server start -d
+agt daemon start -d
 ```
 
 ### 从源码安装
@@ -55,8 +47,9 @@ git clone https://github.com/half-island-box/agent-team.git
 cd agent-team
 uv sync
 
-uv run agt probe
-uv run agt run --provider claude --prompt "总结当前仓库"
+uv tool install -e .
+agt server start -d
+agt daemon start -d
 ```
 
 ## 可视化界面
