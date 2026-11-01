@@ -72,3 +72,7 @@ AGT is under active development. The VS Code extension is an early client for an
 ## Feedback
 
 Issues and contributions are welcome in the [agent-team repository](https://github.com/half-island-box/agent-team).
+
+## License
+
+MIT — see [LICENSE](LICENSE).
