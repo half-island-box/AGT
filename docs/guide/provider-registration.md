@@ -2,7 +2,7 @@
 
 > 实战指南：在 AGT 里接入一个新的 agent CLI（`myagent` 之类）。
 >
-> 前提：阅读过 [phase5-local-streaming-design.md](phase5-local-streaming-design.md) 了解 Provider 适配层四件套的抽象。本文档只讲**怎么落地一个新 provider**。
+> 本文介绍如何基于 Provider 适配层的 `CommandBuilder`、`ResumeRejectionDetector`、`SessionLocator` 和 `StreamingSink` 接入一个新 provider。
 >
 > **核心原则**：新加 provider = 改注册类文件。`executor.py` / `cli/main.py` / `daemon/*` 全部零改动。
 
@@ -23,7 +23,7 @@
 
 ## 1. Provider 适配层四件套速查
 
-每个 adapter 在 [phase5-local-streaming-design.md §3](../impl/phase5-local-streaming-design.md) 里有详细定义，这里只列**何时必须**：
+每个 adapter 的职责如下：
 
 | Adapter | 必须？ | 没实现时 |
 |---|---|---|
@@ -339,7 +339,7 @@ class ClaudeV2StreamSink(StreamingSink):
 
 ## 5. 验证扩展性闭环
 
-客观验收标准（[provider-extension spec §Requirement: executor 内不出现 provider 字符串](../changes/phase5-local-streaming-provider-extension/spec.md)）：
+客观验收标准：
 
 ```bash
 # 这条 grep 必须为空（除注释和类型注解外）
@@ -381,8 +381,8 @@ grep -nE '"claude"|"codex"|"myagent"' agt/task/executor.py
 
 | 文档 | 用途 |
 |---|---|
-| [phase5-local-streaming-design.md](phase5-local-streaming-design.md) | 设计文档：抽象、决策、风险 |
-| [phase5-local-streaming-provider-extension spec](../changes/phase5-local-streaming-provider-extension/spec.md) | 形式化需求（测试可对照） |
+| [commands.md](commands.md) | CLI 行为与环境变量参考 |
+| [quick_start.md](quick_start.md) | 本地与远程部署指南 |
 | **本文档** | 实战指南：新加 provider 的步骤 |
 
 遇到问题先查本文档的"检查清单"；想知道"为什么这样设计"回 design.md；想跑形式化验证看 spec。

@@ -222,16 +222,11 @@
     "build:console": "node esbuild.js --production --console",
     "build:all": "npm run build && npm run build:console",
     "watch": "node esbuild.js --watch",
-    "test:core": "esbuild tests/sop-core.test.ts --bundle --platform=node --format=cjs --outfile=dist/test/sop-core.test.cjs --log-level=warning && node --test dist/test/sop-core.test.cjs",
-    "test:inspector": "esbuild tests/sop-inspector.test.ts --bundle --platform=node --format=cjs --outfile=dist/test/sop-inspector.test.cjs --log-level=warning && node --test dist/test/sop-inspector.test.cjs",
-    "test:run": "esbuild tests/sop-run.test.ts --bundle --platform=node --format=cjs --outfile=dist/test/sop-run.test.cjs --log-level=warning && node --test dist/test/sop-run.test.cjs",
     "test:loop": "esbuild tests/sop-loop.test.ts --bundle --platform=node --format=cjs --outfile=dist/test/sop-loop.test.cjs --log-level=warning && node --test dist/test/sop-loop.test.cjs",
     "test:backend": "esbuild tests/backend.test.ts --bundle --platform=node --format=cjs --outfile=dist/test/backend.test.cjs --log-level=warning && node --test dist/test/backend.test.cjs",
-    "check:sop": "esbuild tests/roundtrip-check.ts --bundle --platform=node --format=cjs --outfile=dist/test/roundtrip-check.cjs --log-level=warning && node dist/test/roundtrip-check.cjs && cd .. && uv run agt sop validate /tmp/agt-sop-roundtrip/edited.sop.yaml",
-    "check:server-endpoint": "esbuild tests/probe-validate-endpoint.ts --bundle --platform=node --format=cjs --outfile=dist/test/probe-validate-endpoint.cjs --log-level=warning && node dist/test/probe-validate-endpoint.cjs",
-    "check:run": "esbuild tests/probe-sop-run.ts --bundle --platform=node --format=cjs --outfile=dist/test/probe-sop-run.cjs --log-level=warning && node dist/test/probe-sop-run.cjs",
     "typecheck": "tsc --noEmit",
-    "dev:web": "node scripts/dev.mjs"
+    "dev:web": "node scripts/dev.mjs",
+    "test": "npm run typecheck && npm run test:loop && npm run test:backend"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

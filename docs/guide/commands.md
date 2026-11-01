@@ -65,7 +65,7 @@ $ agt probe
 ### 示例
 
 ```bash
-# 默认 provider (claude) — 本地流式输出（Phase 5）
+# 默认 provider (claude) — 本地流式输出
 $ agt run -p "say hi"
 🚀 Executing with claude...
 Hi there, friend!      # ← 实时逐 token 打印，不再等执行完一次性吐
@@ -89,8 +89,8 @@ $ agt run --identity did:agt:reviewer --provider codex --daemon d1 -p "..."
 
 > **`--identity` 语义**：binding 是可选的运行时路由偏好。匹配的 live binding 优先；没有匹配 binding 时，Server 会从 live runtime 注册表选择显式指定的 `(daemon, provider)`。binding 不会限制 identity 可用于哪些 provider。
 > **本地限制**：不带 `--daemon` 时 `--identity` 会被拒绝，因为 identity 的 runtime 解析和注入内容都由 Server 提供。
-> **本地流式（Phase 5）**：Claude Code 默认启用 `--output-format stream-json --verbose`；codex 通过 `codex app-server`（JSON-RPC over stdio）驱动同一事件通道；OpenCode 通过 `opencode run --standalone --format json --thinking` 输出 JSON-Lines 事件；Pi 通过 `pi --approve --mode json` 输出 JSON-Lines 事件。thinking / 工具调用 / token 用量都会实时上报，`TaskResult.stdout` 仍存拼接后的纯文本，下游展示 / 落库链路零改动。OpenCode 的文本按完整消息段到达（不是逐 token），相邻段之间自动空行；Pi 的文本按 delta 到达，跨 assistant 消息自动空行。旧版 codex 没有 `app-server` 时自动回退到 `codex exec` pipe 文本；可用环境变量 `AGT_CODEX_TRANSPORT=exec|app-server` 强制选择。OpenCode 用 `AGT_OPENCODE_MODEL=<provider/model>` 指定模型（headless 环境没有 UI 选模型）；Pi 用 `AGT_PI_MODEL`（配合可选的 `AGT_PI_PROVIDER`）指定模型，`AGT_PI_THINKING` 指定 thinking 级别。Pi 的 `--approve` 用于 headless 下加载项目 `.pi/mcp.json`。
-> **远程流式（Phase 5 remote）**：远程 `--daemon` / `--identity` 路径同样实时流式——daemon 每 ~0.5s 采样一次累计 stdout 前缀，经 WS/HTTP 上报到 Server，Server 再以 SSE 推给 CLI 逐字打印（`snapshot → delta* → done`）。读超时自动重连一次，仍无进展则降级为 `wait_task` 轮询兜底（兜底只补打未打印的尾部，不整段重打）。
+> **本地流式**：Claude Code 默认启用 `--output-format stream-json --verbose`；codex 通过 `codex app-server`（JSON-RPC over stdio）驱动同一事件通道；OpenCode 通过 `opencode run --standalone --format json --thinking` 输出 JSON-Lines 事件；Pi 通过 `pi --approve --mode json` 输出 JSON-Lines 事件。thinking / 工具调用 / token 用量都会实时上报，`TaskResult.stdout` 仍存拼接后的纯文本，下游展示 / 落库链路零改动。OpenCode 的文本按完整消息段到达（不是逐 token），相邻段之间自动空行；Pi 的文本按 delta 到达，跨 assistant 消息自动空行。旧版 codex 没有 `app-server` 时自动回退到 `codex exec` pipe 文本；可用环境变量 `AGT_CODEX_TRANSPORT=exec|app-server` 强制选择。OpenCode 用 `AGT_OPENCODE_MODEL=<provider/model>` 指定模型（headless 环境没有 UI 选模型）；Pi 用 `AGT_PI_MODEL`（配合可选的 `AGT_PI_PROVIDER`）指定模型，`AGT_PI_THINKING` 指定 thinking 级别。Pi 的 `--approve` 用于 headless 下加载项目 `.pi/mcp.json`。
+> **远程流式**：远程 `--daemon` / `--identity` 路径同样实时流式——daemon 每 ~0.5s 采样一次累计 stdout 前缀，经 WS/HTTP 上报到 Server，Server 再以 SSE 推给 CLI 逐字打印（`snapshot → delta* → done`）。读超时自动重连一次，仍无进展则降级为 `wait_task` 轮询兜底（兜底只补打未打印的尾部，不整段重打）。
 
 ### 退出码
 
@@ -325,7 +325,7 @@ http://127.0.0.1:8420/
 
 **MCP 工具（运行时目录 + Goal spawn）**：Server 启动时在同一端口挂载 Streamable HTTP 端点 `http://127.0.0.1:8420/mcp/`。`list_runtimes` 用于查询在线 daemon/provider；`spawn_subagents` 只允许运行中的 Goal Step 调用，服务端通过 `Authorization: Bearer ${AGT_TASK_TOKEN}` 反查当前 Step 和 Job，不接受 agent 自报 parent job。每次调用会立即创建子 Job，并通过 `(parent_step_id, idempotency_key)` 防止重试重复创建。远程 daemon 的 loopback 代理会把工具调用和 token 经 reverse-dial 转发到 Server。Claude Code 使用项目 `.mcp.json`，Codex 使用全局 `~/.codex/config.toml` 的 `[mcp_servers.agt-catalog]` 和 `bearer_token_env_var = "AGT_TASK_TOKEN"`，OpenCode 使用项目 `opencode.json` 的 `mcp.servers.agt-catalog`（`type: "remote"`，header 里写 `Bearer {env:AGT_TASK_TOKEN}`），Pi 使用项目 `.pi/mcp.json` 的 `mcpServers.agt-catalog`（HTTP `url`，header 里写 `Bearer ${AGT_TASK_TOKEN}`；headless 运行通过 `--approve` 加载）；未接 MCP 的 provider 继续使用 `AGT-SPAWN`。给新 provider 接 MCP 见 [provider-registration](provider-registration.md)。
 
-**Phase 3 起，Server 与 Daemon 必须使用同一个 `AGT_SERVER_SECRET`**。`agt server start` 首次运行会自动生成并写入 `~/.agt/server.secret`（`0600`），Server 和 Daemon 都按“环境变量 > `~/.agt/server.secret` > 空”加载，因此正常启动时无需 export：
+**Server 与 Daemon 必须使用同一个 `AGT_SERVER_SECRET`**。`agt server start` 首次运行会自动生成并写入 `~/.agt/server.secret`（`0600`），Server 和 Daemon 都按“环境变量 > `~/.agt/server.secret` > 空”加载，因此正常启动时无需 export：
 
 ```bash
 $ agt server start
@@ -404,7 +404,7 @@ bundle 缺失（新克隆、切分支），`agt server start` 会在启动前自
 
 修改 webview 源码后仍需手动重新构建并提交 bundle。
 
-### Daemon 接入方式（Phase 3.2+）
+### Daemon 接入方式
 
 - **本地 daemon**（与 Server 同一台机器）继续走 HTTP，不需要 WS。
 - **远程 daemon**（跨机器）通过 WebSocket 接入：
@@ -737,7 +737,7 @@ Removed settings; /home/user/.agt/daemon.json was deleted because no managed val
   "ws_port": 8422,
   "daemon_id": "8f3c1d0e-…",
   "daemon_url": "ws://1.2.3.4:8422",
-  "server_url": "http://10.0.0.2:8420"
+  "server_url": "http://203.0.113.20:8420"
 }
 ```
 
@@ -1482,7 +1482,7 @@ agt context read --key shared/api-schema --no-json
 
 ## `agt identity`
 
-> **Phase 4 Step 1** —— Agent 身份管理。一个 identity 是跨任务持久化的 agent 人设（名字、描述、能力标签），用 DID 标识：`did:agt:<slug>`。创建时会落盘一份 `AGENTS.md`（见下文"文件位置"）。
+> **Agent 身份管理** ——一个 identity 是跨任务持久化的 agent 人设（名字、描述、能力标签），用 DID 标识：`did:agt:<slug>`。创建时会落盘一份 `AGENTS.md`（见下文"文件位置"）。
 
 所有子命令都支持 `--server-url`（默认 `http://127.0.0.1:8420` 或 `AGT_SERVER_URL` 环境变量），下表不再重复。
 
@@ -1711,7 +1711,7 @@ $ curl -X POST http://127.0.0.1:8420/api/agent/callback \
 
 ## `agt artifact`
 
-> **Phase 2/3 打通链路** —— 查看和下载 agent 声明的交付物（artifact）。产物由 agent 放入 `.agt/outputs/`（可选 `manifest.json` 描述），Server 登记 lineage / mime / 摘要 / 状态，公开引用为 `agt-artifact://<id>`。此命令让本地用户能拿到**任意会话**（含远程 daemon 的会话）的产物。
+> **产物链路** —— 查看和下载 agent 声明的交付物（artifact）。产物由 agent 放入 `.agt/outputs/`（可选 `manifest.json` 描述），Server 登记 lineage / mime / 摘要 / 状态，公开引用为 `agt-artifact://<id>`。此命令让本地用户能拿到**任意会话**（含远程 daemon 的会话）的产物。
 
 所有子命令都支持 `--server-url`（默认 `http://127.0.0.1:8420` 或 `AGT_SERVER_URL` 环境变量），下表不再重复。
 
@@ -1794,7 +1794,7 @@ $ agt artifact get --session abc-1234… --daemon=daemon-cloud-01 --out-dir ./dl
 典型的三终端工作流：
 
 ```bash
-# 一次性：生成 Server 与 Daemon 共享的 HMAC 密钥（Phase 3 起必须）
+# 一次性：生成 Server 与 Daemon 共享的 HMAC 密钥
 $ agt server init
 # ↑ 未配置 secret 时 `agt server start` 会提示运行该命令；
 # ↑ 也可以手动 export AGT_SERVER_SECRET=...，优先级高于文件。
@@ -1830,9 +1830,9 @@ $ agt daemon stop
 | `AGT_LISTEN_MODE`        | `0`                     | 设为 `1` 时 daemon 监听固定端口等 Server 拨入（reverse-dial）。可持久化到 `~/.agt/daemon.json` |
 | `AGT_DAEMON_WS_PORT`     | `8422`                  | reverse-dial 监听端口；也可写入 `~/.agt/daemon.json` 的 `ws_port` |
 | `AGT_DAEMONS_FILE`       | `~/.agt/daemons`        | 反向拨号目标列表文件路径（Server 与 daemon 共用解析逻辑） |
-| `AGT_SERVER_SECRET`      | —                        | **Phase 3 起必须**。Server 与 Daemon 共享的 HMAC 密钥，用于签发 `AGT_TASK_TOKEN`。优先从环境变量读取，未设置则回退到 `~/.agt/server.secret`。`agt server start` 首次运行会自动生成 |
+| `AGT_SERVER_SECRET`      | —                        | Server 与 Daemon 共享的 HMAC 密钥，用于签发 `AGT_TASK_TOKEN`。优先从环境变量读取，未设置则回退到 `~/.agt/server.secret`。`agt server start` 首次运行会自动生成 |
 | `AGT_DAEMON_LOCAL_TOKEN` | 随机（每启动一次轮换）    | 可选。固定后所有 spawn 出去的子进程使用同一 token。随机时每次 daemon 重启自动轮换                                                                                   |
-| `AGT_USE_WS_CLAIM`       | `0`                     | **Phase 3.3 起 opt-in**。设为 `1` 时远程 daemon 通过 WS（`ws://<server>/ws/daemon`）走 WS-first claim，HTTP 仅作 fallback；默认 `0` 维持 HTTP-only 行为 |
+| `AGT_USE_WS_CLAIM`       | `0`                     | **实验性 opt-in**。设为 `1` 时远程 daemon 通过 WS（`ws://<server>/ws/daemon`）走 WS-first claim，HTTP 仅作 fallback；默认 `0` 维持 HTTP-only 行为 |
 | `AGT_DEVICE_NAME`        | hostname                  | 设备显示名                                                                                                                                                          |
 | `AGT_RUNTIME_NAME`       | —                        | 覆盖 Runtime 名称                                                                                                                                                   |
 | `AGT_MAX_CONCURRENT` | `1` | 最大并发 agent 子进程数；优先级高于 `~/.agt/daemon.json` |

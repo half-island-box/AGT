@@ -36,7 +36,7 @@ const daemons: DaemonInfo[] = [
   {
     daemon_id: 'dev-box-2',
     daemon_name: null,
-    device_name: '192.168.1.24',
+    device_name: '203.0.113.24',
     providers: [
       { provider: 'kimi', name: 'Kimi CLI', version: '1.2.3', status: 'online', last_seen: '2026-09-15 09:59:58' },
       { provider: 'codex', name: 'Codex CLI', version: '0.20.0', status: 'online', last_seen: '2026-09-15 09:59:58' },
@@ -44,13 +44,13 @@ const daemons: DaemonInfo[] = [
     runtime_count: 2,
     last_seen: '2026-09-15 09:59:58',
     online: true,
-    url: 'ws://192.168.1.24:0/rev',
+    url: 'ws://203.0.113.24:0/rev',
     capabilities: ['rust', 'review'],
   },
   {
     daemon_id: 'ci-runner',
     daemon_name: null,
-    device_name: '10.0.4.11',
+    device_name: '203.0.113.11',
     providers: [
       { provider: 'opencode', name: 'OpenCode', version: '0.8.0', status: 'offline', last_seen: '2026-09-15 08:02:00' },
     ],
@@ -139,8 +139,8 @@ let daemonConfigInfo: DaemonConfigInfo = {
 const runtimes: RuntimeInfo[] = [
   { name: 'Claude Code', type: 'claude', version: '2.1.266', status: 'online', device_name: 'local', daemon_id: 'dev-box-1', daemon_name: '本地开发机' },
   { name: 'Codex CLI', type: 'codex', version: '0.149.0', status: 'online', device_name: 'local', daemon_id: 'dev-box-1', daemon_name: '本地开发机' },
-  { name: 'Codex CLI', type: 'codex', version: '0.147.0', status: 'online', device_name: '192.168.1.24', daemon_id: 'dev-box-2', daemon_name: null },
-  { name: 'Kimi CLI', type: 'kimi', version: '1.2.3', status: 'online', device_name: '192.168.1.24', daemon_id: 'dev-box-2', daemon_name: null },
+  { name: 'Codex CLI', type: 'codex', version: '0.147.0', status: 'online', device_name: '203.0.113.24', daemon_id: 'dev-box-2', daemon_name: null },
+  { name: 'Kimi CLI', type: 'kimi', version: '1.2.3', status: 'online', device_name: '203.0.113.24', daemon_id: 'dev-box-2', daemon_name: null },
 ];
 
 let identities: IdentityWithBindings[] = [
@@ -1353,7 +1353,7 @@ export async function mockCall<T>(_method: string, params?: Record<string, unkno
     case 'pairingAddDaemon': {
       const p = (params ?? {}) as { name?: string; url?: string; capabilities?: string };
       const name = p.name || 'new-daemon';
-      const url = p.url || 'ws://192.168.1.30:8422';
+      const url = p.url || 'ws://203.0.113.30:8422';
       const daemonId = `mock-${Math.random().toString(16).slice(2, 10)}`;
       const code = `agt1.${btoa(JSON.stringify({ v: 1, url, id: daemonId, name })).replaceAll('=', '')}`;
       return {
@@ -1388,7 +1388,7 @@ export async function mockCall<T>(_method: string, params?: Record<string, unkno
     case 'addDaemon': {
       const p = (params ?? {}) as { name?: string; url?: string; capabilities?: string };
       const name = p.name ?? 'new-daemon';
-      const url = p.url ?? 'ws://192.168.1.30:8422';
+      const url = p.url ?? 'ws://203.0.113.30:8422';
       const caps = p.capabilities?.trim();
       const entry = caps ? `${name} ${url} ${caps}` : `${name} ${url}`;
       return {

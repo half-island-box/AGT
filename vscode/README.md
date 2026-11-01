@@ -16,7 +16,7 @@ Pick a daemon, agent runtime, and optional identity, then start or resume a pers
 
 Create SOPs from a template or open an existing YAML file with the visual editor. Arrange tasks as a DAG, connect outputs to downstream inputs, select identities and execution directories, validate against the server, then run the workflow and inspect per-node status and logs without switching to a terminal.
 
-![Visual SOP editor](SOP.png)
+![Visual SOP editor](sop-editor.png)
 
 ### Orchestrate goal-driven work
 
@@ -26,8 +26,6 @@ Submit an objective to Goal mode and follow its job tree as the root agent deleg
 
 See which daemons and coding-agent runtimes are online, refresh targets, and route work to the machine or provider you want. Remote daemons can connect back to the server through NAT-friendly reverse-dial WebSocket connections.
 
-![Daemons and agent runtimes](daemons%27%20agents.png)
-
 ### Track token usage
 
 The **Usage** view sits below the daemon tree. It summarizes input, output, cache-read tokens and request counts for the selected agent and time range, with a daemon × agent × model breakdown, so you can see where a workspace's usage comes from without leaving the editor.
@@ -36,7 +34,7 @@ The **Usage** view sits below the daemon tree. It summarizes input, output, cach
 
 The settings view exposes server and daemon lifecycle controls, startup commands, remote-daemon pairing, daemon execution settings, identity management, and optional daemon/provider routing preferences.
 
-![AGT management settings](management.png)
+![AGT settings and daemon management](settings.png)
 
 ## Highlights
 

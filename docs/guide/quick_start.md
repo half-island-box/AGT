@@ -1,7 +1,7 @@
 # agt 快速启动指南
 
 > 跑起来一个 Server + 一个（或多个）Daemon 的最短路径。
-> 涵盖本地部署与远程部署，覆盖 Phase 3（WS-RPC + Provider 路由 + heartbeat 同步）+ Phase 5（本地流式输出 + Provider 适配层）。
+> 涵盖本地部署、远程部署、流式输出和 Provider 路由。
 
 完整命令参考见 [`commands.md`](commands.md)；本文档只讲**端到端怎么跑起来**。
 
@@ -99,7 +99,7 @@ $ agt runtime list    # 看 daemon 注册的 agent
 > `agt-team` 源码工作区中的 `agt`；未找到时弹窗询问，用户确认后把最新版
 > `agt-team` 安装到插件私有 venv 并启动 Server，不会修改系统 Python。
 
-> **Phase 5 本地流式**：直接跑 `agt run -p "..."` / `agt chat`（**不带 `--daemon`**）会在终端看到流式 agent 输出。Claude Code 默认走 `--output-format stream-json --verbose`，codex 走 `codex app-server` 的 JSON-RPC 流，opencode 走 `run --standalone --format json --thinking` 的 JSON-Lines 事件（thinking / 工具调用 / token 用量与 claude 同通道），pi 走 `--approve --mode json` 的 JSON-Lines 事件（文本按 delta，thinking / 工具调用 / 用量同通道）；session_id / resume_rejected 从结构化字段读取；没有 `app-server` 的旧版 codex 自动回退到 `codex exec` pipe 文本，其它 provider 仍走老路径。opencode 的文本按完整消息段到达（非逐 token），headless 下用 `AGT_OPENCODE_MODEL=<provider/model>` 指定模型；pi 用 `AGT_PI_MODEL`（可选 `AGT_PI_PROVIDER`）和 `AGT_PI_THINKING`。详见 [commands.md `agt run`](commands.md#agt-run)。
+> **本地流式**：直接跑 `agt run -p "..."` / `agt chat`（**不带 `--daemon`**）会在终端看到流式 agent 输出。Claude Code 默认走 `--output-format stream-json --verbose`，codex 走 `codex app-server` 的 JSON-RPC 流，opencode 走 `run --standalone --format json --thinking` 的 JSON-Lines 事件（thinking / 工具调用 / token 用量与 claude 同通道），pi 走 `--approve --mode json` 的 JSON-Lines 事件（文本按 delta，thinking / 工具调用 / 用量同通道）；session_id / resume_rejected 从结构化字段读取；没有 `app-server` 的旧版 codex 自动回退到 `codex exec` pipe 文本，其它 provider 仍走老路径。opencode 的文本按完整消息段到达（非逐 token），headless 下用 `AGT_OPENCODE_MODEL=<provider/model>` 指定模型；pi 用 `AGT_PI_MODEL`（可选 `AGT_PI_PROVIDER`）和 `AGT_PI_THINKING`。详见 [commands.md `agt run`](commands.md#agt-run)。
 
 > **SOP 静态流水线**：把确定的多 agent 流程写成 YAML DAG（`agt sop validate /
 > submit / run / runs / status / log`）。节点按 `depends_on` 依赖门控激活，`${node.output}`
@@ -122,7 +122,7 @@ $ agt runtime list    # 看 daemon 注册的 agent
 > 事实和 Artifact 引用。新 Step 会自动获得有预算的 ContextBrief；非 MCP Agent
 > 可使用 `AGT-CONTEXT` 写入，并在子进程内运行 `agt context read` 读取。用户可用
 > `agt goal context <root_job_id>` 观察整次运行。详见
-> [共享上下文方案](../impl/goal-shared-context-design.md)。
+> [commands.md `agt context`](commands.md#agt-context)。
 
 > **动态路由与取消**：带 identity 的子任务会按「能力 + 亲和 + 负载」在多台在线 daemon 间
 > 动态落位（无候选时回退父 daemon）。identity binding 是可选的调度偏好，不是使用
@@ -717,14 +717,12 @@ export AGT_DAEMON_WS_PORT=8422           # 可选；监听端口，默认 8422
 | `~/.agt/agt.db`        | Server          | SQLite 库（chat / sop / goal 的运行、步骤和 session 信息） | 删掉后重启 server 自动重建   |
 | `~/.agt/daemon.pid`    | Daemon          | 当前 daemon 进程的 PID                                      | `agt daemon stop` 自动清理 |
 | `<cwd>/.agt/sessions.json` | 本机直连 chat | 仅 bare `agt chat` 使用的本地 session 索引                   | 本机 chat 不再需要时可删     |
-| `~/.agt/sessions.json` | 旧版（Phase 1） | 不再自动读写，仅保留历史迁移用途                             | 可手动迁移后删除             |
+| `~/.agt/sessions.json` | 旧版 | 不再自动读写，仅保留历史迁移用途                             | 可手动迁移后删除             |
 
 ---
 
 ## 10. 下一步
 
 完整命令清单 → [`commands.md`](commands.md)
-
-实现细节 → [`../impl/phase3-design.md`](../impl/phase3-design.md)
 
 要开发 / 改代码 → 仓库根目录的 [`../../README.md`](../../README.md)
