@@ -44,6 +44,11 @@
         {
           "id": "agt.daemons",
           "name": "Daemons"
+        },
+        {
+          "id": "agt.usage",
+          "name": "Usage",
+          "type": "webview"
         }
       ],
       "agt-sidebar": [

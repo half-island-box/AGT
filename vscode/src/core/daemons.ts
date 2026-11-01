@@ -1,6 +1,33 @@
 import { isLocalUrl } from './sop/run';
 import type { DaemonInfo } from './types';
 
+/** One agent provider selectable in the usage view's filter. */
+export interface AgentOption {
+  provider: string;
+  label: string;
+}
+
+/**
+ * Union of the runtime providers probed on every known daemon.
+ *
+ * Daemons report their last-known providers even while offline, so the
+ * filter choices stay stable across a daemon restart. Rows are deduped by
+ * provider key; the first non-empty display name wins.
+ */
+export function agentOptionsFromDaemons(daemons: DaemonInfo[]): AgentOption[] {
+  const byProvider = new Map<string, AgentOption>();
+  for (const daemon of daemons) {
+    for (const runtime of daemon.providers ?? []) {
+      if (!runtime.provider || byProvider.has(runtime.provider)) continue;
+      byProvider.set(runtime.provider, {
+        provider: runtime.provider,
+        label: runtime.name?.trim() || runtime.provider,
+      });
+    }
+  }
+  return [...byProvider.values()].sort((a, b) => a.label.localeCompare(b.label));
+}
+
 /**
  * A daemon on this machine shares the extension host's filesystem.
  *

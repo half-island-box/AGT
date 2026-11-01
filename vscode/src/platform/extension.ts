@@ -10,6 +10,7 @@ import type { GoalBridgeContext } from './goal-panel';
 import { looksLikeSop } from '../core/sop/document';
 import type { SopBridgeContext } from './sop-editor-panel';
 import { WorkspacePanel } from './workspace-panel';
+import { UsagePanel } from './usage-panel';
 
 interface AgtConfig {
   serverUrl: string;
@@ -67,6 +68,8 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   let workspaceView: WorkspacePanel;
+  let usageView: UsagePanel;
+  let lastOnline: boolean | null = null;
 
   /**
    * Clicking a daemon or provider in the activity-bar tree jumps straight to
@@ -112,6 +115,13 @@ export function activate(context: vscode.ExtensionContext): void {
     tree.setServerInfo(lifecycle.state, config.serverUrl, lifecycle.latencyMs);
     statusbar.update(lifecycle.state, tree.daemonCount, language);
     workspaceView.notifyActive(bridgeContext);
+    // Usage lives in its own view; refetch only when the server comes up or
+    // goes down, not on every poll.
+    const onlineNow = lifecycle.state === 'online';
+    if (lastOnline !== null && lastOnline !== onlineNow) {
+      usageView.reload();
+    }
+    lastOnline = onlineNow;
   }
 
   const bridgeContext: BridgeContext = {
@@ -202,6 +212,11 @@ export function activate(context: vscode.ExtensionContext): void {
     goal: goalContext,
     settings: bridgeContext,
   });
+  usageView = new UsagePanel({
+    extensionUri: context.extensionUri,
+    lifecycle,
+    language: () => language,
+  });
 
   const pollTimer = setInterval(() => void refresh(), 15000);
 
@@ -239,6 +254,8 @@ export function activate(context: vscode.ExtensionContext): void {
       await refresh();
     }),
     vscode.window.registerWebviewViewProvider('agt.workspace', workspaceView),
+    vscode.window.registerWebviewViewProvider('agt.usage', usageView),
+    usageView,
     vscode.window.onDidChangeActiveTextEditor(() => workspaceView.notifyWorkspaceRoot()),
     vscode.workspace.onDidChangeWorkspaceFolders(() => workspaceView.notifyWorkspaceRoot()),
     vscode.workspace.onDidChangeConfiguration((e) => {
@@ -249,6 +266,7 @@ export function activate(context: vscode.ExtensionContext): void {
       language = config.language;
       lifecycle.updateOptions(config);
       workspaceView.notifyLanguage(config.language);
+      usageView.notifyLanguage(config.language);
       void refresh();
     }),
     { dispose: () => clearInterval(pollTimer) },

@@ -34,6 +34,7 @@ import type {
   SopValidation,
   TaskStatusInfo,
   TaskStreamEvent,
+  UsageSummary,
 } from './types';
 
 const DEFAULT_TIMEOUT_MS = 4000;
@@ -666,6 +667,24 @@ export class AgtApi {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * Aggregate token/cost usage for the usage view: totals, a time series,
+   * and a daemon × agent × model breakdown.
+   */
+  async usageSummary(input: {
+    agent?: string | null;
+    daemonId?: string | null;
+    from: string;
+    to: string;
+    bucket?: 'hour' | 'day' | 'month';
+  }): Promise<UsageSummary> {
+    const params = new URLSearchParams({ from: input.from, to: input.to });
+    if (input.agent) params.set('agent', input.agent);
+    if (input.daemonId) params.set('daemon_id', input.daemonId);
+    if (input.bucket) params.set('bucket', input.bucket);
+    return this.request<UsageSummary>(`/api/usage/summary?${params}`, {}, 10_000);
   }
 }
 

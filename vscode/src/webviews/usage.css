@@ -1,0 +1,161 @@
+/* ── Usage view: the console dashboard without the trend chart ─────── */
+
+body.agd-usage-body {
+  padding: 0 12px 16px;
+  background: var(--vscode-sideBar-background, #202020);
+}
+
+.agd-usage-view {
+  padding-top: 10px;
+}
+
+.agd-usage-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.agd-usage-head h2 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--vscode-sideBarTitle-foreground, var(--vscode-foreground, #cccccc));
+}
+
+.agd-usage-refresh {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex: none;
+  padding: 0;
+  border: 1px solid var(--vscode-input-border, #3a3a3a);
+  border-radius: 5px;
+  background: var(--vscode-button-secondaryBackground, #2a2a2a);
+  color: var(--vscode-button-secondaryForeground, #cccccc);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+.agd-usage-refresh:hover:not(:disabled) { filter: brightness(1.15); }
+.agd-usage-refresh:disabled { opacity: 0.45; cursor: default; }
+
+.agd-usage-filters {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.agd-usage-filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground, #8b8b8b);
+}
+.agd-usage-filter > span { flex: 0 0 auto; min-width: 30px; }
+.agd-usage-filter .agd-input {
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  padding: 0 6px;
+  font-size: 11px;
+}
+
+.agd-usage-cards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin-bottom: 14px;
+}
+
+.agd-usage-stat {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 8px 9px;
+  border: 1px solid var(--vscode-panel-border, #2e2e2e);
+  border-radius: 7px;
+  background: var(--vscode-editor-background, #1e1e1e);
+}
+
+.agd-usage-stat-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex: none;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--agd-color-info, #3794ff) 16%, transparent);
+  color: var(--agd-color-info, #3794ff);
+  font-size: 11px;
+}
+
+.agd-usage-stat-body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.agd-usage-stat-label {
+  font-size: 10px;
+  color: var(--vscode-descriptionForeground, #8b8b8b);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.agd-usage-stat-value {
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agd-usage-breakdown h4 {
+  margin: 0 0 6px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--vscode-foreground, #cccccc);
+}
+
+.agd-usage-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--vscode-panel-border, #2e2e2e);
+  border-radius: 7px;
+}
+
+.agd-usage-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+.agd-usage-table th,
+.agd-usage-table td {
+  padding: 5px 7px;
+  text-align: left;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--vscode-panel-border, #2e2e2e);
+}
+.agd-usage-table thead th {
+  color: var(--vscode-descriptionForeground, #8b8b8b);
+  font-weight: 600;
+  font-size: 10px;
+}
+.agd-usage-table tbody tr:last-child td { border-bottom: none; }
+
+.agd-usage-empty {
+  padding: 16px 8px;
+  text-align: center;
+  color: var(--vscode-descriptionForeground, #8b8b8b);
+  font-size: 11px;
+}
+.agd-usage-empty .agd-spinner { vertical-align: middle; }
+.agd-usage-error { color: var(--agd-color-error, #f85149); }
