@@ -403,8 +403,12 @@ $ agt task submit -p "..." --provider claude --daemon daemon-cloud-01
 $ agt chat --list --daemon=daemon-cloud-01 --dir=/srv/app-a  # 按 daemon 侧 cwd 过滤，带 DIR 列
 $ agt chat --resume <sid> --daemon=daemon-cloud-01  # 经 Server 反查 provider/identity/dir 并续接；历史转录由 Server 向 daemon 拉取后回显
 
+# 本地会话恢复：先打印 provider 原生历史再续接（claude/codex 读 JSONL，opencode 只读 opencode.db）
+$ agt chat --resume <sid>
+
 # 批量永久删除指定 daemon / provider 下的会话
 $ agt session delete <sid-1> <sid-2> --daemon daemon-cloud-01 --provider claude --yes
+# OpenCode 会话经 `opencode session delete` 删除（含 child sessions，可用 AGT_OPENCODE_BIN 指定二进制）
 ```
 
 规则：

@@ -241,6 +241,8 @@ $ agt chat --resume abc-1234…
 agt>
 ```
 
+**历史来源按 provider 区分**：Claude Code 读 `~/.claude/projects/<hash>/<sid>.jsonl`，Codex 读 `~/.codex/sessions/**/rollout-*.jsonl`，OpenCode 以只读方式查询 `opencode.db`（默认 `~/.local/share/opencode/opencode.db`，遵循 `XDG_DATA_HOME`，可用 `AGT_OPENCODE_DB` 覆盖路径）。OpenCode 只展示 `text` 块，thinking/reasoning 与工具调用不进入历史回显。文件或数据库不存在、损坏、被占用时按空历史处理，不影响续接；尚未实现读取的 provider 会打印一行 `⚠️ history reader ... not yet implemented`，随后照常 resume（`--no-history` 可跳过整个读取步骤）。
+
 ### `--dir` 与 daemon 跨机
 
 `--dir` 控制 agent 子进程的 cwd（身份注入的目标目录）。带 `--identity` 时注入两个产物：`IDENTITY.md`（身份全文副本）+ 标记块（一行简述 + 指向 IDENTITY.md）。**标记块写入的文件按 provider 区分**：`claude` 写 `CLAUDE.md`（Claude Code 原生只读 CLAUDE.md），其他 provider 写 `AGENTS.md`。任务结束/崩溃时全部回收。三种情形：
@@ -268,6 +270,32 @@ agt>
 - 输入 `exit` / `quit` / `:q`
 - `Ctrl+D`（EOF）
 - `Ctrl+C`（KeyboardInterrupt）
+
+---
+
+## `agt session delete`
+
+永久删除 Server 管理的 chat 会话：清空 AGT 侧的 session 指针，并删除 owning provider 的原生转录。要求 Server 与 owning daemon 在线。
+
+```bash
+agt session delete <sid-1> <sid-2> --daemon <daemon-id> --provider <provider> --yes
+```
+
+| 参数 | 说明 |
+| --- | --- |
+| `SESSION_IDS` | 一个或多个 session id；必须都属于同一 `--daemon` 与 `--provider` |
+| `--daemon` | 必填，会话所属 daemon |
+| `--provider` | 必填，会话所属 provider |
+| `-y, --yes` | 跳过永久删除确认 |
+| `--finalize-active` | 删除前先取消处于 `waiting_input` 的 Job |
+| `--server-url` | Server 地址，默认 `http://127.0.0.1:8420` |
+
+**provider 转录删除语义按 provider 区分**：
+
+- Claude Code / Codex：删除对应的 JSONL 转录文件。
+- OpenCode：调用 `opencode --standalone session delete <sid>` 删除，**会连同 child sessions 一起删除**。需要 `opencode` 在 PATH 中，或通过 `AGT_OPENCODE_BIN` 指定可执行文件；AGT 不直接写 `opencode.db`。dry-run 探测返回的 `found_paths` 是该会话所在的共享数据库路径，只用于判断存在性，不是可单独删除的文件。
+
+删除失败时命令以非零码退出，并逐条打印某个 session 的失败原因；会话不存在时按 `missing` 处理，仍算删除完成。
 
 ---
 
@@ -1809,6 +1837,8 @@ $ agt daemon stop
 | `AGT_WORK_DIR` | `~/.agt/workspaces` | 任务工作目录根；优先级高于 `~/.agt/daemon.json` |
 | `AGT_AGENT_CWD_ALLOWLIST` | `~`（即 `Path.home()`） | 允许的 agent cwd 根目录，冒号分隔；优先级高于 `~/.agt/daemon.json` |
 | `AGT_CLAUDE_PATH`        | —                        | 覆盖`claude` 二进制路径                                                                                                                                           |
+| `AGT_OPENCODE_BIN`       | `PATH` 中的 `opencode`   | 覆盖 OpenCode 二进制路径（会话删除时使用）                                                                                                                         |
+| `AGT_OPENCODE_DB`        | XDG data 下的 `opencode/opencode.db` | 覆盖 OpenCode SQLite 数据库路径（历史读取与会话探测） |
 | `AGT_EXTRA_AGENTS`       | —                        | 自定义 agent，格式`cmd:provider:Display`，逗号分隔                                                                                                                |
 
 ---
