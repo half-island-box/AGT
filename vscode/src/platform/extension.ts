@@ -11,6 +11,7 @@ import { looksLikeSop } from '../core/sop/document';
 import type { SopBridgeContext } from './sop-editor-panel';
 import { WorkspacePanel } from './workspace-panel';
 import { UsagePanel } from './usage-panel';
+import { BackendSetup } from './backend-setup';
 
 interface AgtConfig {
   serverUrl: string;
@@ -21,6 +22,8 @@ interface AgtConfig {
   daemonStartCommand: string;
   daemonStopCommand: string;
   language: UiLanguage;
+  autoInstallBackend: 'prompt' | 'off';
+  agtPath: string;
 }
 
 function readConfig(): AgtConfig {
@@ -28,13 +31,15 @@ function readConfig(): AgtConfig {
   return {
     serverUrl: cfg.get<string>('serverUrl') ?? 'http://127.0.0.1:8420',
     autoStart: cfg.get<boolean>('autoStart') ?? true,
-    startCommand: cfg.get<string>('startCommand') ?? 'uv run agt server start --detach',
-    stopCommand: cfg.get<string>('stopCommand') ?? 'uv run agt server stop',
+    // Empty means "use whatever BackendSetup detected".
+    startCommand: cfg.get<string>('startCommand') ?? '',
+    stopCommand: cfg.get<string>('stopCommand') ?? '',
     autoStartDaemon: cfg.get<boolean>('autoStartDaemon') ?? true,
-    daemonStartCommand:
-      cfg.get<string>('daemonStartCommand') ?? 'uv run agt daemon start --detach',
-    daemonStopCommand: cfg.get<string>('daemonStopCommand') ?? 'uv run agt daemon stop',
+    daemonStartCommand: cfg.get<string>('daemonStartCommand') ?? '',
+    daemonStopCommand: cfg.get<string>('daemonStopCommand') ?? '',
     language: cfg.get<UiLanguage>('language') ?? 'zh',
+    autoInstallBackend: cfg.get<'prompt' | 'off'>('autoInstallBackend') ?? 'prompt',
+    agtPath: cfg.get<string>('agtPath') ?? '',
   };
 }
 
@@ -70,6 +75,21 @@ export function activate(context: vscode.ExtensionContext): void {
   let workspaceView: WorkspacePanel;
   let usageView: UsagePanel;
   let lastOnline: boolean | null = null;
+
+  const backendChannel = vscode.window.createOutputChannel('AGT Backend');
+  const backendSetup = new BackendSetup({
+    context,
+    lifecycle,
+    channel: backendChannel,
+    getConfig: () => config,
+    language: () => language,
+    workspaceRoot: () => vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+    setStatus: (status) => {
+      statusbar.setBackendStatus(status);
+      statusbar.update(lifecycle.state, tree.daemonCount, language);
+    },
+    onInstalled: () => refresh({ ensure: true }),
+  });
 
   /**
    * Clicking a daemon or provider in the activity-bar tree jumps straight to
@@ -241,6 +261,9 @@ export function activate(context: vscode.ExtensionContext): void {
       void refresh({ ensure: false, rescan: true }),
     ),
     vscode.commands.registerCommand('agt.startServer', () => void refresh({ ensure: true })),
+    vscode.commands.registerCommand('agt.backendSetup', () =>
+      void backendSetup.requestInstall(),
+    ),
     vscode.commands.registerCommand('agt.stopServer', async () => {
       await lifecycle.stop();
       await refresh();
@@ -256,6 +279,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.window.registerWebviewViewProvider('agt.workspace', workspaceView),
     vscode.window.registerWebviewViewProvider('agt.usage', usageView),
     usageView,
+    backendChannel,
     vscode.window.onDidChangeActiveTextEditor(() => workspaceView.notifyWorkspaceRoot()),
     vscode.workspace.onDidChangeWorkspaceFolders(() => workspaceView.notifyWorkspaceRoot()),
     vscode.workspace.onDidChangeConfiguration((e) => {
@@ -264,15 +288,26 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       config = readConfig();
       language = config.language;
-      lifecycle.updateOptions(config);
+      // Commands are re-resolved by BackendSetup; passing them here would
+      // overwrite the detected values with the (possibly empty) settings.
+      lifecycle.updateOptions({
+        serverUrl: config.serverUrl,
+        autoStart: config.autoStart,
+        autoStartDaemon: config.autoStartDaemon,
+      });
       workspaceView.notifyLanguage(config.language);
       usageView.notifyLanguage(config.language);
-      void refresh();
+      void backendSetup.reconfigure().then(() => refresh());
     }),
     { dispose: () => clearInterval(pollTimer) },
   );
 
-  void refresh({ ensure: config.autoStart });
+  // Detect/install the backend before the first ensureStarted(): a missing
+  // backend must produce a prompt, not a silent failed start.
+  void (async () => {
+    await backendSetup.initialize();
+    await refresh({ ensure: config.autoStart });
+  })();
 }
 
 export function deactivate(): void {

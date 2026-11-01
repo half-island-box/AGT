@@ -41,6 +41,7 @@ The settings view exposes server and daemon lifecycle controls, startup commands
 ## Highlights
 
 - **Editor-native multi-agent workspace** — Chat, SOP, and Goal modes share one connection to your local AGT server.
+- **Self-contained setup** — detects an existing backend and, on first run, offers to install the latest `agt-team` into a private environment.
 - **Provider-neutral** — use Claude Code, Codex, Cursor Agent, GitHub Copilot, Qwen, Kimi, OpenClaw, OpenCode, or custom registered CLIs.
 - **Visual SOP editing** — edit YAML and a DAG view together, with server-side validation and workflow execution.
 - **Distributed execution** — run agents on local or remote daemons, including machines behind NAT.
@@ -49,18 +50,20 @@ The settings view exposes server and daemon lifecycle controls, startup commands
 
 ## Requirements
 
-- Python 3.12+
-- [uv](https://docs.astral.sh/uv/) or pip
-- The [`agt` server](https://github.com/half-island-box/agent-team) installed and at least one supported agent CLI authenticated
+- Python 3.12+, or [uv](https://docs.astral.sh/uv/) (the extension can create a private environment and install the backend for you)
+- At least one supported agent CLI installed and authenticated
 - VS Code 1.104 or newer
 
-By default, the extension starts the server with:
+On first activation the extension looks for `agt` in its own private environment,
+then on `PATH`, then in an `agt-team` source checkout. If none is found it asks
+before installing the latest `agt-team` from PyPI into an extension-private
+environment — nothing is installed without confirming that dialog, and your
+system Python and other projects are left untouched.
 
-```bash
-uv run agt server start --detach
-```
-
-You can change this command in the AGT settings page or through the `agt.startCommand` setting.
+Commands can be overridden with `agt.startCommand` / `agt.stopCommand` (and the
+daemon equivalents); leave them empty to use the detected backend. `agt.agtPath`
+pins a specific executable, and `agt.autoInstallBackend` controls whether the
+first-run prompt appears.
 
 ## Notes
 

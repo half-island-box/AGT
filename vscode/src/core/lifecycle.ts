@@ -1,8 +1,8 @@
-import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { AgtApi } from './api';
+import { runShellCommand, type RunResult } from './process';
 import type { ServerState } from './types';
 
 export interface LifecycleOptions {
@@ -14,6 +14,11 @@ export interface LifecycleOptions {
   autoStartDaemon: boolean;
   daemonStartCommand: string;
   daemonStopCommand: string;
+  /**
+   * Working directory for the commands above. Only ``uv run agt ...`` needs
+   * one (the workspace checkout); absolute executables ignore it.
+   */
+  startCwd?: string;
   /** Daemon pid file; defaults to `~/.agt/daemon.pid` (same as the CLI). */
   daemonPidFile?: string;
   logger?: (message: string) => void;
@@ -73,7 +78,8 @@ export class ServerLifecycle {
     this.state = 'starting';
     this.log(`starting server: ${this.options.startCommand}`);
     try {
-      await this.runShell(this.options.startCommand);
+      const result = await this.runShell(this.options.startCommand, { timeoutMs: 90_000 });
+      this.logResult('server start', result);
     } catch (err) {
       this.log(`start command failed: ${String(err)}`);
     }
@@ -114,7 +120,8 @@ export class ServerLifecycle {
     }
     this.log(`stopping server: ${this.options.stopCommand}`);
     try {
-      await this.runShell(this.options.stopCommand);
+      const result = await this.runShell(this.options.stopCommand, { timeoutMs: 30_000 });
+      this.logResult('server stop', result);
     } catch (err) {
       this.log(`stop command failed: ${String(err)}`);
       return false;
@@ -151,9 +158,11 @@ export class ServerLifecycle {
     }
     this.log(`starting daemon: ${this.options.daemonStartCommand}`);
     try {
-      await this.runShell(this.options.daemonStartCommand, {
+      const result = await this.runShell(this.options.daemonStartCommand, {
         env: { AGT_SERVER_URL: this.options.serverUrl },
+        timeoutMs: 90_000,
       });
+      this.logResult('daemon start', result);
     } catch (err) {
       this.log(`daemon start command failed: ${String(err)}`);
     }
@@ -187,7 +196,10 @@ export class ServerLifecycle {
     }
     this.log(`stopping daemon: ${this.options.daemonStopCommand}`);
     try {
-      await this.runShell(this.options.daemonStopCommand);
+      const result = await this.runShell(this.options.daemonStopCommand, {
+        timeoutMs: 30_000,
+      });
+      this.logResult('daemon stop', result);
     } catch (err) {
       this.log(`daemon stop command failed: ${String(err)}`);
       return false;
@@ -208,28 +220,27 @@ export class ServerLifecycle {
   private runShell(
     command: string,
     opts: { env?: Record<string, string>; timeoutMs?: number } = {},
-  ): Promise<void> {
-    const timeoutMs = opts.timeoutMs ?? 15000;
-    return new Promise((resolve, reject) => {
-      const child = spawn(command, {
-        shell: true,
-        stdio: 'ignore',
-        detached: false,
-        env: opts.env ? { ...process.env, ...opts.env } : process.env,
-      });
-      const timer = setTimeout(() => {
-        child.kill();
-        resolve();
-      }, timeoutMs);
-      child.once('error', (err) => {
-        clearTimeout(timer);
-        reject(err);
-      });
-      child.once('close', () => {
-        clearTimeout(timer);
-        resolve();
-      });
+  ): Promise<RunResult> {
+    return runShellCommand(command, {
+      cwd: this.options.startCwd,
+      env: opts.env,
+      timeoutMs: opts.timeoutMs ?? 15_000,
     });
+  }
+
+  /**
+   * Surface command output in the host log. Commands used to run with
+   * ``stdio: 'ignore'``, so a failed start looked indistinguishable from a
+   * slow one; the output is what tells the user which command failed.
+   */
+  private logResult(label: string, result: RunResult): void {
+    const output = `${result.stdout}${result.stderr}`.trim();
+    if (output) this.log(`${label}: ${output}`);
+    if (result.timedOut) {
+      this.log(`${label}: timed out`);
+    } else if (result.code !== 0 && result.code !== null) {
+      this.log(`${label}: exited with ${result.code}`);
+    }
   }
 }
 

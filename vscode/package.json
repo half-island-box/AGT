@@ -168,13 +168,13 @@
         },
         "agt.startCommand": {
           "type": "string",
-          "default": "uv run agt server start --detach",
-          "description": "Shell command used to start the agt server (run in the workspace root)"
+          "default": "",
+          "description": "Shell command used to start the agt server. Leave empty to use the detected agt backend."
         },
         "agt.stopCommand": {
           "type": "string",
-          "default": "uv run agt server stop",
-          "description": "Shell command used to stop the agt server"
+          "default": "",
+          "description": "Shell command used to stop the agt server. Leave empty to use the detected agt backend."
         },
         "agt.autoStartDaemon": {
           "type": "boolean",
@@ -183,13 +183,27 @@
         },
         "agt.daemonStartCommand": {
           "type": "string",
-          "default": "uv run agt daemon start --detach",
-          "description": "Shell command used to start the local daemon (AGT_SERVER_URL is exported for it)"
+          "default": "",
+          "description": "Shell command used to start the local daemon (AGT_SERVER_URL is exported for it). Leave empty to use the detected agt backend."
         },
         "agt.daemonStopCommand": {
           "type": "string",
-          "default": "uv run agt daemon stop",
-          "description": "Shell command used to stop the local daemon"
+          "default": "",
+          "description": "Shell command used to stop the local daemon. Leave empty to use the detected agt backend."
+        },
+        "agt.agtPath": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path to the agt executable. Leave empty to detect the private environment, then PATH, then an agt-team workspace."
+        },
+        "agt.autoInstallBackend": {
+          "type": "string",
+          "enum": [
+            "prompt",
+            "off"
+          ],
+          "default": "prompt",
+          "description": "Ask before installing the agt backend when none is detected. Installing always requires confirming a dialog; \"off\" only shows the status-bar entry."
         },
         "agt.language": {
           "type": "string",
@@ -212,6 +226,7 @@
     "test:inspector": "esbuild tests/sop-inspector.test.ts --bundle --platform=node --format=cjs --outfile=dist/test/sop-inspector.test.cjs --log-level=warning && node --test dist/test/sop-inspector.test.cjs",
     "test:run": "esbuild tests/sop-run.test.ts --bundle --platform=node --format=cjs --outfile=dist/test/sop-run.test.cjs --log-level=warning && node --test dist/test/sop-run.test.cjs",
     "test:loop": "esbuild tests/sop-loop.test.ts --bundle --platform=node --format=cjs --outfile=dist/test/sop-loop.test.cjs --log-level=warning && node --test dist/test/sop-loop.test.cjs",
+    "test:backend": "esbuild tests/backend.test.ts --bundle --platform=node --format=cjs --outfile=dist/test/backend.test.cjs --log-level=warning && node --test dist/test/backend.test.cjs",
     "check:sop": "esbuild tests/roundtrip-check.ts --bundle --platform=node --format=cjs --outfile=dist/test/roundtrip-check.cjs --log-level=warning && node dist/test/roundtrip-check.cjs && cd .. && uv run agt sop validate /tmp/agt-sop-roundtrip/edited.sop.yaml",
     "check:server-endpoint": "esbuild tests/probe-validate-endpoint.ts --bundle --platform=node --format=cjs --outfile=dist/test/probe-validate-endpoint.cjs --log-level=warning && node dist/test/probe-validate-endpoint.cjs",
     "check:run": "esbuild tests/probe-sop-run.ts --bundle --platform=node --format=cjs --outfile=dist/test/probe-sop-run.cjs --log-level=warning && node dist/test/probe-sop-run.cjs",

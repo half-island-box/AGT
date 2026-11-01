@@ -95,6 +95,10 @@ $ agt runtime list    # 看 daemon 注册的 agent
 > `AGT_CONSOLE_AUTOBUILD=0` 可关闭，`AGT_CONSOLE_SOURCE_DIR=<path>` 可指定
 > 源码位置）。修改 webview 源码后仍需手动重新构建。
 
+> **VS Code 插件**：插件首次激活会依次探测插件私有环境、`PATH` 和
+> `agt-team` 源码工作区中的 `agt`；未找到时弹窗询问，用户确认后把最新版
+> `agt-team` 安装到插件私有 venv 并启动 Server，不会修改系统 Python。
+
 > **Phase 5 本地流式**：直接跑 `agt run -p "..."` / `agt chat`（**不带 `--daemon`**）会在终端看到流式 agent 输出。Claude Code 默认走 `--output-format stream-json --verbose`，codex 走 `codex app-server` 的 JSON-RPC 流，opencode 走 `run --standalone --format json --thinking` 的 JSON-Lines 事件（thinking / 工具调用 / token 用量与 claude 同通道），pi 走 `--approve --mode json` 的 JSON-Lines 事件（文本按 delta，thinking / 工具调用 / 用量同通道）；session_id / resume_rejected 从结构化字段读取；没有 `app-server` 的旧版 codex 自动回退到 `codex exec` pipe 文本，其它 provider 仍走老路径。opencode 的文本按完整消息段到达（非逐 token），headless 下用 `AGT_OPENCODE_MODEL=<provider/model>` 指定模型；pi 用 `AGT_PI_MODEL`（可选 `AGT_PI_PROVIDER`）和 `AGT_PI_THINKING`。详见 [commands.md `agt run`](commands.md#agt-run)。
 
 > **SOP 静态流水线**：把确定的多 agent 流程写成 YAML DAG（`agt sop validate /

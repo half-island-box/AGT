@@ -467,6 +467,33 @@ const zh = {
   'chat.attachmentTooLarge': '文件超过 {max} MB：{name}',
   'chat.attachmentTooMany': '单条消息最多 {max} 个附件',
   'chat.attachmentStillUploading': '附件仍在上传，请稍候',
+  'backend.statusMissing': 'AGT · 后端未安装',
+  'backend.statusMissingTip': '未检测到 agt 后端，点击安装',
+  'backend.statusInstalling': 'AGT · 正在安装后端…',
+  'backend.promptTitle': '未检测到 agt 后端',
+  'backend.promptDetail':
+    '将安装 agt-team {version} 到插件私有环境：\n{path}\n需要 Python ≥ 3.12（优先使用 uv；若本机没有 uv 和 Python，请先安装 Python）。不会修改系统 Python 或其他项目。',
+  'backend.promptDetailUnknown':
+    '将安装最新版 agt-team 到插件私有环境：\n{path}\n需要 Python ≥ 3.12（优先使用 uv；若本机没有 uv 和 Python，请先安装 Python）。不会修改系统 Python 或其他项目。',
+  'backend.install': '安装',
+  'backend.docs': '查看安装说明',
+  'backend.progressTitle': '安装 agt 后端',
+  'backend.stepCheck': '检查 Python 环境…',
+  'backend.stepCreateEnv': '创建独立环境…',
+  'backend.stepInstall': '从 PyPI 安装 agt-team {version}…',
+  'backend.stepInstallUnknown': '从 PyPI 安装最新版 agt-team…',
+  'backend.stepVerify': '校验安装…',
+  'backend.stepStart': '启动 server…',
+  'backend.noPython':
+    '未找到 Python ≥ 3.12 或 uv。请先安装 Python 3.12+，或手动执行 pip install agt-team。',
+  'backend.openPython': 'Python 下载页',
+  'backend.success': '已安装 agt {version} 并启动 server（{path}）',
+  'backend.installedNoStart': '已安装 agt {version}，但 server 未能启动，请查看日志。',
+  'backend.failed': 'agt 后端安装失败：{message}',
+  'backend.viewLogs': '查看日志',
+  'backend.retry': '重试',
+  'backend.cancelled': '已取消安装',
+  'backend.alreadyInstalled': '已检测到 agt {version}（{path}），无需安装。',
 };
 
 const en: Record<keyof typeof zh, string> = {
@@ -932,6 +959,33 @@ const en: Record<keyof typeof zh, string> = {
   'chat.attachmentTooLarge': 'File exceeds {max} MB: {name}',
   'chat.attachmentTooMany': 'At most {max} attachments per message',
   'chat.attachmentStillUploading': 'Attachments are still uploading',
+  'backend.statusMissing': 'AGT · backend not installed',
+  'backend.statusMissingTip': 'No agt backend found — click to install',
+  'backend.statusInstalling': 'AGT · installing backend…',
+  'backend.promptTitle': 'No agt backend detected',
+  'backend.promptDetail':
+    'agt-team {version} will be installed into a private environment:\n{path}\nPython ≥ 3.12 is required (uv is preferred; install Python first if neither uv nor Python is available). Your system Python and other projects are left untouched.',
+  'backend.promptDetailUnknown':
+    'The latest agt-team will be installed into a private environment:\n{path}\nPython ≥ 3.12 is required (uv is preferred; install Python first if neither uv nor Python is available). Your system Python and other projects are left untouched.',
+  'backend.install': 'Install',
+  'backend.docs': 'Setup instructions',
+  'backend.progressTitle': 'Installing the agt backend',
+  'backend.stepCheck': 'Checking Python…',
+  'backend.stepCreateEnv': 'Creating a private environment…',
+  'backend.stepInstall': 'Installing agt-team {version} from PyPI…',
+  'backend.stepInstallUnknown': 'Installing the latest agt-team from PyPI…',
+  'backend.stepVerify': 'Verifying the install…',
+  'backend.stepStart': 'Starting the server…',
+  'backend.noPython':
+    'No Python ≥ 3.12 or uv found. Install Python 3.12+, or run pip install agt-team manually.',
+  'backend.openPython': 'Python downloads',
+  'backend.success': 'Installed agt {version} and started the server ({path})',
+  'backend.installedNoStart': 'Installed agt {version}, but the server did not start. See the logs.',
+  'backend.failed': 'agt backend install failed: {message}',
+  'backend.viewLogs': 'View logs',
+  'backend.retry': 'Retry',
+  'backend.cancelled': 'Installation cancelled',
+  'backend.alreadyInstalled': 'agt {version} is already available ({path}); nothing to install.',
 };
 
 const dictionaries: Record<UiLanguage, Record<string, string>> = { zh, en };
