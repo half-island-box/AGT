@@ -28,7 +28,7 @@
   $ agt server --help
   $ agt daemon --help
   ```
-- 一台或多台机器上能跑 agent CLI（claude / codex / opencode 任意）
+- 一台或多台机器上能跑 agent CLI（claude / codex / opencode / pi 任意）
 
 ---
 
@@ -95,7 +95,7 @@ $ agt runtime list    # 看 daemon 注册的 agent
 > `AGT_CONSOLE_AUTOBUILD=0` 可关闭，`AGT_CONSOLE_SOURCE_DIR=<path>` 可指定
 > 源码位置）。修改 webview 源码后仍需手动重新构建。
 
-> **Phase 5 本地流式**：直接跑 `agt run -p "..."` / `agt chat`（**不带 `--daemon`**）会在终端看到流式 agent 输出。Claude Code 默认走 `--output-format stream-json --verbose`，codex 走 `codex app-server` 的 JSON-RPC 流，opencode 走 `run --standalone --format json --thinking` 的 JSON-Lines 事件（thinking / 工具调用 / token 用量与 claude 同通道），session_id / resume_rejected 从结构化字段读取；没有 `app-server` 的旧版 codex 自动回退到 `codex exec` pipe 文本，其它 provider 仍走老路径。opencode 的文本按完整消息段到达（非逐 token），headless 下用 `AGT_OPENCODE_MODEL=<provider/model>` 指定模型。详见 [commands.md `agt run`](commands.md#agt-run)。
+> **Phase 5 本地流式**：直接跑 `agt run -p "..."` / `agt chat`（**不带 `--daemon`**）会在终端看到流式 agent 输出。Claude Code 默认走 `--output-format stream-json --verbose`，codex 走 `codex app-server` 的 JSON-RPC 流，opencode 走 `run --standalone --format json --thinking` 的 JSON-Lines 事件（thinking / 工具调用 / token 用量与 claude 同通道），pi 走 `--approve --mode json` 的 JSON-Lines 事件（文本按 delta，thinking / 工具调用 / 用量同通道）；session_id / resume_rejected 从结构化字段读取；没有 `app-server` 的旧版 codex 自动回退到 `codex exec` pipe 文本，其它 provider 仍走老路径。opencode 的文本按完整消息段到达（非逐 token），headless 下用 `AGT_OPENCODE_MODEL=<provider/model>` 指定模型；pi 用 `AGT_PI_MODEL`（可选 `AGT_PI_PROVIDER`）和 `AGT_PI_THINKING`。详见 [commands.md `agt run`](commands.md#agt-run)。
 
 > **SOP 静态流水线**：把确定的多 agent 流程写成 YAML DAG（`agt sop validate /
 > submit / run / runs / status / log`）。节点按 `depends_on` 依赖门控激活，`${node.output}`
@@ -403,12 +403,13 @@ $ agt task submit -p "..." --provider claude --daemon daemon-cloud-01
 $ agt chat --list --daemon=daemon-cloud-01 --dir=/srv/app-a  # 按 daemon 侧 cwd 过滤，带 DIR 列
 $ agt chat --resume <sid> --daemon=daemon-cloud-01  # 经 Server 反查 provider/identity/dir 并续接；历史转录由 Server 向 daemon 拉取后回显
 
-# 本地会话恢复：先打印 provider 原生历史再续接（claude/codex 读 JSONL，opencode 只读 opencode.db）
+# 本地会话恢复：先打印 provider 原生历史再续接（claude/codex/pi 读 JSONL，opencode 只读 opencode.db）
 $ agt chat --resume <sid>
 
 # 批量永久删除指定 daemon / provider 下的会话
 $ agt session delete <sid-1> <sid-2> --daemon daemon-cloud-01 --provider claude --yes
 # OpenCode 会话经 `opencode session delete` 删除（含 child sessions，可用 AGT_OPENCODE_BIN 指定二进制）
+# Pi 会话删除对应的 session JSONL（可用 AGT_PI_SESSION_DIR 覆盖会话根目录）
 ```
 
 规则：

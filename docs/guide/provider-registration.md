@@ -37,6 +37,7 @@
 - 命令行类似 claude（`-p <prompt>`）→ 复用 `ClaudeCommandBuilder()`
 - 命令行类似 codex（`exec <prompt>`）→ 复用 `CodexCommandBuilder()`
 - 命令行类似 opencode（`run [flags] <prompt>`）→ 参考 `OpenCodeCommandBuilder()`（支持 `AGT_OPENCODE_MODEL` 选模型）
+- 命令行类似 pi（`[flags] -- <prompt>`，`--session-id` 创建缺失会话）→ 参考 `PiCommandBuilder()`（支持 `AGT_PI_MODEL` / `AGT_PI_PROVIDER` / `AGT_PI_THINKING`）
 - session 写在 `~/.claude/projects/...` → 复用 `claude_session_locator()`
 - session 写在 `~/.codex/sessions/...` → 复用 `codex_session_locator()`
 
@@ -53,6 +54,7 @@ KNOWN_AGENTS: list[KnownAgent] = [
     KnownAgent("claude", "claude", "Claude Code", stream_format="claude_stream_json"),
     KnownAgent("codex", "codex", "Codex CLI", cli_style="codex"),
     KnownAgent("opencode", "opencode", "OpenCode", stream_format="opencode_json"),
+    KnownAgent("pi", "pi", "Pi", stream_format="pi_json"),
     KnownAgent("myagent", "myagent", "My Agent CLI"),  # ← 新增
 ]
 ```
@@ -155,6 +157,7 @@ _REGISTRY: dict[str, ProviderAdapter] = {
     "claude": _claude_adapter(),
     "codex": _codex_adapter(),
     "opencode": _opencode_adapter(),
+    "pi": _pi_adapter(),
     "myagent": ProviderAdapter(                  # ← 新增一行
         command_builder=MyAgentCommandBuilder(),
         session_locator=None,
@@ -185,6 +188,7 @@ _REGISTRY: dict[str, ProviderAdapter] = {
 | `ProjectJsonMcpConfig(".mcp.json")` | 项目内 `<cwd>/.mcp.json` | Claude Code（`{"mcpServers": {...}}`） |
 | `GlobalTomlMcpConfig()` | 全局 `~/.codex/config.toml` | Codex CLI（`[mcp_servers.agt-catalog]`） |
 | `opencode_mcp_profile()` | 项目内 `<cwd>/opencode.json` | OpenCode（`{"mcp": {"servers": {...}}}`，`type: "remote"`） |
+| `pi_mcp_profile()` | 项目内 `<cwd>/.pi/mcp.json` | Pi（`{"mcpServers": {...}}`，HTTP `url`；headless 需 `--approve`） |
 
 三选一直接复用即可，不存在就传 `None`：
 
@@ -238,6 +242,7 @@ unset PYTHONPATH; .venv/bin/python -m pytest tests/ \
 | SessionLocator | [tests/test_session_locators.py](../../tests/test_session_locators.py) |
 | ResumeRejectionDetector | [tests/test_resume_detectors.py](../../tests/test_resume_detectors.py) |
 | StreamingSink | [tests/test_streaming_sinks.py](../../tests/test_streaming_sinks.py) |
+| History reader | [tests/test_load_pi_history.py](../../tests/test_load_pi_history.py) |
 | Registry | [tests/test_provider_registry.py](../../tests/test_provider_registry.py) |
 
 ---

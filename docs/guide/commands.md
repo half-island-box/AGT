@@ -77,6 +77,9 @@ $ agt run --provider codex -p "..."
 # OpenCode：run --format json，文本按消息段输出，thinking / 工具调用 / 用量同样上报
 $ AGT_OPENCODE_MODEL=deepseek/deepseek-v4-flash agt run --provider opencode -p "..."
 
+# Pi：--mode json，文本/thinking 按 delta 输出，工具调用与用量同样上报
+$ AGT_PI_MODEL=deepseek-v4-pro AGT_PI_PROVIDER=cc-switch-deep-seek agt run --provider pi -p "..."
+
 # 带 identity 远程执行（binding 可选，按所选 provider 查找 live runtime）
 $ agt run --identity did:agt:reviewer --daemon d1 -p "review this diff"
 
@@ -86,7 +89,7 @@ $ agt run --identity did:agt:reviewer --provider codex --daemon d1 -p "..."
 
 > **`--identity` 语义**：binding 是可选的运行时路由偏好。匹配的 live binding 优先；没有匹配 binding 时，Server 会从 live runtime 注册表选择显式指定的 `(daemon, provider)`。binding 不会限制 identity 可用于哪些 provider。
 > **本地限制**：不带 `--daemon` 时 `--identity` 会被拒绝，因为 identity 的 runtime 解析和注入内容都由 Server 提供。
-> **本地流式（Phase 5）**：Claude Code 默认启用 `--output-format stream-json --verbose`；codex 通过 `codex app-server`（JSON-RPC over stdio）驱动同一事件通道；OpenCode 通过 `opencode run --standalone --format json --thinking` 输出 JSON-Lines 事件。thinking / 工具调用 / token 用量都会实时上报，`TaskResult.stdout` 仍存拼接后的纯文本，下游展示 / 落库链路零改动。OpenCode 的文本按完整消息段到达（不是逐 token），相邻段之间自动空行。旧版 codex 没有 `app-server` 时自动回退到 `codex exec` pipe 文本；可用环境变量 `AGT_CODEX_TRANSPORT=exec|app-server` 强制选择。OpenCode 用 `AGT_OPENCODE_MODEL=<provider/model>` 指定模型（headless 环境没有 UI 选模型）。
+> **本地流式（Phase 5）**：Claude Code 默认启用 `--output-format stream-json --verbose`；codex 通过 `codex app-server`（JSON-RPC over stdio）驱动同一事件通道；OpenCode 通过 `opencode run --standalone --format json --thinking` 输出 JSON-Lines 事件；Pi 通过 `pi --approve --mode json` 输出 JSON-Lines 事件。thinking / 工具调用 / token 用量都会实时上报，`TaskResult.stdout` 仍存拼接后的纯文本，下游展示 / 落库链路零改动。OpenCode 的文本按完整消息段到达（不是逐 token），相邻段之间自动空行；Pi 的文本按 delta 到达，跨 assistant 消息自动空行。旧版 codex 没有 `app-server` 时自动回退到 `codex exec` pipe 文本；可用环境变量 `AGT_CODEX_TRANSPORT=exec|app-server` 强制选择。OpenCode 用 `AGT_OPENCODE_MODEL=<provider/model>` 指定模型（headless 环境没有 UI 选模型）；Pi 用 `AGT_PI_MODEL`（配合可选的 `AGT_PI_PROVIDER`）指定模型，`AGT_PI_THINKING` 指定 thinking 级别。Pi 的 `--approve` 用于 headless 下加载项目 `.pi/mcp.json`。
 > **远程流式（Phase 5 remote）**：远程 `--daemon` / `--identity` 路径同样实时流式——daemon 每 ~0.5s 采样一次累计 stdout 前缀，经 WS/HTTP 上报到 Server，Server 再以 SSE 推给 CLI 逐字打印（`snapshot → delta* → done`）。读超时自动重连一次，仍无进展则降级为 `wait_task` 轮询兜底（兜底只补打未打印的尾部，不整段重打）。
 
 ### 退出码
@@ -241,7 +244,7 @@ $ agt chat --resume abc-1234…
 agt>
 ```
 
-**历史来源按 provider 区分**：Claude Code 读 `~/.claude/projects/<hash>/<sid>.jsonl`，Codex 读 `~/.codex/sessions/**/rollout-*.jsonl`，OpenCode 以只读方式查询 `opencode.db`（默认 `~/.local/share/opencode/opencode.db`，遵循 `XDG_DATA_HOME`，可用 `AGT_OPENCODE_DB` 覆盖路径）。OpenCode 只展示 `text` 块，thinking/reasoning 与工具调用不进入历史回显。文件或数据库不存在、损坏、被占用时按空历史处理，不影响续接；尚未实现读取的 provider 会打印一行 `⚠️ history reader ... not yet implemented`，随后照常 resume（`--no-history` 可跳过整个读取步骤）。
+**历史来源按 provider 区分**：Claude Code 读 `~/.claude/projects/<hash>/<sid>.jsonl`，Codex 读 `~/.codex/sessions/**/rollout-*.jsonl`，OpenCode 以只读方式查询 `opencode.db`（默认 `~/.local/share/opencode/opencode.db`，遵循 `XDG_DATA_HOME`，可用 `AGT_OPENCODE_DB` 覆盖路径），Pi 读 `~/.pi/agent/sessions/**/<timestamp>_<sid>.jsonl`（可用 `AGT_PI_SESSION_DIR` / `PI_CODING_AGENT_SESSION_DIR` / `PI_CODING_AGENT_DIR` 覆盖根目录）。OpenCode 只展示 `text` 块，thinking/reasoning 与工具调用不进入历史回显；Pi 同样只展示 user/assistant 的 `text` 块，并且只沿当前活动分支（`parentId` 链）回显，被放弃的 fork 不出现。文件或数据库不存在、损坏、被占用时按空历史处理，不影响续接；尚未实现读取的 provider 会打印一行 `⚠️ history reader ... not yet implemented`，随后照常 resume（`--no-history` 可跳过整个读取步骤）。
 
 ### `--dir` 与 daemon 跨机
 
@@ -292,7 +295,7 @@ agt session delete <sid-1> <sid-2> --daemon <daemon-id> --provider <provider> --
 
 **provider 转录删除语义按 provider 区分**：
 
-- Claude Code / Codex：删除对应的 JSONL 转录文件。
+- Claude Code / Codex / Pi：删除对应的 JSONL 转录文件（Pi 按 session header 的 `id` 精确匹配）。
 - OpenCode：调用 `opencode --standalone session delete <sid>` 删除，**会连同 child sessions 一起删除**。需要 `opencode` 在 PATH 中，或通过 `AGT_OPENCODE_BIN` 指定可执行文件；AGT 不直接写 `opencode.db`。dry-run 探测返回的 `found_paths` 是该会话所在的共享数据库路径，只用于判断存在性，不是可单独删除的文件。
 
 删除失败时命令以非零码退出，并逐条打印某个 session 的失败原因；会话不存在时按 `missing` 处理，仍算删除完成。
@@ -320,7 +323,7 @@ http://127.0.0.1:8420/
 
 启动时自动初始化数据库并创建 `runtimes`、`tasks`、`sessions` 等表。Server 不再读取或写入 `sessions.json`；旧的 `~/.agt/sessions.json` 仅保留为历史迁移输入。
 
-**MCP 工具（运行时目录 + Goal spawn）**：Server 启动时在同一端口挂载 Streamable HTTP 端点 `http://127.0.0.1:8420/mcp/`。`list_runtimes` 用于查询在线 daemon/provider；`spawn_subagents` 只允许运行中的 Goal Step 调用，服务端通过 `Authorization: Bearer ${AGT_TASK_TOKEN}` 反查当前 Step 和 Job，不接受 agent 自报 parent job。每次调用会立即创建子 Job，并通过 `(parent_step_id, idempotency_key)` 防止重试重复创建。远程 daemon 的 loopback 代理会把工具调用和 token 经 reverse-dial 转发到 Server。Claude Code 使用项目 `.mcp.json`，Codex 使用全局 `~/.codex/config.toml` 的 `[mcp_servers.agt-catalog]` 和 `bearer_token_env_var = "AGT_TASK_TOKEN"`，OpenCode 使用项目 `opencode.json` 的 `mcp.servers.agt-catalog`（`type: "remote"`，header 里写 `Bearer {env:AGT_TASK_TOKEN}`）；未接 MCP 的 provider 继续使用 `AGT-SPAWN`。给新 provider 接 MCP 见 [provider-registration](provider-registration.md)。
+**MCP 工具（运行时目录 + Goal spawn）**：Server 启动时在同一端口挂载 Streamable HTTP 端点 `http://127.0.0.1:8420/mcp/`。`list_runtimes` 用于查询在线 daemon/provider；`spawn_subagents` 只允许运行中的 Goal Step 调用，服务端通过 `Authorization: Bearer ${AGT_TASK_TOKEN}` 反查当前 Step 和 Job，不接受 agent 自报 parent job。每次调用会立即创建子 Job，并通过 `(parent_step_id, idempotency_key)` 防止重试重复创建。远程 daemon 的 loopback 代理会把工具调用和 token 经 reverse-dial 转发到 Server。Claude Code 使用项目 `.mcp.json`，Codex 使用全局 `~/.codex/config.toml` 的 `[mcp_servers.agt-catalog]` 和 `bearer_token_env_var = "AGT_TASK_TOKEN"`，OpenCode 使用项目 `opencode.json` 的 `mcp.servers.agt-catalog`（`type: "remote"`，header 里写 `Bearer {env:AGT_TASK_TOKEN}`），Pi 使用项目 `.pi/mcp.json` 的 `mcpServers.agt-catalog`（HTTP `url`，header 里写 `Bearer ${AGT_TASK_TOKEN}`；headless 运行通过 `--approve` 加载）；未接 MCP 的 provider 继续使用 `AGT-SPAWN`。给新 provider 接 MCP 见 [provider-registration](provider-registration.md)。
 
 **Phase 3 起，Server 与 Daemon 必须使用同一个 `AGT_SERVER_SECRET`**。`agt server start` 首次运行会自动生成并写入 `~/.agt/server.secret`（`0600`），Server 和 Daemon 都按“环境变量 > `~/.agt/server.secret` > 空”加载，因此正常启动时无需 export：
 
@@ -1839,6 +1842,10 @@ $ agt daemon stop
 | `AGT_CLAUDE_PATH`        | —                        | 覆盖`claude` 二进制路径                                                                                                                                           |
 | `AGT_OPENCODE_BIN`       | `PATH` 中的 `opencode`   | 覆盖 OpenCode 二进制路径（会话删除时使用）                                                                                                                         |
 | `AGT_OPENCODE_DB`        | XDG data 下的 `opencode/opencode.db` | 覆盖 OpenCode SQLite 数据库路径（历史读取与会话探测） |
+| `AGT_PI_MODEL`           | —                        | Pi 的 `--model`（如 `deepseek-v4-pro` 或 `provider/model`） |
+| `AGT_PI_PROVIDER`        | —                        | 配合 `AGT_PI_MODEL` 传给 Pi 的 `--provider` |
+| `AGT_PI_THINKING`        | —                        | Pi 的 `--thinking` 级别（off/minimal/low/medium/high/xhigh/max） |
+| `AGT_PI_SESSION_DIR`     | `~/.pi/agent/sessions`   | 覆盖 Pi 会话目录（历史读取与 `--session-dir` 使用） |
 | `AGT_EXTRA_AGENTS`       | —                        | 自定义 agent，格式`cmd:provider:Display`，逗号分隔                                                                                                                |
 
 ---

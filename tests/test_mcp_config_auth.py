@@ -11,6 +11,7 @@ from agt.runtime.mcp_config import (
     ProjectJsonMcpConfig,
     inject_mcp_config,
     opencode_mcp_profile,
+    pi_mcp_profile,
     reclaim_mcp_config,
 )
 
@@ -113,3 +114,52 @@ def test_opencode_project_config_deleted_when_created(tmp_path) -> None:
 
     reclaim_mcp_config(profile, cwd)
     assert not (cwd / "opencode.json").exists()
+
+
+def test_pi_project_config_merges_nested_file(tmp_path) -> None:
+    cwd = tmp_path / "project"
+    (cwd / ".pi").mkdir(parents=True)
+    original = {
+        "mcpServers": {"user": {"url": "http://user"}},
+        "enabled": True,
+    }
+    (cwd / ".pi" / "mcp.json").write_text(
+        json.dumps(original), encoding="utf-8"
+    )
+
+    profile = pi_mcp_profile()
+    inject_mcp_config(
+        profile,
+        cwd,
+        "http://127.0.0.1:8420/mcp",
+        bearer_token_env_var=MCP_BEARER_TOKEN_ENV,
+    )
+
+    data = json.loads((cwd / ".pi" / "mcp.json").read_text(encoding="utf-8"))
+    assert data["enabled"] is True
+    assert data["mcpServers"]["user"] == {"url": "http://user"}
+    assert data["mcpServers"]["agt-catalog"] == {
+        "type": "http",
+        "url": "http://127.0.0.1:8420/mcp",
+        "headers": {"Authorization": "Bearer ${AGT_TASK_TOKEN}"},
+    }
+    # Nested filenames are flattened into sidecar names under ``.agt/``.
+    assert (cwd / ".agt" / ".agt-mcp-backup-.pi-mcp.json").exists()
+    assert "agt-server-secret" not in (cwd / ".pi" / "mcp.json").read_text()
+
+    reclaim_mcp_config(profile, cwd)
+    assert json.loads((cwd / ".pi" / "mcp.json").read_text()) == original
+
+
+def test_pi_project_config_creates_nested_file_and_cleans_up(tmp_path) -> None:
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+
+    profile = pi_mcp_profile()
+    inject_mcp_config(profile, cwd, "http://127.0.0.1:8420/mcp")
+    assert (cwd / ".pi" / "mcp.json").exists()
+    assert (cwd / ".agt" / ".agt-mcp-managed-.pi-mcp.json").exists()
+
+    reclaim_mcp_config(profile, cwd)
+    assert not (cwd / ".pi" / "mcp.json").exists()
+    assert not (cwd / ".agt" / ".agt-mcp-managed-.pi-mcp.json").exists()

@@ -15,6 +15,7 @@ from agt.runtime.command_builders import (
     ClaudeCommandBuilder,
     CodexCommandBuilder,
     OpenCodeCommandBuilder,
+    PiCommandBuilder,
 )
 from agt.task.models import Task
 
@@ -152,3 +153,86 @@ def test_opencode_builder_with_resume_and_stream_args(monkeypatch):
         "ses_abc",
         "say hi",
     ]
+
+
+# ── pi ──────────────────────────────────────────────────────────
+
+
+def test_pi_builder_basic_prompt(monkeypatch, tmp_path):
+    """The prompt is positional after ``--``; the session dir is pinned."""
+    monkeypatch.delenv("AGT_PI_MODEL", raising=False)
+    monkeypatch.delenv("AGT_PI_PROVIDER", raising=False)
+    monkeypatch.delenv("AGT_PI_THINKING", raising=False)
+    monkeypatch.setenv("AGT_PI_SESSION_DIR", str(tmp_path))
+    cmd = PiCommandBuilder().build(Path("/bin/pi"), _task("say hi"), [])
+    assert cmd == [
+        "/bin/pi",
+        "--session-dir",
+        str(tmp_path),
+        "--",
+        "say hi",
+    ]
+
+
+def test_pi_builder_resume_and_stream_args(monkeypatch, tmp_path):
+    """``--session-id`` creates a missing session instead of rejecting it."""
+    monkeypatch.delenv("AGT_PI_MODEL", raising=False)
+    monkeypatch.delenv("AGT_PI_PROVIDER", raising=False)
+    monkeypatch.delenv("AGT_PI_THINKING", raising=False)
+    monkeypatch.setenv("AGT_PI_SESSION_DIR", str(tmp_path))
+    cmd = PiCommandBuilder().build(
+        Path("/bin/pi"),
+        _task("say hi", resume_session_id="pitest-01"),
+        ["--approve", "--mode", "json"],
+    )
+    assert cmd == [
+        "/bin/pi",
+        "--approve",
+        "--mode",
+        "json",
+        "--session-dir",
+        str(tmp_path),
+        "--session-id",
+        "pitest-01",
+        "--",
+        "say hi",
+    ]
+
+
+def test_pi_builder_model_provider_and_thinking_env(monkeypatch, tmp_path):
+    """Deployment-level model/thinking selection maps onto Pi's flags."""
+    monkeypatch.setenv("AGT_PI_SESSION_DIR", str(tmp_path))
+    monkeypatch.setenv("AGT_PI_MODEL", "deepseek-v4-pro")
+    monkeypatch.setenv("AGT_PI_PROVIDER", "cc-switch-deep-seek")
+    monkeypatch.setenv("AGT_PI_THINKING", "high")
+    cmd = PiCommandBuilder().build(Path("/bin/pi"), _task("say hi"), [])
+    assert cmd == [
+        "/bin/pi",
+        "--provider",
+        "cc-switch-deep-seek",
+        "--model",
+        "deepseek-v4-pro",
+        "--thinking",
+        "high",
+        "--session-dir",
+        str(tmp_path),
+        "--",
+        "say hi",
+    ]
+
+
+def test_pi_builder_provider_without_model_is_ignored(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGT_PI_SESSION_DIR", str(tmp_path))
+    monkeypatch.delenv("AGT_PI_MODEL", raising=False)
+    monkeypatch.setenv("AGT_PI_PROVIDER", "cc-switch-deep-seek")
+    cmd = PiCommandBuilder().build(Path("/bin/pi"), _task("say hi"), [])
+    assert "--provider" not in cmd
+
+
+def test_pi_builder_keeps_dash_prompt_after_terminator(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGT_PI_SESSION_DIR", str(tmp_path))
+    monkeypatch.delenv("AGT_PI_MODEL", raising=False)
+    monkeypatch.delenv("AGT_PI_PROVIDER", raising=False)
+    monkeypatch.delenv("AGT_PI_THINKING", raising=False)
+    cmd = PiCommandBuilder().build(Path("/bin/pi"), _task("--help me"), [])
+    assert cmd[-2:] == ["--", "--help me"]

@@ -37,12 +37,14 @@ from .command_builders import (
     CodexCommandBuilder,
     CommandBuilder,
     OpenCodeCommandBuilder,
+    PiCommandBuilder,
 )
 from .mcp_config import (
     GlobalTomlMcpConfig,
     McpConfigProfile,
     ProjectJsonMcpConfig,
     opencode_mcp_profile,
+    pi_mcp_profile,
 )
 from .resume_detectors import (
     ClaudeResumeRejectionDetector,
@@ -59,6 +61,7 @@ from .streaming import (
     CodexAppServerSink,
     NoopSink,
     OpenCodeStreamSink,
+    PiStreamSink,
     StreamingSink,
 )
 
@@ -108,6 +111,15 @@ OPENCODE_STREAM_ARGS: tuple[str, ...] = (
     "json",
     "--thinking",
 )
+
+# Pi counterpart: ``--mode json`` streams delta-only JSONL events.
+# ``--approve`` is required for a headless run to load the project
+# ``.pi/mcp.json`` (print/json modes cannot show the trust prompt);
+# without it a protect-resource project silently skips the AGT MCP
+# server. The trade-off is that other project-local Pi resources
+# (settings, extensions) also load for trusted tasks.
+PI_APPROVE_ARGS: tuple[str, ...] = ("--approve",)
+PI_STREAM_ARGS: tuple[str, ...] = ("--mode", "json")
 
 
 @dataclass(frozen=True)
@@ -267,6 +279,26 @@ def _opencode_adapter() -> ProviderAdapter:
     )
 
 
+def _pi_adapter() -> ProviderAdapter:
+    """Pi's ``--mode json`` transport.
+
+    Pi writes one JSONL file per session, so the stream header carries
+    the session id and no disk locator is needed. ``--session-id``
+    creates a missing session rather than rejecting it; the generic
+    detector (never clears the pointer) is correct.
+    """
+
+    return ProviderAdapter(
+        command_builder=PiCommandBuilder(),
+        session_locator=None,
+        stream_sink_factory=PiStreamSink,
+        resume_rejection_detector=GenericResumeRejectionDetector(),
+        permission_args=PI_APPROVE_ARGS,
+        stream_args=PI_STREAM_ARGS,
+        mcp_profile=pi_mcp_profile(),
+    )
+
+
 def _claude_default_adapter() -> ProviderAdapter:
     """Default for unknown / unconfigured providers.
 
@@ -288,6 +320,7 @@ _REGISTRY: dict[str, ProviderAdapter] = {
     "claude": _claude_adapter(),
     "codex": _codex_adapter(),
     "opencode": _opencode_adapter(),
+    "pi": _pi_adapter(),
 }
 
 

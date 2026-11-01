@@ -5,6 +5,7 @@ import githubCopilotSvg from '@lobehub/icons-static-svg/icons/githubcopilot.svg'
 import kimiSvg from '@lobehub/icons-static-svg/icons/kimi.svg';
 import opencodeSvg from '@lobehub/icons-static-svg/icons/opencode.svg';
 import openclawSvg from '@lobehub/icons-static-svg/icons/openclaw.svg';
+import piSvg from '@lobehub/icons-static-svg/icons/pi.svg';
 import qwenSvg from '@lobehub/icons-static-svg/icons/qwen.svg';
 
 const ICONS: Record<string, string> = {
@@ -15,6 +16,7 @@ const ICONS: Record<string, string> = {
   kimi: kimiSvg,
   opencode: opencodeSvg,
   openclaw: openclawSvg,
+  pi: piSvg,
   qwen: qwenSvg,
 };
 
@@ -27,6 +29,7 @@ const PROVIDER_COLORS: Record<string, string> = {
   cursor: '#F2F2F2',
   opencode: '#14B8A6',
   openclaw: '#F59E0B',
+  pi: '#F09082',
 };
 
 export function providerColor(provider: string): string {

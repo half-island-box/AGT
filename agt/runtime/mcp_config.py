@@ -107,9 +107,12 @@ class ProjectJsonMcpConfig:
 
     def _sidecars(self, cwd: Path) -> tuple[Path, Path]:
         aagt = cwd / ".agt"
+        # ``filename`` may contain a directory (Pi's ``.pi/mcp.json``);
+        # flatten it so the sidecars stay directly under ``.agt/``.
+        stem = self.filename.replace("/", "-").replace("\\", "-")
         return (
-            aagt / f"{_SIDECAR_PREFIX}-backup-{self.filename}",
-            aagt / f"{_SIDECAR_PREFIX}-managed-{self.filename}",
+            aagt / f"{_SIDECAR_PREFIX}-backup-{stem}",
+            aagt / f"{_SIDECAR_PREFIX}-managed-{stem}",
         )
 
     def inject(
@@ -127,6 +130,7 @@ class ProjectJsonMcpConfig:
         target = cwd / self.filename
         aagt = cwd / ".agt"
         aagt.mkdir(parents=True, exist_ok=True)
+        target.parent.mkdir(parents=True, exist_ok=True)
         backup, managed = self._sidecars(cwd)
 
         # Read any pre-existing file, tolerating a TOCTOU race (the file
@@ -237,6 +241,23 @@ def opencode_mcp_profile() -> ProjectJsonMcpConfig:
         servers_path=("mcp", "servers"),
         server_type="remote",
         env_reference=_opencode_env_reference,
+    )
+
+
+def pi_mcp_profile() -> ProjectJsonMcpConfig:
+    """Pi's project config: ``.pi/mcp.json`` under ``mcpServers``.
+
+    Pi loads this file only in a trusted project; headless runs pass
+    ``--approve`` so it is picked up without an interactive prompt. The
+    entry is a streamable-HTTP server and the bearer token uses Pi's
+    ``${AGT_TASK_TOKEN}`` environment expansion.
+    """
+
+    return ProjectJsonMcpConfig(
+        filename=".pi/mcp.json",
+        servers_path=("mcpServers",),
+        server_type="http",
+        env_reference=_claude_env_reference,
     )
 
 
@@ -423,6 +444,7 @@ __all__ = [
     "ProjectJsonMcpConfig",
     "GlobalTomlMcpConfig",
     "opencode_mcp_profile",
+    "pi_mcp_profile",
     "inject_mcp_config",
     "reclaim_mcp_config",
 ]

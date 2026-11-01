@@ -5,7 +5,7 @@
 **中文** | [English](README.md)
 
 `agt` 是一个本地 AI coding-agent CLI 桥接与编排器。它为 Claude Code、
-Codex、OpenCode 以及自定义 CLI 提供统一接口，覆盖会话、队列执行、多 Agent
+Codex、OpenCode、Pi 以及自定义 CLI 提供统一接口，覆盖会话、队列执行、多 Agent
 工作流、产物管理和分布式路由。
 
 > **状态：** 项目仍处于早期活跃开发阶段。CLI、Server、Daemon、Goal

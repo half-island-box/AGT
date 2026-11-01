@@ -430,7 +430,7 @@ def _pick_provider(
 @click.option(
     "--provider",
     default=None,
-    help="Provider key (e.g. claude, codex, opencode). "
+    help="Provider key (e.g. claude, codex, opencode, pi). "
          "Auto-pick first available if omitted "
          "(local probe without --daemon, daemon's runtimes with --daemon).",
 )
@@ -859,7 +859,7 @@ def _chat_turn_remote(
 @click.option(
     "--provider",
     default=None,
-    help="Provider key (e.g. claude, codex, opencode). "
+    help="Provider key (e.g. claude, codex, opencode, pi). "
          "Auto-pick first available if omitted "
          "(local probe without --daemon, daemon's runtimes with --daemon). "
          "With --list, filters the session list to this agent.",

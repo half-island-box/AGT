@@ -8,12 +8,13 @@ Scope of Phase 4 workdir / chat-multisession:
 - Claude Code: full reader (reads ``~/.claude/projects/<hash>/<sid>.jsonl``)
 - Codex CLI: full reader (reads ``~/.codex/sessions/**/rollout-*.jsonl``)
 - OpenCode: full reader (reads ``opencode.db`` under the XDG data dir)
+- Pi: full reader (reads ``~/.pi/agent/sessions/**/<ts>_<sid>.jsonl``)
 - cursor / others: stubbed with ``NotImplementedError`` (Phase 5+)
 
 The reader is read-only and best-effort: if the user deleted their
-``~/.claude`` / ``~/.codex`` folders (or OpenCode's database), we return an
-empty list rather than crash — the CLI then prints "no history available"
-and proceeds.
+``~/.claude`` / ``~/.codex`` / ``~/.pi`` folders (or OpenCode's
+database), we return an empty list rather than crash — the CLI then
+prints "no history available" and proceeds.
 """
 
 from __future__ import annotations
@@ -34,6 +35,15 @@ _OPENCODE_DB_ENV = "AGT_OPENCODE_DB"
 _OPENCODE_BIN_ENV = "AGT_OPENCODE_BIN"
 _OPENCODE_DB_TIMEOUT_SECONDS = 2.0
 _OPENCODE_DELETE_TIMEOUT_SECONDS = 30.0
+
+# Pi stores one JSONL file per session under its agent directory. The
+# reader must scan the same root the spawned CLI writes to: AGT pins
+# ``--session-dir`` from :func:`pi_sessions_root` in
+# ``PiCommandBuilder``. ``PI_CODING_AGENT_SESSION_DIR`` and
+# ``PI_CODING_AGENT_DIR`` are Pi's own environment overrides.
+_PI_SESSION_DIR_ENV = "AGT_PI_SESSION_DIR"
+_PI_CLI_SESSION_DIR_ENV = "PI_CODING_AGENT_SESSION_DIR"
+_PI_AGENT_DIR_ENV = "PI_CODING_AGENT_DIR"
 
 
 @dataclass
@@ -527,6 +537,193 @@ def delete_opencode_session(session_id: str) -> ProviderSessionDeleteResult:
     return ProviderSessionDeleteResult(supported=True, errors=(message,))
 
 
+def pi_sessions_root() -> Path:
+    """Locate Pi's per-session JSONL root.
+
+    Precedence mirrors the CLI:
+
+    1. ``AGT_PI_SESSION_DIR`` (AGT/tests override)
+    2. ``PI_CODING_AGENT_SESSION_DIR`` (Pi's own override)
+    3. ``PI_CODING_AGENT_DIR`` + ``/sessions``
+    4. ``~/.pi/agent/sessions``
+    """
+    for env_var in (_PI_SESSION_DIR_ENV, _PI_CLI_SESSION_DIR_ENV):
+        value = os.environ.get(env_var, "").strip()
+        if value:
+            return Path(value).expanduser()
+    agent_dir = os.environ.get(_PI_AGENT_DIR_ENV, "").strip()
+    if agent_dir:
+        return Path(agent_dir).expanduser() / "sessions"
+    return Path.home() / ".pi" / "agent" / "sessions"
+
+
+def _pi_file_header(path: Path) -> dict | None:
+    """Read the first JSONL record of a Pi session file."""
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            line = handle.readline()
+    except OSError:
+        return None
+    try:
+        header = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    return header if isinstance(header, dict) else None
+
+
+def find_pi_session_files(session_id: str) -> list[Path]:
+    """Locate Pi session files whose header id matches exactly.
+
+    Pi names files ``<timestamp>_<session-id>.jsonl`` inside a
+    per-project directory. The header is authoritative (a custom
+    ``--session-id`` may itself contain underscores), so candidates are
+    filtered by the parsed header, never by a glob built from the id.
+    """
+    _validate_session_id(session_id)
+    root = pi_sessions_root()
+    if not root.is_dir():
+        return []
+    matches: list[Path] = []
+    for path in root.rglob("*.jsonl"):
+        header = _pi_file_header(path)
+        if header is not None and header.get("id") == session_id:
+            matches.append(path)
+    matches.sort(key=_mtime, reverse=True)
+    return matches
+
+
+def load_pi_history(session_id: str) -> list[Message]:
+    """Read Pi's transcript for ``session_id``.
+
+    Pi writes one JSONL entry per session change. Version 1 files are
+    linear; version 2+ files form a tree (``id`` / ``parentId``) whose
+    active branch is the one ending at the last entry. Walking that
+    branch keeps an abandoned fork out of the displayed history.
+
+    Only ``message`` entries with a ``user`` / ``assistant`` role and
+    textual blocks are kept — thinking, tool calls, tool results, model
+    changes, compaction summaries, and labels are sidebar data.
+    """
+    matches = find_pi_session_files(session_id)
+    if not matches:
+        return []
+    return _parse_pi_jsonl(matches[0])
+
+
+def _parse_pi_jsonl(path: Path) -> list[Message]:
+    """Parse one Pi session JSONL file into ``Message`` objects."""
+    entries: list[dict] = []
+    header: dict | None = None
+    try:
+        handle = path.open("r", encoding="utf-8")
+    except OSError:
+        return []
+    with handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            if obj.get("type") == "session":
+                header = obj
+                continue
+            entries.append(obj)
+
+    version = header.get("version") if header is not None else None
+    if isinstance(version, int) and version >= 2:
+        entries = _pi_active_branch(entries)
+
+    out: list[Message] = []
+    for entry in entries:
+        msg = _extract_pi_message(entry)
+        if msg is not None:
+            out.append(msg)
+    return out
+
+
+def _pi_active_branch(entries: list[dict]) -> list[dict]:
+    """Return the root→leaf path that ends at the last entry.
+
+    The last entry is Pi's persisted active leaf (the session manager
+    defaults to it when no leaf id is supplied). A broken or missing
+    parent link ends the walk; the connected chain ending at the last
+    entry is still returned rather than dropped entirely.
+    """
+    if not entries:
+        return []
+    by_id = {
+        entry["id"]: entry
+        for entry in entries
+        if isinstance(entry.get("id"), str)
+    }
+    chain: list[dict] = []
+    seen: set[str] = set()
+    current: dict | None = entries[-1]
+    while current is not None:
+        entry_id = current.get("id")
+        if not isinstance(entry_id, str) or entry_id in seen:
+            break
+        seen.add(entry_id)
+        chain.append(current)
+        parent_id = current.get("parentId")
+        current = by_id.get(parent_id) if isinstance(parent_id, str) else None
+    chain.reverse()
+    return chain
+
+
+def _extract_pi_message(entry: dict) -> Message | None:
+    """Pull ``(role, content, timestamp)`` out of one Pi ``message`` entry."""
+    if entry.get("type") != "message":
+        return None
+    inner = entry.get("message")
+    if not isinstance(inner, dict):
+        return None
+    role = inner.get("role")
+    if role not in ("user", "assistant"):
+        return None
+    flat = _flatten_pi_content(inner.get("content"))
+    if flat is None:
+        return None
+    timestamp = _parse_timestamp(entry.get("timestamp"))
+    if timestamp is None:
+        timestamp = _pi_message_timestamp(inner.get("timestamp"))
+    return Message(role=role, content=flat, timestamp=timestamp)
+
+
+def _flatten_pi_content(content: object | None) -> str | None:
+    """Join the ``text`` blocks of a Pi message.
+
+    User content may be a string or a list of text/image blocks;
+    assistant content mixes thinking, text, and tool-call blocks. Only
+    ``text`` is user-visible turn content.
+    """
+    if isinstance(content, str):
+        return content or None
+    if not isinstance(content, list):
+        return None
+    chunks: list[str] = []
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "text":
+            continue
+        text = block.get("text")
+        if isinstance(text, str):
+            chunks.append(text)
+    joined = "\n".join(chunks)
+    return joined or None
+
+
+def _pi_message_timestamp(value: object) -> float | None:
+    """Convert a Pi message timestamp (epoch milliseconds) to seconds."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) / 1000.0
+
+
 def load_history(provider: str, session_id: str) -> list[Message]:
     """Provider-dispatched history loader."""
     if provider == "claude":
@@ -535,6 +732,8 @@ def load_history(provider: str, session_id: str) -> list[Message]:
         return load_codex_history(session_id)
     if provider == "opencode":
         return load_opencode_history(session_id)
+    if provider == "pi":
+        return load_pi_history(session_id)
     raise NotImplementedError(
         f"history reader for provider '{provider}' is not yet implemented"
     )
@@ -586,6 +785,8 @@ def find_provider_session_files(provider: str, session_id: str) -> list[Path]:
         return find_codex_session_files(session_id)
     if provider == "opencode":
         return find_opencode_session_files(session_id)
+    if provider == "pi":
+        return find_pi_session_files(session_id)
     raise NotImplementedError(
         f"history reader for provider '{provider}' is not yet implemented"
     )
@@ -627,9 +828,12 @@ __all__ = [
     "load_claude_history",
     "load_codex_history",
     "load_opencode_history",
+    "load_pi_history",
     "ProviderSessionDeleteResult",
     "find_provider_session_files",
     "find_opencode_session_files",
+    "find_pi_session_files",
+    "pi_sessions_root",
     "delete_provider_session",
     "delete_opencode_session",
 ]
