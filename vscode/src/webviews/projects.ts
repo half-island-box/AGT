@@ -9,7 +9,6 @@ import type {
   UsageSummary,
 } from '../core/types';
 import { bridge } from './bridge';
-import { openDirPicker } from './dir-picker';
 
 interface RemoteDaemonOption {
   id: string;
@@ -35,9 +34,6 @@ interface ProjectModal {
   path: string;
   pathInput: string;
   pickerBusy: boolean;
-  remoteDaemonId: string;
-  remotePath: string;
-  remotePathInput: string;
 }
 
 let boot: ProjectsBoot | null = null;
@@ -377,28 +373,6 @@ async function loadUsage(): Promise<void> {
   }
 }
 
-function renderRemoteSection(modal: ProjectModal): string {
-  const daemons = boot?.remoteDaemons ?? [];
-  const options = [`<option value="">${tr('projects.remoteNone')}</option>`]
-    .concat(daemons.map((daemon) => `<option value="${esc(daemon.id)}" ${modal.remoteDaemonId === daemon.id ? 'selected' : ''}>${esc(daemon.label)}${daemon.online ? '' : ` · ${tr('status.offline')}`}</option>`))
-    .join('');
-  const pathRow = modal.remoteDaemonId
-    ? `<div class="agd-project-path-input">
-          <input id="agd-project-remote-path" class="agd-input agd-mono" value="${esc(modal.remotePathInput || modal.remotePath)}" placeholder="/absolute/path">
-          <button type="button" class="agd-btn" id="agd-project-browse-remote">${tr('projects.browse')}</button>
-        </div>`
-    : '';
-  return `
-    <div class="agd-project-remote">
-      <div class="agd-project-remote-head">
-        <strong>${tr('projects.remoteSection')}</strong>
-        <small class="agd-dim">${tr('projects.remoteHint')}</small>
-      </div>
-      <label class="agd-field">${tr('projects.remoteDaemon')}<select id="agd-project-remote-daemon" class="agd-input">${options}</select></label>
-      ${pathRow}
-    </div>`;
-}
-
 function renderModal(): string {
   if (!modal) return '';
   const project = boot?.projects.find((item) => item.id === modal?.projectId);
@@ -415,12 +389,11 @@ function renderModal(): string {
           <input id="agd-project-path" class="agd-input agd-mono" value="${esc(modal.pathInput || modal.path)}" placeholder="/absolute/path">
           <button type="button" class="agd-btn" id="agd-project-browse-path" ${modal.pickerBusy ? 'disabled' : ''}>${modal.pickerBusy ? `${spinner()}${tr('projects.picking')}` : tr('projects.browse')}</button>
         </div>
-        ${renderRemoteSection(modal)}
         ${modal.error ? `<p class="agd-form-err">${esc(modal.error)}</p>` : ''}
         <div class="agd-actions agd-modal-actions">
           <button type="button" class="agd-btn" id="agd-project-cancel" ${modal.busy ? 'disabled' : ''}>${tr('settings.cancel')}</button>
           <span class="agd-flex"></span>
-          <button type="button" class="agd-btn agd-btn-primary" id="agd-project-create" ${modal.busy || !(modal.pathInput || modal.path) || Boolean(modal.remoteDaemonId && !(modal.remotePathInput || modal.remotePath)) ? 'disabled' : ''}>${modal.busy ? tr('projects.creating') : tr('projects.create')}</button>
+          <button type="button" class="agd-btn agd-btn-primary" id="agd-project-create" ${modal.busy || !(modal.pathInput || modal.path) ? 'disabled' : ''}>${modal.busy ? tr('projects.creating') : tr('projects.create')}</button>
         </div>
       </section>
     </div>`;
@@ -494,9 +467,6 @@ function openCreate(): void {
     path: '',
     pathInput: '',
     pickerBusy: false,
-    remoteDaemonId: '',
-    remotePath: '',
-    remotePathInput: '',
   };
   render();
 }
@@ -522,23 +492,6 @@ async function pickDirectory(): Promise<void> {
   }
 }
 
-function browseRemoteDirectory(): void {
-  if (!modal || modal.kind !== 'create' || !modal.remoteDaemonId) return;
-  const current = modal;
-  openDirPicker({
-    language: lang,
-    title: tr('projects.remotePath'),
-    daemonId: current.remoteDaemonId,
-    startPath: current.remotePathInput || current.remotePath || null,
-    onSelect: (path) => {
-      if (modal !== current) return;
-      current.remotePath = path;
-      current.remotePathInput = path;
-      render();
-    },
-  });
-}
-
 function openProject(projectId: string): void {
   const project = boot?.projects.find((item) => item.id === projectId);
   if (!project?.available || openingProjectId) return;
@@ -560,9 +513,6 @@ async function createProject(): Promise<void> {
   if (!modal || modal.kind !== 'create' || modal.busy) return;
   const current = modal;
   const targetPath = (current.pathInput || current.path).trim();
-  const remotePath = (current.remotePathInput || current.remotePath).trim();
-  const remoteDaemonId = current.remoteDaemonId;
-  if (remoteDaemonId && !remotePath) return;
   current.busy = true;
   current.error = null;
   render();
@@ -572,8 +522,6 @@ async function createProject(): Promise<void> {
       {
         path: targetPath,
         name: current.name,
-        remoteDaemonId: remoteDaemonId || null,
-        remotePath: remoteDaemonId ? remotePath : null,
       },
     );
     boot = { ...boot!, projects: result.projects };
@@ -650,7 +598,7 @@ function wireEvents(): void {
     button.addEventListener('click', () => {
       const project = boot?.projects.find((item) => item.id === button.dataset.projectRename);
       if (!project) return;
-      modal = { kind: 'rename', busy: false, error: null, projectId: project.id, name: project.name, path: project.path, pathInput: '', pickerBusy: false, remoteDaemonId: '', remotePath: '', remotePathInput: '' };
+      modal = { kind: 'rename', busy: false, error: null, projectId: project.id, name: project.name, path: project.path, pathInput: '', pickerBusy: false };
       render();
     });
   });
@@ -658,7 +606,7 @@ function wireEvents(): void {
     button.addEventListener('click', () => {
       const project = boot?.projects.find((item) => item.id === button.dataset.projectDelete);
       if (!project) return;
-      modal = { kind: 'delete', busy: false, error: null, projectId: project.id, name: project.name, path: project.path, pathInput: '', pickerBusy: false, remoteDaemonId: '', remotePath: '', remotePathInput: '' };
+      modal = { kind: 'delete', busy: false, error: null, projectId: project.id, name: project.name, path: project.path, pathInput: '', pickerBusy: false };
       render();
     });
   });
@@ -672,31 +620,10 @@ function wireEvents(): void {
     if (modal) modal.pathInput = (event.target as HTMLInputElement).value;
     const button = document.getElementById('agd-project-create') as HTMLButtonElement | null;
     if (button) {
-      button.disabled = !(modal?.pathInput || modal?.path)
-        || Boolean(modal?.remoteDaemonId && !(modal!.remotePathInput || modal!.remotePath));
+      button.disabled = !(modal?.pathInput || modal?.path);
     }
   });
   document.getElementById('agd-project-browse-path')?.addEventListener('click', () => void pickDirectory());
-  document.getElementById('agd-project-remote-daemon')?.addEventListener('change', (event) => {
-    if (!modal) return;
-    modal.remoteDaemonId = (event.target as HTMLSelectElement).value;
-    if (!modal.remoteDaemonId) {
-      modal.remotePath = '';
-      modal.remotePathInput = '';
-    }
-    render();
-  });
-  document.getElementById('agd-project-remote-path')?.addEventListener('input', (event) => {
-    if (modal) modal.remotePathInput = (event.target as HTMLInputElement).value;
-    // The create button's disabled state depends on this field; only the
-    // button needs refreshing, and re-rendering would drop focus.
-    const button = document.getElementById('agd-project-create') as HTMLButtonElement | null;
-    if (button) {
-      button.disabled = !(modal?.pathInput || modal?.path)
-        || Boolean(modal?.remoteDaemonId && !(modal.remotePathInput || modal.remotePath));
-    }
-  });
-  document.getElementById('agd-project-browse-remote')?.addEventListener('click', browseRemoteDirectory);
   document.getElementById('agd-project-create')?.addEventListener('click', () => void createProject());
   document.getElementById('agd-project-rename-name')?.addEventListener('input', (event) => { if (modal) modal.name = (event.target as HTMLInputElement).value; });
   document.getElementById('agd-project-rename-save')?.addEventListener('click', () => void renameProject());
