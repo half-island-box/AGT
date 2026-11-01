@@ -28,6 +28,10 @@ See which daemons and coding-agent runtimes are online, refresh targets, and rou
 
 ![Daemons and agent runtimes](daemons%27%20agents.png)
 
+### Track token usage
+
+The **Usage** view sits below the daemon tree. It summarizes input, output, cache-read tokens and request counts for the selected agent and time range, with a daemon × agent × model breakdown, so you can see where a workspace's usage comes from without leaving the editor.
+
 ### Configure everything from the editor
 
 The settings view exposes server and daemon lifecycle controls, startup commands, remote-daemon pairing, daemon execution settings, identity management, and optional daemon/provider routing preferences.
