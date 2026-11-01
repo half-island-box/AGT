@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# 一个探测到的agent CLI条目信息
+
 @dataclass
 class AgentEntry:
     """Information about a single agent CLI executable discovered on this machine."""
@@ -26,7 +26,7 @@ class AgentEntry:
         """Check whether the executable still exists and is runnable."""
         return self.path.exists() and os.access(self.path, os.X_OK)
 
-# 一个运行时声明：这台机器可以执行给定的provider
+
 @dataclass
 class Runtime:
     """A runtime declaration: this machine can execute a given provider."""

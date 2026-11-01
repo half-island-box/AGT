@@ -12,7 +12,8 @@
 
 ```python
 # ① KnownAgent 列表加一行（agt/probe/known_agents.py）
-# ② 实现 0-4 个 adapter（按需）# ③ _REGISTRY 加一行（agt/runtime/registry.py）
+# ② 实现 0-4 个 adapter（按需）
+# ③ _REGISTRY 加一行（agt/runtime/registry.py）
 # ④ 跑测试验证
 ```
 
@@ -35,6 +36,8 @@
 
 - 命令行类似 claude（`-p <prompt>`）→ 复用 `ClaudeCommandBuilder()`
 - 命令行类似 codex（`exec <prompt>`）→ 复用 `CodexCommandBuilder()`
+- 命令行类似 opencode（`run [flags] <prompt>`）→ 参考 `OpenCodeCommandBuilder()`（支持 `AGT_OPENCODE_MODEL` 选模型）
+- 命令行类似 pi（`[flags] -- <prompt>`，`--session-id` 创建缺失会话）→ 参考 `PiCommandBuilder()`（支持 `AGT_PI_MODEL` / `AGT_PI_PROVIDER` / `AGT_PI_THINKING`）
 - session 写在 `~/.claude/projects/...` → 复用 `claude_session_locator()`
 - session 写在 `~/.codex/sessions/...` → 复用 `codex_session_locator()`
 
@@ -44,18 +47,14 @@
 
 ### 步骤 1 — `KnownAgent` 加一行
 
-[agt/probe/known_agents.py](../impl/phase5-local-streaming-design.md) 的 `KNOWN_AGENTS`：
+[agt/probe/known_agents.py](../../agt/probe/known_agents.py) 的 `KNOWN_AGENTS`：
 
 ```python
 KNOWN_AGENTS: list[KnownAgent] = [
     KnownAgent("claude", "claude", "Claude Code", stream_format="claude_stream_json"),
     KnownAgent("codex", "codex", "Codex CLI", cli_style="codex"),
-    KnownAgent("cursor-agent", "cursor", "Cursor Agent"),
-    KnownAgent("copilot", "copilot", "GitHub Copilot"),
-    KnownAgent("qwen", "qwen", "Qwen CLI"),
-    KnownAgent("kimi", "kimi", "Kimi CLI"),
-    KnownAgent("opencode", "opencode", "OpenCode CLI"),
-    KnownAgent("openclaw", "openclaw", "OpenClaw CLI"),
+    KnownAgent("opencode", "opencode", "OpenCode", stream_format="opencode_json"),
+    KnownAgent("pi", "pi", "Pi", stream_format="pi_json"),
     KnownAgent("myagent", "myagent", "My Agent CLI"),  # ← 新增
 ]
 ```
@@ -157,8 +156,8 @@ class MyAgentStreamSink(StreamingSink):
 _REGISTRY: dict[str, ProviderAdapter] = {
     "claude": _claude_adapter(),
     "codex": _codex_adapter(),
-    "cursor": ..., "copilot": ..., "qwen": ..., "kimi": ...,
-    "opencode": ..., "openclaw": ...,
+    "opencode": _opencode_adapter(),
+    "pi": _pi_adapter(),
     "myagent": ProviderAdapter(                  # ← 新增一行
         command_builder=MyAgentCommandBuilder(),
         session_locator=None,
@@ -182,14 +181,16 @@ _REGISTRY: dict[str, ProviderAdapter] = {
 
 如果希望 agent 在会话里能通过 MCP 查询**在线运行时目录**（`list_runtimes`）并调用 Goal `spawn_subagents`，给 provider 的 adapter 配一个 `mcp_profile`。它描述"这个 provider 从哪个文件读 MCP 配置"，executor 在 spawn 前注入、任务结束后回收，全程不看 provider 名字字面量。
 
-现有两种 profile，都在 [agt/runtime/mcp_config.py](../../agt/runtime/mcp_config.py)：
+现有三种 profile，都在 [agt/runtime/mcp_config.py](../../agt/runtime/mcp_config.py)：
 
 | 类 | 目标文件 | 适用 |
 |---|---|---|
 | `ProjectJsonMcpConfig(".mcp.json")` | 项目内 `<cwd>/.mcp.json` | Claude Code（`{"mcpServers": {...}}`） |
 | `GlobalTomlMcpConfig()` | 全局 `~/.codex/config.toml` | Codex CLI（`[mcp_servers.agt-catalog]`） |
+| `opencode_mcp_profile()` | 项目内 `<cwd>/opencode.json` | OpenCode（`{"mcp": {"servers": {...}}}`，`type: "remote"`） |
+| `pi_mcp_profile()` | 项目内 `<cwd>/.pi/mcp.json` | Pi（`{"mcpServers": {...}}`，HTTP `url`；headless 需 `--approve`） |
 
-二选一直接复用即可，不存在就传 `None`：
+三选一直接复用即可，不存在就传 `None`：
 
 ```python
 from agt.runtime.mcp_config import GlobalTomlMcpConfig, ProjectJsonMcpConfig
@@ -210,7 +211,7 @@ from agt.runtime.mcp_config import GlobalTomlMcpConfig, ProjectJsonMcpConfig
 - 全局文件（TOML）profile 只在目标文件上加/删自己的 `[mcp_servers.agt-catalog]` 表，**绝不整文件备份/还原**，并用 fcntl 锁防止同机并发互相踩。
 - 认证配置只引用环境变量名 `AGT_TASK_TOKEN`：Claude 写 `Authorization: Bearer ${AGT_TASK_TOKEN}`，Codex 写 `bearer_token_env_var = "AGT_TASK_TOKEN"`。真实 token 由 executor 按 Step 注入，不能写入共享配置文件。
 - **Codex 的额外一把开关**：Streamable-HTTP 还得用户自己在 `~/.codex/config.toml` 里开一次 `experimental_use_rmcp_client = true`。这是用户级策略，profile **故意不写**——文档里提示用户即可。其他 provider 若也有类似的"总开关"，同理不要替你写。
-- `mcp_profile` 缺省是 `None`（claude/codex 之外的内置 provider 都是），dispatcher 对 `None` 直接 no-op，所以没接的 provider 行为不受影响。
+- `mcp_profile` 缺省是 `None`，dispatcher 对 `None` 直接 no-op，所以没接的 provider 行为不受影响。
 
 ### 步骤 4 — 验证
 
@@ -241,6 +242,7 @@ unset PYTHONPATH; .venv/bin/python -m pytest tests/ \
 | SessionLocator | [tests/test_session_locators.py](../../tests/test_session_locators.py) |
 | ResumeRejectionDetector | [tests/test_resume_detectors.py](../../tests/test_resume_detectors.py) |
 | StreamingSink | [tests/test_streaming_sinks.py](../../tests/test_streaming_sinks.py) |
+| History reader | [tests/test_load_pi_history.py](../../tests/test_load_pi_history.py) |
 | Registry | [tests/test_provider_registry.py](../../tests/test_provider_registry.py) |
 
 ---
@@ -341,7 +343,7 @@ class ClaudeV2StreamSink(StreamingSink):
 
 ```bash
 # 这条 grep 必须为空（除注释和类型注解外）
-grep -nE '"claude"|"codex"|"cursor"|"myagent"' agt/task/executor.py
+grep -nE '"claude"|"codex"|"myagent"' agt/task/executor.py
 ```
 
 如果返回的是只有 `# Claude` 注释之类，就是通过。如果有 `provider == "claude"` 这种 if/elif，就破了扩展性闭环。

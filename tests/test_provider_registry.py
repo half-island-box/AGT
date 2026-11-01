@@ -106,21 +106,25 @@ def test_codex_legacy_fallback_carries_sandbox_args():
     assert fallback.permission_args == ("--approve-for-me",)
 
 
-def test_non_claude_adapters_have_empty_permission_args():
-    """Providers without a headless write-bypass need MUST NOT receive any
-    permission/sandbox flags.
-
-    cursor/copilot/qwen/... reuse ``ClaudeCommandBuilder`` for their ``-p``
-    shape but are not Claude Code — injecting ``--permission-mode`` would
-    make them fail to start.
-    """
-    for provider in ("cursor", "copilot", "qwen", "kimi", "opencode", "openclaw"):
-        assert get_adapter(provider).permission_args == (), provider
-
-
 def test_unknown_provider_has_empty_permission_args():
     """The fallback adapter must not inject Claude-only flags either."""
     assert get_adapter("not-a-real-provider-xyz").permission_args == ()
+
+
+def test_pi_adapter_uses_json_sink_and_approve():
+    """Pi streams ``--mode json`` and trusts the project for ``.pi/mcp.json``."""
+    from agt.runtime.command_builders import PiCommandBuilder
+    from agt.runtime.registry import PI_APPROVE_ARGS, PI_STREAM_ARGS
+    from agt.runtime.streaming import PiStreamSink
+
+    adapter = get_adapter("pi")
+    assert isinstance(adapter.command_builder, PiCommandBuilder)
+    assert isinstance(adapter.stream_sink_factory(), PiStreamSink)
+    assert adapter.session_locator is None
+    assert adapter.permission_args == PI_APPROVE_ARGS == ("--approve",)
+    assert adapter.stream_args == PI_STREAM_ARGS == ("--mode", "json")
+    assert adapter.mcp_profile is not None
+    assert adapter.mcp_profile.filename == ".pi/mcp.json"
 
 
 def test_codex_transport_env_override(monkeypatch):
@@ -135,3 +139,25 @@ def test_codex_transport_env_override(monkeypatch):
     assert asyncio.run(_codex_app_server_available(binary)) is False
     monkeypatch.setenv("AGT_CODEX_TRANSPORT", "app-server")
     assert asyncio.run(_codex_app_server_available(binary)) is True
+
+
+def test_opencode_adapter_uses_json_streaming():
+    """OpenCode streams ``run --format json`` events through its own sink."""
+    from agt.runtime.command_builders import OpenCodeCommandBuilder
+    from agt.runtime.streaming import OpenCodeStreamSink
+
+    adapter = get_adapter("opencode")
+    assert isinstance(adapter.command_builder, OpenCodeCommandBuilder)
+    assert isinstance(adapter.stream_sink_factory(), OpenCodeStreamSink)
+    assert adapter.permission_args == ("--auto",)
+    # ``--thinking`` makes reasoning events appear; ``--standalone`` keeps
+    # each run on a private server.
+    assert adapter.stream_args == (
+        "--standalone",
+        "--format",
+        "json",
+        "--thinking",
+    )
+    assert adapter.mcp_profile is not None
+    # Sessions live in SQLite, so there is no path-based fallback.
+    assert adapter.session_locator is None

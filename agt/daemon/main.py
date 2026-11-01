@@ -6,6 +6,7 @@ Usage:
     agt daemon stop    (signals an already-running daemon to exit)
     agt daemon status  (prints whether the pidfile is alive)
 """
+
 from __future__ import annotations
 
 import argparse
@@ -52,6 +53,15 @@ RECONNECT_CAP_SECONDS = 60
 
 
 def _runtime_snapshot(daemon: Daemon) -> list[dict]:
+    """Project the in-process ``Daemon._runtimes`` into the snapshot dict
+    shape that the Server expects over both HTTP (``heartbeat``) and
+    WebSocket (``runtimes.register``).
+
+    Kept as a free function so the periodic heartbeat loop and the
+    on-connect hook both consume the exact same serialization — drift
+    here would cause one path to send a shape the Server's schema
+    rejects.
+    """
     return [
         {
             "name": rt.name,
@@ -65,6 +75,11 @@ def _runtime_snapshot(daemon: Daemon) -> list[dict]:
 
 
 def _read_pidfile() -> int | None:
+    """Return the live pid from the canonical daemon pid file.
+
+    Delegates to ``agt.daemon.pidfile`` so the CLI can perform the same
+    check without importing the full daemon startup path.
+    """
     return read_daemon_pidfile(PID_FILE)
 
 
@@ -156,7 +171,7 @@ async def _sleep_or_wake(
     else:
         event.clear()
 
-# daemon获取server任务的核心方法
+
 async def _claim_loop(
     client: ServerClient,
     daemon: Daemon,
@@ -167,13 +182,17 @@ async def _claim_loop(
     ws_server: DaemonWsServer | None = None,
 ) -> None:
     """Periodically claim tasks from the server, up to max_concurrent at a time.
+
     Two modes:
 
     - **HTTP-only** (``ws_server`` is ``None``): local daemon, plain
       ``client.claim_tasks`` over HTTP.
     - **Reverse dial** (``ws_server`` provided): daemon listens, server
       dials in (Step 3.5). When ``ws_server.current_link`` is set, we
-      use it as the WS source. 
+      use it as the WS source. When the link is missing, the HTTP
+      fallback is futile (server is in NAT — that's why we went
+      reverse), so we log once and sleep silently until the link
+      comes up.
     """
     # ``runtime_ids`` is derived from the daemon's probed runtimes.
     # Refreshing each tick ensures a runtime added after startup (via

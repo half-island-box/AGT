@@ -236,7 +236,7 @@ def test_pipe_path_prints_stdout_live(tmp_path, capsys):
     Regression guard: the Phase 5 refactor replaced the pre-existing
     ``StreamReader`` (which prints each line via its default
     ``on_stdout``) with a silent ``_read_lines`` collector that appended
-    to a list without printing — so codex / cursor / copilot etc. chats
+    to a list without printing — so pipe-text providers (e.g. codex) chats
     returned with zero visible output. ``result.stdout`` must also keep
     its newlines (contract A: plain text).
     """

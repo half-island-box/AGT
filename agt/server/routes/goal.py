@@ -42,6 +42,7 @@ class GoalSubmitResponse(BaseModel):
 @router.get("/runs", response_model=GoalRunListResponse)
 async def goal_runs(
     db: AsyncSession = Depends(get_db),
+    cwd: str | None = Query(None, description="Project directory to filter by"),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> GoalRunListResponse:

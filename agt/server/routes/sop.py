@@ -68,7 +68,6 @@ class SopNodeStatus(BaseModel):
     loop_name: str | None = None
     depends_on: list[str] = []
     artifacts: list[str] = []
-    artifact_details: list[SopArtifactSummary] = []
     provider: str | None = None
     identity_did: str | None = None
     daemon_id: str | None = None
@@ -262,13 +261,6 @@ async def sop_status(
                 loop_name=job.sop_loop_name,
                 depends_on=dep_names,
                 artifacts=[make_artifact_uri(a.artifact_id) for a in arts],
-                artifact_details=[
-                    SopArtifactSummary(
-                        uri=make_artifact_uri(a.artifact_id),
-                        name=a.name,
-                    )
-                    for a in arts
-                ],
                 provider=provider,
                 identity_did=job.identity_did,
                 daemon_id=job.target_daemon_id or meta.get("explicit_daemon"),

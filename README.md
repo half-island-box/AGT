@@ -1,11 +1,12 @@
 # agt
 
+![AGT — a local bridge and orchestrator for AI coding-agent CLIs](assets/banner.svg)
+
 [中文文档](README_zh.md) | **English**
 
 `agt` is a local bridge and orchestrator for AI coding-agent CLIs. It gives
-Claude Code, Codex, Cursor Agent, GitHub Copilot, Qwen, Kimi, OpenCode,
-OpenClaw, and custom CLIs one interface for chat, queued execution, multi-agent
-workflows, artifacts, and distributed routing.
+Claude Code, Codex, OpenCode, Pi, and custom CLIs one interface for chat, queued
+execution, multi-agent workflows, artifacts, and distributed routing.
 
 > **Status:** early and under active development. The CLI, server, daemon,
 > Goal orchestration, and SOP workflows are usable; the desktop client is still
@@ -35,18 +36,10 @@ workflows, artifacts, and distributed routing.
 ### Install from pip
 
 ```bash
-python -m pip install agt-team
+pip install agt-team --upgrade
 
-agt probe
-agt run --provider claude --prompt "Summarize the current repository"
-```
-
-For queued execution and orchestration, start the server and local daemon:
-
-```bash
-agt server start --detach
-agt daemon start --detach
-agt task submit --prompt "Say hello" --provider claude
+agt server start -d
+agt daemon start -d
 ```
 
 ### Install from source
@@ -56,8 +49,9 @@ git clone https://github.com/half-island-box/agent-team.git
 cd agent-team
 uv sync
 
-uv run agt probe
-uv run agt run --provider claude --prompt "Summarize the current repository"
+uv tool install -e .
+agt server start -d
+agt daemon start -d
 ```
 
 ## Visual interfaces
@@ -66,7 +60,9 @@ uv run agt run --provider claude --prompt "Summarize the current repository"
 
 - **Web console** — start the server and open
   `http://127.0.0.1:8420/console/` to manage projects, agents, chat, SOPs,
-  goals, daemons, identities, and usage.
+  goals, daemons, identities, and usage. The page bundles ship inside the
+  package (and in a source checkout one that is missing is built for you), so
+  no separate `npm` step is needed to serve it.
 - **VS Code extension** — connect the AGT extension to the same local server
   for editor-native chat, SOP editing, Goal runs, daemon management, and
   settings.

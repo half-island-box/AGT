@@ -11,7 +11,6 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ...comm.errors import RPCRejected, WSRPCUnavailable, WSRPCUncertain
 from ..database import get_db
 from ..models import StepModel
 from ..schemas import (
@@ -48,30 +47,6 @@ def _daemon_links(request: Request) -> dict[str, object]:
     ``online`` flag then relies on heartbeat liveness alone.
     """
     return getattr(request.app.state, "daemon_links", None) or {}
-
-
-def _rpc_error(exc: Exception) -> HTTPException:
-    """Map a reverse-dial ``fs.list`` failure onto a console-facing HTTP error."""
-    if isinstance(exc, WSRPCUnavailable):
-        return HTTPException(
-            status_code=503,
-            detail={"type": "daemon_offline", "message": "daemon is offline"},
-        )
-    if isinstance(exc, WSRPCUncertain):
-        return HTTPException(
-            status_code=504,
-            detail={"type": "daemon_timeout", "message": "daemon did not answer in time"},
-        )
-    body = exc.body if isinstance(exc, RPCRejected) and isinstance(exc.body, dict) else {}
-    error_type = str(body.get("type") or "daemon_rejected")
-    message = str(body.get("message") or "daemon rejected the request")
-    # ``path_error`` / ``validation_error`` are user-input problems → 400.
-    # ``unknown_method`` means an older daemon without ``fs.list`` → 502.
-    status_code = 400 if error_type in {"path_error", "validation_error"} else 502
-    return HTTPException(
-        status_code=status_code,
-        detail={"type": error_type, "message": message},
-    )
 
 
 @router.get("", response_model=ListDaemonsResponse)

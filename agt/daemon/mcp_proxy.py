@@ -1,12 +1,11 @@
-"""Remote-daemon proxy MCP — forwards catalog queries over the reverse-dial link.
+"""Remote-daemon proxy MCP over the reverse-dial link.
 
 A remote agent (behind NAT) cannot reach the Server's HTTP MCP endpoint, so
 its daemon runs a *proxy* MCP server on ``127.0.0.1:<mcp_port>`` (Streamable
-HTTP). The proxy exposes the **same** ``list_runtimes`` tool as the Server,
-but instead of rendering locally it forwards each call over the existing
-reverse-dial WebSocket as a ``catalog.list`` inbound RPC
-(:mod:`agt.server.daemon_link`). No catalog data lives on the daemon; this is
-a pure forward — the "processing only remote daemons do".
+HTTP). It exposes the same catalog and Goal spawn tools as the Server, but
+forwards each call over the existing reverse-dial WebSocket. The Server
+remains the authority for task identity, budgets, routing and database
+writes.
 
 When the reverse-dial link is down, the tool answers a graceful
 ``{"error": "catalog unavailable"}`` string instead of hanging, so the agent
@@ -275,7 +274,6 @@ def build_proxy_mcp(ws_server: Any) -> FastMCP:
     return mcp
 
 
-# 开放daemons状态的mcp接口
 class ProxyMcpServer:
     """Serves the proxy MCP over Streamable HTTP on ``127.0.0.1:<port>``.
 

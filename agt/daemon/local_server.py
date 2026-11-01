@@ -1,3 +1,17 @@
+"""LocalResourceServer — a tiny HTTP server bound to 127.0.0.1.
+
+Used by agent subprocesses to fetch resources (git checkout of repos, skill
+bundles) from the parent daemon. This is NOT a daemon control plane and
+NOT a CLI endpoint.
+
+Auth model:
+    Every endpoint (except ``/health``) requires the ``X-Daemon-Local-Token``
+    header to match the random per-launch token configured on the daemon.
+    Subprocesses inherit the token via the ``AGT_DAEMON_TOKEN`` env var. The
+    token is rotated every daemon restart, so a leaked token self-expires on
+    restart. ``127.0.0.1`` binding still applies as defense-in-depth.
+"""
+
 from __future__ import annotations
 
 import asyncio

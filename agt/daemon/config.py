@@ -99,6 +99,13 @@ def _entry_for_url(url: str | None) -> DaemonEntry | None:
 
 
 def _parse_allowlist(raw: str | None) -> list[Path]:
+    """Parse ``AGT_AGENT_CWD_ALLOWLIST`` into a list of absolute Path roots.
+
+    Format: colon-separated absolute paths. Empty / unset → ``[Path.home()]``
+    (the safe default). A single ``/`` is allowed and means "anywhere" —
+    same semantics as giving the daemon full filesystem access; only set
+    this when you trust every submitter.
+    """
     if not raw or not raw.strip():
         return [Path.home()]
     out: list[Path] = []
@@ -134,7 +141,7 @@ _MANAGED_KEYS: dict[str, str | None] = {
     "server_url": "AGT_SERVER_URL",
 }
 
-# Daemon内的配置文件，包含了daemon的运行时配置，支持从环境变量和持久化JSON文件加载
+
 @dataclass
 class ManagedDaemonConfig:
     """The subset of daemon settings that can be persisted in
@@ -164,10 +171,17 @@ class ResolvedSetting:
 
 
 def daemon_config_file_path() -> Path:
+    """Canonical location of the user-level daemon configuration file."""
     return Path.home() / ".agt" / "daemon.json"
 
 
 def _normalize_config_path(raw: str) -> Path:
+    """Expand ``~`` and validate that the result is an absolute path.
+
+    Symlinks are intentionally preserved; the daemon resolves paths at use
+    time. Trailing slashes are stripped for stable persistence, except for
+    the filesystem root ``/`` which remains valid.
+    """
     expanded = os.path.expanduser(raw)
     if expanded != "/":
         expanded = expanded.rstrip("/")
@@ -180,6 +194,7 @@ def _normalize_config_path(raw: str) -> Path:
 
 
 def _validate_managed_config(data: dict[str, Any]) -> ManagedDaemonConfig:
+    """Parse and validate the contents of ``daemon.json``."""
     if not isinstance(data, dict):
         raise DaemonConfigError("configuration file must contain a JSON object")
 
@@ -778,41 +793,70 @@ def _load_daemon_id(url: str | None, persisted_id: str | None = None) -> str:
     return str(uuid.uuid4())[:8]
 
 
-# Daemon默认配置类
 @dataclass
 class DaemonConfig:
     """All knobs needed to run the daemon. Loaded from env in ``from_env()``."""
 
+    # Server integration (Phase 2).
     server_base_url: str | None = None
+    # Shared HMAC secret with the Server; required to sign task tokens injected
+    # into spawned agent subprocesses (Phase 3). Empty disables token injection.
     server_secret: str = ""
 
-    # Daemon信息类
+    # Local identity.
+    # ``daemon_id`` is the stable machine/identity key (uuid5 of the daemon's
+    # URL when available); ``daemon_name`` is the human-readable label (from
+    # ``~/.agt/daemons`` name, or the device name). name may change without
+    # affecting id; changing the URL changes the id (address moved).
+    # ``daemon_url`` is the URL this daemon advertises for itself, taken from
+    # the matching entry in ``~/.agt/daemons`` (used in the daemon_token's
+    # ``url`` claim for auditability).
     daemon_id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
     daemon_name: str = field(default_factory=socket.gethostname)
     daemon_url: str = ""
     device_name: str = field(default_factory=socket.gethostname)
     runtime_name: str = ""
 
-    # Dameon运行配置的默认值
+    # Execution.
     max_concurrent_tasks: int = 1
     agent_timeout: int = 600  # seconds
     work_dir_root: Path = field(
         default_factory=lambda: Path.home() / ".agt" / "workspaces"
     )
-   
+    # cwd injection (Phase 4 workdir supplement): list of root directories
+    # that ``agent_cwd`` from a claim payload is allowed to land under.
+    # Default: ``[Path.home()]``. Override via ``AGT_AGENT_CWD_ALLOWLIST``
+    # (colon-separated absolute paths; ``/`` = allow anywhere). May be
+    # ``None`` for older ``DaemonConfig(...)`` callers — the daemon falls
+    # back to ``[Path.home()]`` at use time (see ``Daemon.run``).
     agent_cwd_allowlist: list[Path] | None = None
 
-    
+    # Local resource server (Phase 2). Port 0 = disabled.
     daemon_port: int = 8421
+    # Shared secret with spawned agent subprocesses for X-Daemon-Local-Token.
+    # Random per-launch by default; can be pinned via AGT_DAEMON_LOCAL_TOKEN.
     local_token: str = ""
 
- 
+    # Reverse-dial mode (Step 3.5). When True, the daemon listens on
+    # ``ws_listen_port`` for the Server to dial in, instead of dialing
+    # the Server itself. When False (default), the daemon claims via
+    # plain HTTP — the local-daemon path.
     listen_mode: bool = False
     ws_listen_port: int = 8422  # AGT_DAEMON_WS_PORT
+
+    # Phase B: reverse-dial proxy MCP server port (127.0.0.1 only). The
+    # remote daemon serves the catalog proxy here; local agents instead
+    # reach the Server's ``/mcp`` directly, so this is only bound in
+    # ``listen_mode``.
     mcp_port: int = 8428  # AGT_DAEMON_MCP_PORT
 
     @property
     def server_url(self) -> str:
+        """Convenience accessor for the Server base URL.
+
+        Returns ``AGT_SERVER_URL`` if set, otherwise a localhost default
+        pointing at the well-known Server port.
+        """
         if self.server_base_url:
             return self.server_base_url
         return os.environ.get("AGT_SERVER_URL", "http://127.0.0.1:8420")

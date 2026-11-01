@@ -11,6 +11,7 @@ from pathlib import Path
 
 
 # Default pid file location. Computed lazily so ``HOME`` overrides
+# (set in tests / by users with non-default homes) take effect.
 default_pid_file = Path.home() / ".agt" / "daemon.pid"
 
 
@@ -36,6 +37,11 @@ def _pidfile_alive(pid: int) -> bool:
 
 
 def read_daemon_pidfile(path: Path | None = None) -> int | None:
+    """Return the live pid stored in ``path``, or None if stale/missing.
+
+    If ``path`` is None, falls back to the canonical ``~/.agt/daemon.pid``,
+    computed lazily (respects runtime ``HOME``).
+    """
     target = path if path is not None else _default_pid_file()
     if not target.exists():
         return None
