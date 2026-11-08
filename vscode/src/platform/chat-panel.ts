@@ -109,6 +109,7 @@ export class ChatPanel {
   private ctx: ChatBridgeContext;
   private streamAbort: AbortController | undefined;
   private streaming = false;
+  private turnGeneration = 0;
   private preferredSelection: ChatSelection | undefined;
 
   constructor(ctx: ChatBridgeContext) {
@@ -126,6 +127,7 @@ export class ChatPanel {
   }
 
   async deactivate(): Promise<void> {
+    this.turnGeneration += 1;
     this.streamAbort?.abort();
     this.streaming = false;
     this.view = undefined;
@@ -377,7 +379,18 @@ export class ChatPanel {
           const jobId = String(msg.params?.jobId ?? '');
           if (!jobId) throw new Error('no active chat job');
           const stopped = await this.ctx.lifecycle.api.stopChatJob(jobId);
-          await this.emitChat({ kind: 'cancelling', jobId, status: stopped.status });
+          if (stopped.status === 'waiting_input') {
+            // Retire the old turn before emitting: its in-flight SSE reader may
+            // still throw asynchronously, but all of its events are now stale.
+            this.turnGeneration += 1;
+            this.streaming = false;
+            const oldStream = this.streamAbort;
+            this.streamAbort = undefined;
+            oldStream?.abort();
+            await this.emitChat({ kind: 'stopped', jobId, status: stopped.status });
+          } else {
+            await this.emitChat({ kind: 'cancelling', jobId, status: stopped.status });
+          }
           result = { stopped: true, status: stopped.status };
           break;
         }
@@ -432,9 +445,15 @@ export class ChatPanel {
     currentJobId: string | null;
     message?: ChatInputMessage | null;
   }): Promise<void> {
+    const generation = ++this.turnGeneration;
+    const streamAbort = new AbortController();
     this.streaming = true;
-    this.streamAbort = new AbortController();
+    this.streamAbort = streamAbort;
     const api = this.ctx.lifecycle.api;
+    const emitIfCurrent = async (payload: Record<string, unknown>): Promise<void> => {
+      if (generation !== this.turnGeneration) return;
+      await this.emitChat(payload);
+    };
     try {
       const job = input.currentJobId
         ? await api.appendChatInput(input.currentJobId, input.prompt, input.message)
@@ -449,29 +468,29 @@ export class ChatPanel {
             cwd: activeWorkspaceRoot() || null,
             message: input.message,
           });
-      await this.emitChat({ kind: 'started', ...job });
+      await emitIfCurrent({ kind: 'started', ...job });
 
       let finalEvent: TaskStreamEvent | undefined;
       try {
-        for await (const event of api.streamTask(job.task_id, this.streamAbort.signal)) {
+        for await (const event of api.streamTask(job.task_id, streamAbort.signal)) {
           if (event.type === 'done') {
             // stderr belongs in execution logs, not the chat transcript.
             const { stderr: _stderr, ...safeDone } = event;
             finalEvent = event;
-            await this.emitChat({ kind: 'done', ...safeDone });
+            await emitIfCurrent({ kind: 'done', ...safeDone });
             break;
           }
-          await this.emitChat({ kind: event.type, ...event });
+          await emitIfCurrent({ kind: event.type, ...event });
         }
       } catch (err) {
-        if (this.streamAbort.signal.aborted) {
+        if (streamAbort.signal.aborted) {
           return;
         }
-        await this.emitChat({ kind: 'streamFallback', message: cleanError(err) });
+        await emitIfCurrent({ kind: 'streamFallback', message: cleanError(err) });
       }
 
       if (!finalEvent) {
-        const status = await this.pollTask(job.task_id);
+        const status = await this.pollTask(job.task_id, streamAbort.signal);
         finalEvent = {
           type: 'done',
           status: status.status,
@@ -482,31 +501,33 @@ export class ChatPanel {
           usage: status.usage ?? null,
           model: status.usage?.model ?? null,
         };
-        await this.emitChat({ kind: 'done', ...finalEvent });
+        await emitIfCurrent({ kind: 'done', ...finalEvent });
       }
 
       const [jobStatus, sessions] = await Promise.all([
         api.jobStatus(job.job_id).catch((err: unknown) => err),
         chatSessions(api, input.daemonId).catch((err: unknown) => err),
       ]);
-      await this.emitChat({
+      await emitIfCurrent({
         kind: 'settled',
         jobStatus: jobStatus instanceof Error ? undefined : jobStatus,
         sessions: sessions instanceof Error ? [] : (sessions as ChatSessionInfo[]),
         sessionsError: sessions instanceof Error ? cleanError(sessions) : undefined,
       });
     } catch (err) {
-      await this.emitChat({ kind: 'error', message: cleanError(err) });
+      await emitIfCurrent({ kind: 'error', message: cleanError(err) });
     } finally {
-      this.streaming = false;
-      this.streamAbort = undefined;
+      if (generation === this.turnGeneration) {
+        this.streaming = false;
+        this.streamAbort = undefined;
+      }
     }
   }
 
-  private async pollTask(taskId: string): Promise<TaskStatusInfo> {
+  private async pollTask(taskId: string, signal?: AbortSignal): Promise<TaskStatusInfo> {
     const deadline = Date.now() + 300_000;
     while (Date.now() < deadline) {
-      if (this.streamAbort?.signal.aborted) {
+      if (signal?.aborted) {
         throw new Error('chat stream aborted');
       }
       const status = await this.ctx.lifecycle.api.taskStatus(taskId);

@@ -101,6 +101,16 @@ class ClaimResponse(BaseModel):
     cancelled_task_ids: list[str] = []
 
 
+class CancellationRequest(BaseModel):
+    """Lightweight cancellation poll for an otherwise busy HTTP daemon."""
+
+    daemon_id: str
+
+
+class CancellationResponse(BaseModel):
+    cancelled_task_ids: list[str] = []
+
+
 class TaskPayload(BaseModel):
     """A task handed off from server to daemon for execution."""
 
@@ -915,6 +925,8 @@ __all__ = [
     "SubmitTaskResponse",
     "ClaimRequest",
     "ClaimResponse",
+    "CancellationRequest",
+    "CancellationResponse",
     "TaskPayload",
     "ReportRequest",
     "ReportResponse",

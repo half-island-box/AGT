@@ -1658,7 +1658,12 @@ async function cancelTurn(): Promise<void> {
   busy = 'cancelling';
   renderControls();
   try {
-    await bridge.call('stop', { jobId: currentJob.jobId });
+    const stopped = await bridge.call<{ status?: string }>('stop', {
+      jobId: currentJob.jobId,
+    });
+    if (stopped.status === 'waiting_input') {
+      applyChatEvent({ kind: 'stopped', status: stopped.status });
+    }
   } catch (err) {
     notice = err instanceof Error ? err.message : String(err);
     busy = lastAssistant()?.streaming ? 'sending' : 'settling';
@@ -1752,6 +1757,19 @@ function applyChatEvent(payload: ChatEvent): void {
   }
   if (kind === 'cancelling') {
     busy = 'cancelling';
+    renderControls();
+    return;
+  }
+  if (kind === 'stopped') {
+    const assistant = lastAssistant();
+    if (assistant?.streaming) {
+      assistant.streaming = false;
+      if (!assistant.content) assistant.content = tr('chat.stopped');
+    }
+    if (currentJob) currentJob.status = 'waiting_input';
+    busy = 'idle';
+    notice = null;
+    renderMessages();
     renderControls();
     return;
   }

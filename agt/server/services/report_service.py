@@ -272,7 +272,49 @@ async def record_step_result_for_daemon(
         raise ValueError({"type": "task_not_owned", "message": step_id})
 
 
-    if step.status == "cancelled" and status != "cancelled":
+    # A Server-side interruption is authoritative. Once the Step is
+    # cancelled, a daemon report is only a late transport acknowledgement:
+    # it must not mutate the interrupted transcript, publish another terminal
+    # frame, or drive the Job state machine while a follow-up turn runs. A
+    # cancellation report may still reveal the provider session pointer, so
+    # preserve (or drop) only that pointer for a later turn.
+    if step.status == "cancelled":
+        if status == "cancelled" and step.job_id is not None:
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            parent_job = await db.get(JobModel, step.job_id)
+            existing = (
+                await db.execute(
+                    select(SessionModel).where(
+                        SessionModel.job_id == step.job_id,
+                        SessionModel.identity_did == (step.identity_did or ""),
+                        SessionModel.provider == step.provider,
+                    )
+                )
+            ).scalars().first()
+            if resume_rejected:
+                if existing is not None:
+                    await db.delete(existing)
+                step.session_id = None
+            elif session_id:
+                if existing is None:
+                    db.add(
+                        SessionModel(
+                            job_id=step.job_id,
+                            identity_did=step.identity_did or "",
+                            provider=step.provider,
+                            session_id=session_id,
+                            cwd=parent_job.cwd if parent_job is not None else None,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
+                else:
+                    existing.session_id = session_id
+                    existing.updated_at = now
+                    if parent_job is not None:
+                        existing.cwd = parent_job.cwd
+                step.session_id = session_id
+            await db.commit()
         return {
             "recorded": False,
             "reason": "task_cancelled",
@@ -532,6 +574,9 @@ async def record_step_progress_for_daemon(
         raise ValueError({"type": "task_not_found", "message": step_id})
     if step.daemon_id != daemon_id:
         raise ValueError({"type": "task_not_owned", "message": step_id})
+
+    if step.status == "cancelled":
+        return {"recorded": False}
 
     normalized = normalize_agent_events(events)
     new_events = await _insert_agent_events(db, step_id, normalized)

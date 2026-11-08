@@ -19,6 +19,8 @@ from ..schemas import (
     ArtifactOut,
     ClaimRequest,
     ClaimResponse,
+    CancellationRequest,
+    CancellationResponse,
     ProgressRequest,
     ProgressResponse,
     ReportRequest,
@@ -34,6 +36,7 @@ from ..schemas import (
 from ..services.claim_service import (
     claim_steps_for_daemon,
     cancelled_steps_for_daemon,
+    mark_cancellations_delivered,
     notify_steps_available,
 )
 from ..services.artifact_service import artifact_to_out, artifacts_for_steps
@@ -259,7 +262,23 @@ async def claim_task(
     # Phase 4: HTTP long-poll cancel channel — this daemon's unreported
     # cancellations ride along on every claim response.
     cancelled_ids = await cancelled_steps_for_daemon(db, payload.daemon_id)
+    await mark_cancellations_delivered(db, cancelled_ids)
     return ClaimResponse(tasks=tasks, cancelled_task_ids=cancelled_ids)
+
+
+@router.post("/cancellations", response_model=CancellationResponse)
+async def task_cancellations(
+    payload: CancellationRequest,
+    db: AsyncSession = Depends(get_db),
+) -> CancellationResponse:
+    """Drain cancellations without claiming new work.
+
+    A daemon whose execution semaphore is full no longer has to wait for a
+    free claim slot before it learns that a running Step was interrupted.
+    """
+    cancelled_ids = await cancelled_steps_for_daemon(db, payload.daemon_id)
+    await mark_cancellations_delivered(db, cancelled_ids)
+    return CancellationResponse(cancelled_task_ids=cancelled_ids)
 
 
 @router.post("/{task_id}/report")

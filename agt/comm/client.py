@@ -283,6 +283,20 @@ class ServerClient:
         # along (see ClaimResponse.cancelled_task_ids).
         return resp.get("tasks", []), resp.get("cancelled_task_ids", [])
 
+    async def cancelled_tasks(self) -> list[str]:
+        """Drain Server-side cancellations without claiming new work.
+
+        Used when the daemon's execution semaphore is full: the ordinary
+        claim channel would be skipped until a task finishes, delaying a
+        user-initiated stop.
+        """
+        resp = await self._post(
+            "/api/tasks/cancellations",
+            {"daemon_id": self._daemon_id},
+        )
+        value = resp.get("cancelled_task_ids", [])
+        return list(value) if isinstance(value, list) else []
+
     async def report_task(
         self,
         task_id: str,

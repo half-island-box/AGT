@@ -403,6 +403,8 @@ class TaskExecutor:
         start: float,
         stdout: str = "",
         stderr: str = "",
+        session_id: str | None = None,
+        resume_rejected: bool = False,
         events: list | None = None,
     ) -> TaskResult:
         """Terminal result for a server-cancelled Step (Phase 4).
@@ -420,10 +422,42 @@ class TaskExecutor:
             stderr=stderr,
             duration=time.monotonic() - start,
             status="cancelled",
-            session_id=None,
-            resume_rejected=False,
+            session_id=session_id,
+            resume_rejected=resume_rejected,
             events=list(events or []),
         )
+
+    @staticmethod
+    def _signal_process_tree(process, sig: int) -> None:
+        """Signal the agent process, preferably its whole process group."""
+        if getattr(process, "returncode", None) is not None:
+            return
+        pid = getattr(process, "pid", None)
+        if os.name == "posix" and pid is not None:
+            try:
+                os.killpg(os.getpgid(pid), sig)
+                return
+            except ProcessLookupError:
+                return
+        try:
+            if hasattr(process, "send_signal"):
+                process.send_signal(sig)
+            else:
+                process.kill()
+        except ProcessLookupError:
+            pass
+
+    async def _terminate_process_tree(
+        self, process, *, grace_seconds: float = 0.75
+    ) -> None:
+        """Terminate an agent and its tool descendants, then reap it."""
+        self._signal_process_tree(process, getattr(os, "SIGTERM", 15))
+        try:
+            await asyncio.wait_for(process.wait(), timeout=grace_seconds)
+        except asyncio.TimeoutError:
+            self._signal_process_tree(process, getattr(os, "SIGKILL", 9))
+            with contextlib.suppress(ProcessLookupError):
+                await process.wait()
 
     async def _execute_interactive(
         self,
@@ -450,11 +484,7 @@ class TaskExecutor:
         try:
             exit_code = await asyncio.wait_for(process.wait(), timeout=timeout)
         except asyncio.TimeoutError:
-            process.kill()
-            try:
-                await process.wait()
-            except ProcessLookupError:
-                pass
+            await self._terminate_process_tree(process)
             duration = time.monotonic() - start
             return TaskResult(
                 task_id=task.task_id,
@@ -471,9 +501,7 @@ class TaskExecutor:
             # Phase 4: server-initiated cancel (tasks.cancel / claim
             # channel) cancelled the outer task — kill the agent and
             # surface a cancelled result through the normal report path.
-            process.kill()
-            with contextlib.suppress(ProcessLookupError):
-                await process.wait()
+            await self._terminate_process_tree(process)
             return self._cancelled_result(task, start)
         duration = time.monotonic() - start
         return TaskResult(
@@ -550,6 +578,7 @@ class TaskExecutor:
             stderr=asyncio.subprocess.PIPE,
             cwd=str(work_dir),
             env=env,
+            start_new_session=True,
         )
 
         # Protocol sinks (codex app-server) start the conversation over
@@ -577,11 +606,7 @@ class TaskExecutor:
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
-            process.kill()
-            try:
-                await process.wait()
-            except ProcessLookupError:
-                pass
+            await self._terminate_process_tree(process)
             duration = time.monotonic() - start
             return TaskResult(
                 task_id=task.task_id,
@@ -597,11 +622,21 @@ class TaskExecutor:
             # Phase 4: server-initiated cancel — kill the agent, surface
             # cancelled through the normal report path. The finally
             # block below still stops the progress sampler.
-            process.kill()
-            with contextlib.suppress(ProcessLookupError):
-                await process.wait()
+            await self._terminate_process_tree(process)
+            final = sink.finalize()
+            session_id, resume_rejected = self._resolve_streaming_outcome(
+                task=task,
+                result=final,
+                sink=sink,
+                adapter=adapter,
+            )
             return self._cancelled_result(
-                task, start, events=list(getattr(sink, "events", []) or []),
+                task,
+                start,
+                stdout=final.text,
+                session_id=session_id,
+                resume_rejected=resume_rejected,
+                events=list(final.events or []),
             )
         finally:
             if sampler_task is not None:
@@ -833,6 +868,7 @@ class TaskExecutor:
             stderr=asyncio.subprocess.PIPE,
             cwd=str(work_dir),
             env=env,
+            start_new_session=True,
         )
 
         # Print stdout live (the agent's answer streams to the terminal
@@ -856,11 +892,7 @@ class TaskExecutor:
                 reader.read_all(), timeout=timeout,
             )
         except asyncio.TimeoutError:
-            process.kill()
-            try:
-                await process.wait()
-            except ProcessLookupError:
-                pass
+            await self._terminate_process_tree(process)
             duration = time.monotonic() - start
             return TaskResult(
                 task_id=task.task_id,
@@ -874,9 +906,7 @@ class TaskExecutor:
         except asyncio.CancelledError:
             # Phase 4: server-initiated cancel — kill the agent, surface
             # cancelled through the normal report path.
-            process.kill()
-            with contextlib.suppress(ProcessLookupError):
-                await process.wait()
+            await self._terminate_process_tree(process)
             return self._cancelled_result(task, start)
 
         await process.wait()

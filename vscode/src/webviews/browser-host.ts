@@ -312,9 +312,12 @@ async function resolveChatRun(jobId: string, dir: string | null) {
   };
 }
 
-async function pollTask(taskId: string): Promise<TaskStatusInfo> {
+async function pollTask(taskId: string, signal?: AbortSignal): Promise<TaskStatusInfo> {
   const deadline = Date.now() + 300_000;
   while (Date.now() < deadline) {
+    if (signal?.aborted) {
+      throw new Error('chat stream aborted');
+    }
     const task = await api.taskStatus(taskId);
     if (!['pending', 'running'].includes(task.status)) return task;
     await new Promise((resolve) => window.setTimeout(resolve, 1000));
@@ -322,12 +325,22 @@ async function pollTask(taskId: string): Promise<TaskStatusInfo> {
   throw new Error('task did not finish within 300s');
 }
 
+let chatTurnGeneration = 0;
+let chatTurnAbort: AbortController | undefined;
+
 async function runChatTurn(
   params: Params,
   project: ConsoleProjectInfo | null,
   fallbackProject: string,
   emit: Emit,
 ): Promise<void> {
+  const generation = ++chatTurnGeneration;
+  const streamAbort = new AbortController();
+  chatTurnAbort = streamAbort;
+  const emitIfCurrent = async (payload: Record<string, unknown>): Promise<void> => {
+    if (generation !== chatTurnGeneration) return;
+    await emit('chat', payload);
+  };
   const daemonId = params.daemonId ? String(params.daemonId) : null;
   try {
     const currentJobId = params.currentJobId ? String(params.currentJobId) : null;
@@ -354,27 +367,30 @@ async function runChatTurn(
           cwd: project?.path ?? fallbackProject,
           message,
         });
-    emit('chat', { kind: 'started', ...job });
+    await emitIfCurrent({ kind: 'started', ...job });
     let final: Record<string, unknown> | null = null;
     try {
-      for await (const event of api.streamTask(job.task_id)) {
+      for await (const event of api.streamTask(job.task_id, streamAbort.signal)) {
         if (event.type === 'done') {
           const { stderr: _stderr, ...safe } = event;
           final = { kind: 'done', ...safe };
-          emit('chat', final);
+          await emitIfCurrent(final);
           break;
         }
-        emit('chat', { kind: event.type, ...event });
+        await emitIfCurrent({ kind: event.type, ...event });
       }
     } catch (err) {
-      emit('chat', {
+      if (streamAbort.signal.aborted) {
+        return;
+      }
+      await emitIfCurrent({
         kind: 'streamFallback',
         message: err instanceof Error ? err.message : String(err),
       });
     }
     if (!final) {
-      const task = await pollTask(job.task_id);
-      emit('chat', {
+      const task = await pollTask(job.task_id, streamAbort.signal);
+      await emitIfCurrent({
         kind: 'done',
         status: task.status,
         stdout: task.stdout ?? '',
@@ -388,9 +404,9 @@ async function runChatTurn(
       api.jobStatus(job.job_id).catch(() => null),
       chatSessions(projectCwds(project, fallbackProject)).catch(() => []),
     ]);
-    emit('chat', { kind: 'settled', jobStatus, sessions });
+    await emitIfCurrent({ kind: 'settled', jobStatus, sessions });
   } catch (err) {
-    emit('chat', {
+    await emitIfCurrent({
       kind: 'error',
       message: err instanceof Error ? err.message : String(err),
     });
@@ -823,7 +839,16 @@ export async function browserCall<T>(
       return { ok: true } as T;
     }
     case 'stop':
-      return await api.stopChatJob(String(p.jobId ?? '')) as T;
+      {
+        const stopped = await api.stopChatJob(String(p.jobId ?? ''));
+        if (stopped.status === 'waiting_input') {
+          chatTurnGeneration += 1;
+          chatTurnAbort?.abort();
+          chatTurnAbort = undefined;
+          await emit('chat', { kind: 'stopped', status: stopped.status });
+        }
+        return stopped as T;
+      }
     case 'deleteSession': {
       const jobId = String(p.jobId ?? '');
       let sessionId = String(p.sessionId ?? '');
@@ -1046,4 +1071,3 @@ export async function browserCall<T>(
       throw new Error(`browser console does not implement method: ${method}`);
   }
 }
-

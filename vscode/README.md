@@ -1,6 +1,6 @@
 # AGT — Multi-Agent Bridge for VS Code
 
-![AGT logo](media/agt-128.png)
+![AGT logo](https://raw.githubusercontent.com/half-island-box/agent-team/master/vscode/media/agt-128.png)
 
 **AGT** brings the local `agt` server into your editor: chat with installed coding-agent CLIs, run repeatable SOP workflows, submit goals to a multi-agent orchestrator, and manage local or remote daemons without leaving VS Code.
 
@@ -10,13 +10,13 @@
 
 Pick a daemon, agent runtime, and optional identity, then start or resume a persisted conversation. Chat supports file attachments, Markdown responses, session history, and task controls alongside the normal streaming response.
 
-![Chat with coding agents](chat.png)
+![Chat with coding agents](https://raw.githubusercontent.com/half-island-box/agent-team/master/vscode/chat.png)
 
 ### Build and run SOP workflows
 
 Create SOPs from a template or open an existing YAML file with the visual editor. Arrange tasks as a DAG, connect outputs to downstream inputs, select identities and execution directories, validate against the server, then run the workflow and inspect per-node status and logs without switching to a terminal.
 
-![Visual SOP editor](sop-editor.png)
+![Visual SOP editor](https://raw.githubusercontent.com/half-island-box/agent-team/master/vscode/sop-editor.png)
 
 ### Orchestrate goal-driven work
 
@@ -34,7 +34,7 @@ The **Usage** view sits below the daemon tree. It summarizes input, output, cach
 
 The settings view exposes server and daemon lifecycle controls, startup commands, remote-daemon pairing, daemon execution settings, identity management, and optional daemon/provider routing preferences.
 
-![AGT settings and daemon management](settings.png)
+![AGT settings and daemon management](https://raw.githubusercontent.com/half-island-box/agent-team/master/vscode/settings.png)
 
 ## Highlights
 
@@ -73,4 +73,4 @@ Issues and contributions are welcome in the [agent-team repository](https://gith
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](https://github.com/half-island-box/agent-team/blob/master/vscode/LICENSE).

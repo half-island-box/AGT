@@ -731,9 +731,13 @@ class DaemonLink:
             )
             # Phase 4: cancel delivery rides the claim response on the
             # WS path too — same shape as the HTTP ClaimResponse.
-            from .services.claim_service import cancelled_steps_for_daemon
+            from .services.claim_service import (
+                cancelled_steps_for_daemon,
+                mark_cancellations_delivered,
+            )
 
             cancelled_ids = await cancelled_steps_for_daemon(db, self.daemon_id)
+            await mark_cancellations_delivered(db, cancelled_ids)
         return {
             "tasks": [t.model_dump() for t in tasks],
             "cancelled_task_ids": cancelled_ids,

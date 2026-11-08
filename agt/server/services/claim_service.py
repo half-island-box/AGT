@@ -13,7 +13,7 @@ import logging
 import time
 from datetime import datetime, timezone
 
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...a2a import DataPart, Message, message_from_prompt
@@ -132,6 +132,31 @@ async def cancelled_steps_for_daemon(db: AsyncSession, daemon_id: str) -> list[s
         )
     ).scalars().all()
     return list(rows)
+
+
+async def mark_cancellations_delivered(
+    db: AsyncSession, task_ids: list[str]
+) -> None:
+    """Ack cancellation delivery without requiring a daemon report.
+
+    HTTP cancellation channels poll from the daemon, so a successful
+    transport response is the delivery acknowledgement. Marking
+    ``exit_code`` removes the id from later polls while a late executor
+    report remains harmless (pre-cancelled Steps are fenced in report
+    handling).
+    """
+    if not task_ids:
+        return
+    await db.execute(
+        update(StepModel)
+        .where(
+            StepModel.step_id.in_(task_ids),
+            StepModel.status == "cancelled",
+            StepModel.exit_code.is_(None),
+        )
+        .values(exit_code=-1)
+    )
+    await db.commit()
 
 
 def _build_select(

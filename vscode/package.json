@@ -2,7 +2,7 @@
   "name": "agt-vscode",
   "displayName": "AGT — Multi-Agent Bridge",
   "description": "VS Code client for the local agt server: daemons, agent runtimes, chat, SOP and goal orchestration.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "half-island-box",
   "license": "MIT",
   "repository": {

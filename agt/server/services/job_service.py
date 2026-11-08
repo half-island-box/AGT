@@ -71,6 +71,35 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _elapsed_seconds(started_at: str | None) -> float:
+    """Best-effort elapsed time for an interrupted Step."""
+    if not started_at:
+        return 0.0
+    try:
+        started = datetime.strptime(started_at, "%Y-%m-%d %H:%M:%S").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError:
+        return 0.0
+    return max(0.0, (datetime.now(timezone.utc) - started).total_seconds())
+
+
+def _mark_step_interrupted(step: StepModel) -> None:
+    """Make a Server-side interruption terminal on the Step itself.
+
+    A late daemon report may still arrive, but report handling treats a
+    pre-cancelled Step as historical cleanup and never lets it drive the
+    parent Job again. ``exit_code`` remains NULL until a cancellation
+    channel has actually delivered the id to its owning daemon.
+    """
+    step.status = "cancelled"
+    step.duration = step.duration if step.duration is not None else _elapsed_seconds(
+        step.created_at
+    )
+    step.outcome = step.outcome or "error"
+    step.updated_at = _now()
+
+
 def _new_id() -> str:
     return str(uuid.uuid4())[:8]
 
@@ -347,7 +376,12 @@ def _next_status(current: str, event: str) -> str:
         # Phase 5 (SOP): a node may fail at activation (e.g. missing
         # upstream output) before ever being claimed — allow the terminal
         # failure event straight from queued.
-        "queued": {"step_claimed": "running", "step_failed": "failed", "cancel": "cancelled"},
+        "queued": {
+            "step_claimed": "running",
+            "step_failed": "failed",
+            "step_interrupted": "waiting_input",
+            "cancel": "cancelled",
+        },
         "running": {
             "step_done": "done",
             "step_needs_input": "waiting_input",
@@ -401,8 +435,7 @@ async def cancel_job(db: AsyncSession, job_id: str) -> tuple[JobModel, list[tupl
             if step.status in ("running", "pending"):
                 if step.status == "running" and step.daemon_id:
                     notify_list.append((step.daemon_id, step.step_id))
-                step.status = "cancelled"
-                step.updated_at = _now()
+                _mark_step_interrupted(step)
         await transition_job(db, jid, "cancel")
 
     # Wakeup check for the cancelled node's parent (no-op if the parent
@@ -421,6 +454,8 @@ async def stop_chat_job(
     This is intentionally different from :func:`cancel_job`: cancellation is
     terminal, while stop marks the interrupted Step terminal and moves the
     Chat Job back to ``waiting_input`` so the user can ask a follow-up turn.
+    A turn is interruptable both before and after daemon claim: queueing is
+    part of the user-visible turn, not a window in which stop must fail.
 
     Only a simple Chat Job is supported. Jobs that have spawned children use
     the terminal cancel path; allowing their subtree to continue while the
@@ -436,10 +471,10 @@ async def stop_chat_job(
         })
     if job.status == "waiting_input":
         return job, []
-    if job.status != "running":
+    if job.status not in ("queued", "running"):
         raise ValueError({
             "type": "stop_not_supported",
-            "message": f"job {job_id} is {job.status}, expected running",
+            "message": f"job {job_id} is {job.status}, expected queued or running",
         })
 
     descendants = await _descendant_closure(db, job_id)
@@ -452,19 +487,19 @@ async def stop_chat_job(
         })
 
     notify_list: list[tuple[str, str]] = []
-    running_steps = [
-        step for step in job.steps if step.status == "running"
+    active_steps = [
+        step for step in job.steps if step.status in ("pending", "running")
     ]
-    if not running_steps:
+    if not active_steps:
         raise ValueError({
             "type": "no_running_step",
-            "message": f"job {job_id} has no running step to stop",
+            "message": f"job {job_id} has no active step to stop",
         })
-    for step in running_steps:
-        step.status = "cancelled"
-        step.updated_at = _now()
-        if step.daemon_id:
-            notify_list.append((step.daemon_id, step.step_id))
+    for step in active_steps:
+        # Include pending Steps in the response / SSE closure path even
+        # though there is no owning daemon to notify yet.
+        notify_list.append((step.daemon_id or "", step.step_id))
+        _mark_step_interrupted(step)
 
     await transition_job(db, job_id, "step_interrupted")
     return job, notify_list

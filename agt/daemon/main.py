@@ -203,6 +203,15 @@ async def _claim_loop(
 
     while not shutdown.is_set():
         if semaphore.locked():
+            # HTTP daemons must still learn about cancellations while every
+            # execution slot is busy. Reverse-dial daemons receive
+            # ``tasks.cancel`` as an immediate server-initiated RPC instead.
+            if ws_server is None:
+                try:
+                    cancelled_ids = await client.cancelled_tasks()
+                    await _handle_cancelled_tasks(client, cancelled_ids, None)
+                except Exception as exc:
+                    log.debug("busy cancellation poll failed: %s", exc)
             await _sleep_or_wake(ws_server, CLAIM_INTERVAL)
             continue
         rids = list(daemon.runtime_providers())

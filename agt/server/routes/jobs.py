@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -24,6 +25,7 @@ from ..services.job_service import (
 )
 from ..services.selection_service import SelectionError, select_runtime
 from ..services.report_service import events_for_step, step_usage_out
+from ..stream_hub import default_hub
 from .identities import _selection_error_to_http
 from .tasks import _notify_daemons
 from ...a2a import Message, render_message
@@ -211,17 +213,55 @@ async def job_stop(
         )
     await db.commit()
 
-    # Same dual-channel cancellation used by /cancel: reverse-dial daemons
-    # receive an immediate RPC; HTTP long-poll daemons receive the cancelled
-    # task id with their next claim response.
+    # The Server owns the interruption decision. Close live SSE streams now;
+    # daemon termination and its late report are best-effort cleanup.
+    for _, task_id in notify_list:
+        step = next((s for s in job.steps if s.step_id == task_id), None)
+        if step is None:
+            continue
+        session_id = step.session_id
+        if session_id is None:
+            session_id = next(
+                (
+                    existing.session_id
+                    for existing in reversed(job.steps)
+                    if existing.session_id
+                ),
+                None,
+            )
+        default_hub.publish(
+            task_id,
+            {
+                "type": "done",
+                "status": step.status,
+                "stdout": step.stdout or "",
+                "stderr": step.stderr,
+                "session_id": session_id,
+                "exit_code": step.exit_code,
+                "resume_rejected": step.resume_rejected,
+                "artifacts": [
+                    artifact_to_out(row)
+                    for row in (await artifacts_for_steps(db, [task_id])).get(task_id, [])
+                ],
+                "usage": step_usage_out(step),
+                "model": step.model,
+            },
+        )
+
+    # Same cancellation channels used by /cancel. Reverse-dial RPC is queued
+    # in the background so a temporarily slow link cannot delay the stop
+    # response (and hence the user's ability to send a follow-up).
     daemon_links: dict = getattr(request.app.state, "daemon_links", {})
     for daemon_id, task_id in notify_list:
         link = daemon_links.get(daemon_id)
         if link is not None:
-            try:
-                await link.notify_cancel(task_id)
-            except Exception:
-                pass
+            task = asyncio.create_task(link.notify_cancel(task_id))
+            pending = getattr(request.app.state, "cancel_notify_tasks", None)
+            if pending is None:
+                pending = set()
+                request.app.state.cancel_notify_tasks = pending
+            pending.add(task)
+            task.add_done_callback(pending.discard)
     notify_steps_available()
     return {
         "job_id": job.job_id,
