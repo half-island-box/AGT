@@ -105,7 +105,7 @@ interface SelectSessionResult {
   resolved: {
     job_id: string;
     task_id: string;
-    session_id: string;
+    session_id: string | null;
     provider: string;
     identity_did: string | null;
     daemon_id: string | null;
@@ -164,6 +164,9 @@ let promptHistoryIndex: number | null = null;
 let promptDraft = '';
 let attachments: ChatAttachment[] = [];
 let attachmentSeq = 0;
+/** Jobs still executing Server-side (may not be the active conversation). */
+const runningJobIds = new Set<string>();
+let runningPollTimer: number | undefined;
 
 function storedSidebarWidth(): number {
   const value = Number(window.localStorage.getItem(SIDEBAR_WIDTH_KEY));
@@ -174,6 +177,109 @@ function storedSidebarWidth(): number {
 
 let sidebarWidth = storedSidebarWidth();
 let sidebarCollapsed = window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === '1';
+
+const CHAT_RESUME_KEY = 'agt.chat.resume';
+
+interface PersistedChatState {
+  jobId: string;
+}
+
+function readPersistedChatState(): PersistedChatState | null {
+  try {
+    const raw = window.localStorage.getItem(CHAT_RESUME_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<PersistedChatState>;
+    return typeof parsed.jobId === 'string' && parsed.jobId
+      ? { jobId: parsed.jobId }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function isJobRunning(status: string | null | undefined): boolean {
+  return status === 'pending' || status === 'queued' || status === 'running';
+}
+
+function updateSessionStatus(jobId: string, status: string): void {
+  sessions = sessions.map((session) =>
+    session.job_id === jobId ? { ...session, status } : session,
+  );
+}
+
+function stopRunningPolling(): void {
+  if (runningPollTimer !== undefined) {
+    window.clearInterval(runningPollTimer);
+    runningPollTimer = undefined;
+  }
+}
+
+function ensureBackgroundPolling(): void {
+  if (runningPollTimer !== undefined || runningJobIds.size === 0) return;
+  runningPollTimer = window.setInterval(() => {
+    void (async () => {
+      const ids = [...runningJobIds];
+      for (const jobId of ids) {
+        try {
+          const status = await bridge.call<{ status: string }>('jobStatus', { jobId });
+          if (!isJobRunning(status.status)) {
+            runningJobIds.delete(jobId);
+            updateSessionStatus(jobId, status.status);
+          }
+        } catch {
+          // Transient probe failure: keep the spinner until the next tick.
+        }
+      }
+      if (runningJobIds.size === 0) {
+        stopRunningPolling();
+        void loadSessions();
+      }
+      renderSidebar();
+    })();
+  }, 3000);
+}
+
+function markJobRunning(jobId: string | null, status: string | null | undefined): void {
+  if (!jobId) return;
+  if (isJobRunning(status)) {
+    runningJobIds.add(jobId);
+    updateSessionStatus(jobId, status ?? 'running');
+    ensureBackgroundPolling();
+  } else {
+    runningJobIds.delete(jobId);
+    updateSessionStatus(jobId, status ?? 'done');
+    if (runningJobIds.size === 0) stopRunningPolling();
+  }
+}
+
+/** Stop forwarding the active stream without stopping the Server-side Job. */
+async function detachCurrentStream(): Promise<void> {
+  const job = currentJob;
+  const wasStreaming = busy !== 'idle' || Boolean(lastAssistant()?.streaming);
+  const assistant = lastAssistant();
+  if (assistant?.streaming) assistant.streaming = false;
+  busy = 'idle';
+  notice = null;
+  if (job && wasStreaming && isJobRunning(job.status)) {
+    markJobRunning(job.jobId, job.status);
+    renderSidebar();
+    renderMessages();
+  }
+  try {
+    await bridge.call('detach');
+  } catch {
+    // A missing/failed detach only means no stream was active.
+  }
+}
+
+function persistChatState(jobId: string | null): void {
+  try {
+    if (!jobId) window.localStorage.removeItem(CHAT_RESUME_KEY);
+    else window.localStorage.setItem(CHAT_RESUME_KEY, JSON.stringify({ jobId }));
+  } catch {
+    // Embedded webviews may disable storage; resume is best-effort.
+  }
+}
 
 function recallPrompt(event: KeyboardEvent, input: HTMLTextAreaElement): void {
   if (promptHistory.length === 0) return;
@@ -645,11 +751,13 @@ function renderSidebar(): void {
   const sessionItems = sessions
     .map((session) => {
       const location = sessionLocationLabel(session);
+      const running = runningJobIds.has(session.job_id) || isJobRunning(session.status);
       return `
       <div class="agd-session ${session.job_id === activeSessionId ? 'is-selected' : ''}" data-job-id="${esc(session.job_id)}" data-session-id="${esc(session.session_id)}" data-dir="${esc(session.dir ?? '')}">
         <button type="button" class="agd-session-main">
           <span class="agd-session-line">
             ${providerLogo(session.provider)}
+            ${running ? '<span class="agd-session-spinner" role="status" aria-label="running"></span>' : ''}
             <strong>${esc(firstLine(session.first_prompt) || session.session_id)}</strong>
           </span>
           <small>${esc(session.last_seen_at)}${location ? ` · ${esc(location)}` : ''}</small>
@@ -670,7 +778,7 @@ function renderSidebar(): void {
   <div class="agd-side-section">
     <div class="agd-side-title">
       <span>${tr('chat.newChat')}</span>
-        <button type="button" id="agd-chat-new" class="agd-mini-btn" ${busy === 'idle' ? '' : 'disabled'}>+</button>
+        <button type="button" id="agd-chat-new" class="agd-mini-btn">+</button>
     </div>
     <label class="agd-side-label">${tr('chat.daemon')}</label>
     ${selectorHtml('daemon')}
@@ -1319,13 +1427,15 @@ function wireSidebar(): void {
     }
   });
   document.getElementById('agd-chat-new')?.addEventListener('click', () => {
-    if (busy !== 'idle') return;
-    clearConversation();
-    agentCwdTouched = false;
-    syncWorkspaceRoot();
-    renderSidebar();
-    renderMessages();
-    renderControls();
+    void (async () => {
+      await detachCurrentStream();
+      clearConversation();
+      agentCwdTouched = false;
+      syncWorkspaceRoot();
+      renderSidebar();
+      renderMessages();
+      renderControls();
+    })();
   });
   document.getElementById('agd-sessions-refresh')?.addEventListener('click', () => {
     void loadSessions();
@@ -1393,6 +1503,7 @@ function selectOption(kind: string, value: string): void {
 }
 
 function clearConversation(): void {
+  persistChatState(null);
   currentJob = null;
   activeSessionId = null;
   messages = [];
@@ -1525,7 +1636,7 @@ async function confirmDeleteSession(): Promise<void> {
 }
 
 async function selectSession(jobId: string, dir?: string): Promise<void> {
-  if (busy !== 'idle') return;
+  await detachCurrentStream();
   activeSessionId = jobId;
   sessionsLoading = true;
   renderSidebar();
@@ -1534,6 +1645,7 @@ async function selectSession(jobId: string, dir?: string): Promise<void> {
     const status = res.jobStatus.status;
     clearConversation();
     activeSessionId = jobId;
+    persistChatState(jobId);
     selectedDaemonId = res.resolved.daemon_id ?? selectedDaemonId;
     selectedProvider = res.resolved.provider;
     selectedIdentityDid = res.resolved.identity_did ?? '';
@@ -1560,15 +1672,20 @@ async function selectSession(jobId: string, dir?: string): Promise<void> {
       notice = tr('chat.historyUnavailable', { error: res.historyError });
     }
 
-    if (status === 'waiting_input') {
+    if (status === 'waiting_input' || status === 'queued' || status === 'running') {
       currentJob = {
         jobId: res.resolved.job_id,
         taskId: res.resolved.task_id,
         status,
         sessionId: res.resolved.session_id,
       };
+      if (status === 'queued' || status === 'running') {
+        await attachRunningTurn(currentJob);
+        return;
+      }
     } else {
-      notice = tr('chat.notResumable', { status });
+      markJobRunning(jobId, status);
+      notice = tr('chat.readOnly', { status });
     }
   } catch (err) {
     clearConversation();
@@ -1579,6 +1696,55 @@ async function selectSession(jobId: string, dir?: string): Promise<void> {
     renderMessages();
     renderControls();
   }
+}
+
+async function attachRunningTurn(job: ActiveJob): Promise<void> {
+  if (!lastAssistant()?.streaming) {
+    messages.push({
+      id: ++messageSeq,
+      role: 'assistant',
+      content: '',
+      provider: selectedProvider ?? undefined,
+      streaming: true,
+    });
+  }
+  busy = 'sending';
+  notice = null;
+  renderMessages();
+  renderControls();
+  try {
+    const result = await bridge.call<MockSendResult>('attach', {
+      jobId: job.jobId,
+      taskId: job.taskId,
+    });
+    if (bridge.isMock && result.events) {
+      for (const event of result.events) applyChatEvent(event);
+    }
+  } catch (err) {
+    finishWithError(err instanceof Error ? err.message : String(err));
+  }
+}
+
+function upsertRunningSession(jobId: string, taskId: string): void {
+  if (!jobId) return;
+  const prompt = [...messages]
+    .reverse()
+    .find((message) => message.role === 'user')?.content;
+  sessions = [
+    {
+      session_id: jobId,
+      task_id: taskId || jobId,
+      job_id: jobId,
+      provider: selectedProvider ?? '',
+      identity_did: selectedIdentityDid || null,
+      daemon_id: selectedDaemonId,
+      dir: agentCwd || null,
+      status: 'running',
+      first_prompt: firstLine(prompt ?? '') || jobId,
+      last_seen_at: new Date().toISOString(),
+    },
+    ...sessions.filter((session) => session.job_id !== jobId),
+  ];
 }
 
 async function submit(): Promise<void> {
@@ -1681,11 +1847,17 @@ function lastAssistant(): ChatMessage | undefined {
 function applyChatEvent(payload: ChatEvent): void {
   const kind = String(payload.kind ?? '');
   if (kind === 'started') {
+    const jobId = String(payload.job_id ?? '');
+    const taskId = String(payload.task_id ?? '');
     currentJob = {
-      jobId: String(payload.job_id ?? ''),
-      taskId: String(payload.task_id ?? ''),
+      jobId,
+      taskId,
       status: String(payload.status ?? 'pending'),
     };
+    persistChatState(jobId || null);
+    markJobRunning(jobId, String(payload.status ?? 'pending'));
+    upsertRunningSession(jobId, taskId);
+    renderSidebar();
     renderControls();
     return;
   }
@@ -1727,6 +1899,7 @@ function applyChatEvent(payload: ChatEvent): void {
         currentJob.sessionId = String(payload.session_id);
       }
       activeSessionId = currentJob.jobId;
+      persistChatState(currentJob.jobId);
     }
     busy = 'settling';
     renderMessages();
@@ -1738,6 +1911,8 @@ function applyChatEvent(payload: ChatEvent): void {
     if (payload.jobStatus && typeof payload.jobStatus === 'object') {
       const status = payload.jobStatus as { status?: string };
       if (currentJob && status.status) currentJob.status = status.status;
+      markJobRunning(currentJob?.jobId ?? activeSessionId, status.status ?? 'done');
+      persistChatState(currentJob?.jobId ?? activeSessionId);
     }
     if (Array.isArray(payload.sessions)) {
       sessions = payload.sessions as ChatSessionInfo[];
@@ -1766,7 +1941,11 @@ function applyChatEvent(payload: ChatEvent): void {
       assistant.streaming = false;
       if (!assistant.content) assistant.content = tr('chat.stopped');
     }
-    if (currentJob) currentJob.status = 'waiting_input';
+    if (currentJob) {
+      currentJob.status = 'waiting_input';
+      markJobRunning(currentJob.jobId, 'waiting_input');
+      persistChatState(currentJob.jobId);
+    }
     busy = 'idle';
     notice = null;
     renderMessages();
@@ -1779,6 +1958,7 @@ function applyChatEvent(payload: ChatEvent): void {
 }
 
 function finishWithError(message: string): void {
+  if (currentJob) markJobRunning(currentJob.jobId, 'failed');
   const assistant = lastAssistant();
   if (assistant?.streaming) {
     assistant.streaming = false;
@@ -1794,6 +1974,13 @@ function firstLine(value: string): string {
   return value.split(/\r?\n/, 1)[0] ?? '';
 }
 
+async function resumePersistedSession(): Promise<void> {
+  if (busy !== 'idle') return;
+  const saved = readPersistedChatState();
+  if (!saved) return;
+  await selectSession(saved.jobId);
+}
+
 async function main(): Promise<void> {
   boot = await bridge.call<ChatBoot>('boot');
   lang = boot.language;
@@ -1801,6 +1988,7 @@ async function main(): Promise<void> {
   normalizeInitialSelection();
   render();
   void loadSessions();
+  void resumePersistedSession();
 
   bridge.onEvent((event, payload) => {
     if (event === 'chat') {

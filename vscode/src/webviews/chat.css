@@ -315,6 +315,18 @@ body.agd-chat-body {
   gap: 6px;
   min-width: 0;
 }
+.agd-session-spinner {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid color-mix(in srgb, var(--vscode-foreground, #ccc) 32%, transparent);
+  border-top-color: var(--vscode-foreground, #ccc);
+  border-radius: 50%;
+  animation: agd-session-spin 0.8s linear infinite;
+}
+@keyframes agd-session-spin {
+  to { transform: rotate(360deg); }
+}
 .agd-session-line strong {
   min-width: 0;
   overflow: hidden;

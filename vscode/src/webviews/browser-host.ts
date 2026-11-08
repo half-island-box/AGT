@@ -152,6 +152,7 @@ function toChatSession(run: RunInfo): ChatSessionInfo {
     identity_did: run.identity_did,
     daemon_id: run.daemon_id,
     dir: run.cwd,
+    status: run.status,
     first_prompt: run.title ?? run.root_job_id,
     last_seen_at: run.updated_at,
   };
@@ -300,11 +301,10 @@ async function chatBoot() {
 async function resolveChatRun(jobId: string, dir: string | null) {
   const tree = await api.jobTree(jobId);
   const node = tree.node;
-  if (!node.session_id) throw new Error('chat run has no resumed session yet');
   return {
     job_id: jobId,
     task_id: node.current_task_id ?? jobId,
-    session_id: node.session_id,
+    session_id: node.session_id ?? null,
     provider: node.provider,
     identity_did: node.identity_did ?? null,
     daemon_id: node.daemon_id ?? null,
@@ -335,8 +335,6 @@ async function runChatTurn(
   emit: Emit,
 ): Promise<void> {
   const generation = ++chatTurnGeneration;
-  const streamAbort = new AbortController();
-  chatTurnAbort = streamAbort;
   const emitIfCurrent = async (payload: Record<string, unknown>): Promise<void> => {
     if (generation !== chatTurnGeneration) return;
     await emit('chat', payload);
@@ -368,6 +366,30 @@ async function runChatTurn(
           message,
         });
     await emitIfCurrent({ kind: 'started', ...job });
+    await followChatTask(job, project, fallbackProject, emit);
+  } catch (err) {
+    await emitIfCurrent({
+      kind: 'error',
+      message: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/** Stream an already-created turn (mid-run page recovery / re-attach). */
+async function followChatTask(
+  job: { job_id: string; task_id: string },
+  project: ConsoleProjectInfo | null,
+  fallbackProject: string,
+  emit: Emit,
+): Promise<void> {
+  const generation = ++chatTurnGeneration;
+  const streamAbort = new AbortController();
+  chatTurnAbort = streamAbort;
+  const emitIfCurrent = async (payload: Record<string, unknown>): Promise<void> => {
+    if (generation !== chatTurnGeneration) return;
+    await emit('chat', payload);
+  };
+  try {
     let final: Record<string, unknown> | null = null;
     try {
       for await (const event of api.streamTask(job.task_id, streamAbort.signal)) {
@@ -797,13 +819,16 @@ export async function browserCall<T>(
       // A run row's ``cwd`` is the project's local path (its run-history
       // key); the working directory a resumed session actually uses lives
       // on the owning daemon and only the Server knows it.
-      const session = await api
-        .resolveSession(resolved.session_id)
-        .catch(() => null);
+      const session = resolved.session_id
+        ? await api.resolveSession(resolved.session_id).catch(() => null)
+        : null;
       resolved.dir = session?.dir ?? resolved.dir;
+      const historyPromise = resolved.session_id
+        ? api.sessionHistory(resolved.session_id).catch((err: unknown) => err)
+        : Promise.resolve(undefined);
       const [jobStatus, history] = await Promise.all([
         api.jobStatus(resolved.job_id),
-        api.sessionHistory(resolved.session_id).catch((err: unknown) => err),
+        historyPromise,
       ]);
       return {
         resolved,
@@ -811,6 +836,32 @@ export async function browserCall<T>(
         history: history instanceof Error ? undefined : history as SessionHistoryInfo,
         historyError: history instanceof Error ? history.message : undefined,
       } as T;
+    }
+    case 'detach':
+      // Leave the Server-side Job running; only stop forwarding this page's
+      // stream so another conversation can become active.
+      chatTurnGeneration += 1;
+      chatTurnAbort?.abort();
+      chatTurnAbort = undefined;
+      return { ok: true } as T;
+    case 'jobStatus': {
+      const jobId = p.jobId ? String(p.jobId) : '';
+      if (!jobId) throw new Error('job id is required');
+      return (await api.jobStatus(jobId)) as T;
+    }
+    case 'attach': {
+      const jobId = p.jobId ? String(p.jobId) : '';
+      const taskId = p.taskId ? String(p.taskId) : '';
+      if (!jobId || !taskId) throw new Error('job id and task id are required');
+      const project = await activeProject();
+      const boot = await bootstrapContext();
+      void followChatTask(
+        { job_id: jobId, task_id: taskId },
+        project,
+        project?.path ?? projectPath(boot.bootstrap.default_project),
+        emit,
+      );
+      return { accepted: true } as T;
     }
     case 'send': {
       const boot = await bootstrapContext();
@@ -856,12 +907,13 @@ export async function browserCall<T>(
       let daemonId = String(p.daemonId ?? '');
       if (jobId) {
         const resolved = await resolveChatRun(jobId, null);
-        sessionId = resolved.session_id;
+        sessionId = resolved.session_id ?? '';
         provider = resolved.provider;
         // The owning daemon scopes the delete; the webview's selected
         // daemon is only a fallback (it may not own this session).
         daemonId = resolved.daemon_id ?? daemonId;
       }
+      if (!sessionId) throw new Error('chat run has no provider session yet');
       const deleted = await api.deleteSession(sessionId, {
         provider,
         daemonId,

@@ -31,57 +31,92 @@ async def list_chat_runs(
     limit: int,
     offset: int,
 ) -> tuple[list[ChatRunSummary], int]:
-    """List chat sessions as run rows, newest update first.
+    """List chat Jobs as run rows, newest update first.
 
-    Sessions are the canonical chat index; we join JobModel for status and
-    daemon context. The ``cwds`` filter uses ``SessionModel.cwd`` when
-    available, falling back to the associated JobModel.cwd. Several paths are
-    accepted so a console project can match its local path plus the remote
-    directory its runs used before ``JobModel.cwd`` was pinned to the project.
+    The Job — not the provider session pointer — is the chat identity. A
+    provider ``session_id`` only exists after a runtime reports one, and a
+    first turn may be cancelled, time out, or still be queued/running before
+    that happens. Listing Jobs (LEFT JOIN semantics) keeps those
+    conversations visible instead of dropping them until some later turn
+    succeeds.
     """
-    stmt = (
-        select(SessionModel, JobModel)
-        .join(JobModel, SessionModel.job_id == JobModel.job_id)
-        .where(JobModel.job_type == "chat")
-    )
+    stmt = select(JobModel).where(JobModel.job_type == "chat")
     if cwds:
         stmt = stmt.where(
-            SessionModel.cwd.in_(cwds)
-            | (SessionModel.cwd.is_(None) & JobModel.cwd.in_(cwds))
+            JobModel.cwd.in_(cwds)
+            | exists(
+                select(SessionModel.job_id).where(
+                    SessionModel.job_id == JobModel.job_id,
+                    SessionModel.cwd.in_(cwds),
+                )
+            )
         )
     if daemon_id is not None:
         stmt = stmt.where(
             (JobModel.target_daemon_id == daemon_id)
             | exists(
                 select(StepModel.step_id).where(
-                    StepModel.job_id == SessionModel.job_id,
+                    StepModel.job_id == JobModel.job_id,
                     StepModel.daemon_id == daemon_id,
                 )
             )
         )
     if provider is not None:
-        stmt = stmt.where(SessionModel.provider == provider)
+        stmt = stmt.where(
+            (JobModel.provider == provider)
+            | exists(
+                select(SessionModel.job_id).where(
+                    SessionModel.job_id == JobModel.job_id,
+                    SessionModel.provider == provider,
+                )
+            )
+        )
 
-    stmt = stmt.order_by(SessionModel.updated_at.desc(), SessionModel.job_id.desc())
-    rows = (await db.execute(stmt)).all()
+    stmt = stmt.order_by(JobModel.updated_at.desc(), JobModel.job_id.desc())
+    rows = (await db.execute(stmt)).scalars().all()
 
     total = len(rows)
-    page_rows = rows[offset : offset + limit]
+    page_jobs = rows[offset : offset + limit]
+    job_ids = [job.job_id for job in page_jobs]
+    sessions_by_job: dict[str, SessionModel] = {}
+    if job_ids:
+        session_rows = (
+            (
+                await db.execute(
+                    select(SessionModel)
+                    .where(SessionModel.job_id.in_(job_ids))
+                    .order_by(SessionModel.updated_at.desc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for session in session_rows:
+            sessions_by_job.setdefault(session.job_id, session)
 
     runs: list[ChatRunSummary] = []
-    for session, job in page_rows:
+    for job in page_jobs:
+        session = sessions_by_job.get(job.job_id)
         runs.append(
             ChatRunSummary(
                 root_job_id=job.job_id,
-                session_id=session.session_id,
-                provider=session.provider,
-                identity_did=session.identity_did or job.identity_did,
+                session_id=session.session_id if session is not None else None,
+                provider=session.provider if session is not None else job.provider,
+                identity_did=(
+                    session.identity_did or job.identity_did
+                    if session is not None
+                    else job.identity_did
+                ),
                 daemon_id=job.target_daemon_id,
-                cwd=session.cwd or job.cwd,
+                cwd=(session.cwd or job.cwd) if session is not None else job.cwd,
                 title=_first_prompt(job),
                 status=job.status,
-                created_at=session.created_at,
-                updated_at=session.updated_at,
+                created_at=(
+                    session.created_at if session is not None else job.created_at
+                ),
+                updated_at=(
+                    session.updated_at if session is not None else job.updated_at
+                ),
             )
         )
     return runs, total

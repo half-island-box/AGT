@@ -822,7 +822,9 @@ class ChatRunSummary(BaseModel):
     """One row in the chat-run history list."""
 
     root_job_id: str
-    session_id: str
+    # None until the runtime reports its provider session pointer; the Job
+    # itself is still a listable/resumable chat conversation.
+    session_id: str | None = None
     provider: str
     identity_did: str | None = None
     daemon_id: str | None = None

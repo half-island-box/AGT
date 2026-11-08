@@ -229,6 +229,7 @@ function toChatSessionInfo(run: RunInfo): ChatSessionInfo {
     identity_did: run.identity_did,
     daemon_id: run.daemon_id,
     dir: run.cwd,
+    status: run.status,
     first_prompt: run.title ?? run.root_job_id,
     last_seen_at: run.updated_at,
   };
@@ -1209,6 +1210,47 @@ export async function mockCall<T>(_method: string, params?: Record<string, unkno
     }
     case 'deleteUpload':
       return { ok: true } as T;
+    case 'detach':
+      return { ok: true } as T;
+    case 'jobStatus': {
+      const jobId = String(params?.jobId ?? '');
+      if (!jobId) throw new Error('mock: job id is required');
+      return { job_id: jobId, status: 'waiting_input', current_step_id: null } as T;
+    }
+    case 'attach': {
+      const jobId = String(params?.jobId ?? '');
+      const taskId = String(params?.taskId ?? '');
+      if (!jobId || !taskId) throw new Error('mock: job id and task id are required');
+      return {
+        accepted: true,
+        events: [
+          {
+            kind: 'snapshot',
+            type: 'snapshot',
+            status: 'running',
+            stdout: 'Mock resumed output',
+            events: [],
+            event_cursor: 0,
+            usage: null,
+          },
+          {
+            kind: 'done',
+            type: 'done',
+            status: 'completed',
+            stdout: 'Mock resumed output',
+            session_id: `sess-${jobId}`,
+            exit_code: 0,
+            usage: null,
+            model: null,
+          },
+          {
+            kind: 'settled',
+            jobStatus: { status: 'waiting_input' },
+            sessions: chatRuns.map(toChatSessionInfo),
+          },
+        ],
+      } as T;
+    }
     case 'send': {
       const p = (params ?? {}) as {
         prompt?: string;

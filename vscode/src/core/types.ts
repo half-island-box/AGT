@@ -201,6 +201,8 @@ export interface ChatSessionInfo {
   last_seen_at: string;
   /** Job root id used to resume/delete a chat run via the unified runs API. */
   job_id: string;
+  /** Job status (queued/running/waiting_input/...); absent on legacy mocks. */
+  status?: string | null;
 }
 
 /** Unified run row returned by ``GET /api/runs``. */
@@ -227,7 +229,8 @@ export interface RunListInfo {
 export interface SessionResolveInfo {
   job_id: string;
   task_id: string;
-  session_id: string;
+  /** Provider pointer; null until the first turn reports one. */
+  session_id: string | null;
   provider: string;
   identity_did: string | null;
   daemon_id: string | null;

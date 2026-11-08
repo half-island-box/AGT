@@ -387,3 +387,38 @@ def test_runs_accept_repeated_cwd(tmp_path: Path) -> None:
         assert only_project["runs"][0]["root_job_id"] == current
     finally:
         dispose()
+
+
+def test_chat_runs_listed_before_provider_session(tmp_path: Path) -> None:
+    """A chat Job is visible before any provider session pointer exists."""
+    client, factory, dispose = _build_app(tmp_path)
+    try:
+        _register_claude(client)
+        cwd = str(tmp_path)
+
+        created = client.post(
+            "/api/jobs",
+            json={"prompt": "first turn", "provider": "claude", "work_dir": cwd},
+        )
+        assert created.status_code == 201, created.text
+        job_id = created.json()["job_id"]
+
+        runs = client.get(
+            "/api/runs", params={"mode": "chat", "cwd": cwd}
+        ).json()
+        assert runs["total"] == 1
+        assert runs["runs"][0]["root_job_id"] == job_id
+        assert runs["runs"][0]["title"] == "first turn"
+
+        async def _check_no_session_rows() -> None:
+            from sqlalchemy import select
+
+            from agt.server.models import SessionModel
+
+            async with factory() as session:
+                rows = (await session.execute(select(SessionModel))).scalars().all()
+                assert rows == []
+
+        asyncio.run(_check_no_session_rows())
+    finally:
+        dispose()

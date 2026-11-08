@@ -59,6 +59,7 @@ function toChatSessionInfo(run: RunInfo): ChatSessionInfo {
     identity_did: run.identity_did,
     daemon_id: run.daemon_id,
     dir: run.cwd,
+    status: run.status,
     first_prompt: run.title ?? run.root_job_id,
     last_seen_at: run.updated_at,
   };
@@ -90,13 +91,10 @@ async function resolveChatRun(
 ): Promise<SessionResolveInfo> {
   const tree = await api.jobTree(jobId);
   const node = tree.node;
-  if (!node.session_id) {
-    throw new Error('chat run has no resumed session yet');
-  }
   return {
     job_id: jobId,
     task_id: node.current_task_id ?? jobId,
-    session_id: node.session_id,
+    session_id: node.session_id ?? null,
     provider: node.provider,
     identity_did: node.identity_did ?? null,
     daemon_id: node.daemon_id ?? null,
@@ -317,17 +315,20 @@ export class ChatPanel {
           // A row's ``dir`` is the run-history key (the workspace root), not
           // the directory the run used — a remote resume would send the local
           // path to a daemon that cannot see it. The Server knows the real one.
-          if (jobId) {
+          if (jobId && resolved.session_id) {
             const session = await this.ctx.lifecycle.api
               .resolveSession(resolved.session_id)
               .catch(() => null);
             resolved.dir = session?.dir ?? resolved.dir;
           }
+          const historyPromise = resolved.session_id
+            ? this.ctx.lifecycle.api
+              .sessionHistory(resolved.session_id)
+              .catch((err: unknown) => err)
+            : Promise.resolve(undefined);
           const [job, history] = await Promise.all([
             this.ctx.lifecycle.api.jobStatus(resolved.job_id),
-            this.ctx.lifecycle.api
-              .sessionHistory(resolved.session_id)
-              .catch((err: unknown) => err),
+            historyPromise,
           ]);
           result = {
             resolved,
@@ -336,6 +337,35 @@ export class ChatPanel {
             historyError:
               history instanceof Error ? cleanError(history) : undefined,
           };
+          break;
+        }
+        case 'detach': {
+          // Leave the Server-side Job running; only stop forwarding this
+          // page's stream so another conversation can become active.
+          this.turnGeneration += 1;
+          this.streaming = false;
+          const oldStream = this.streamAbort;
+          this.streamAbort = undefined;
+          oldStream?.abort();
+          result = { ok: true };
+          break;
+        }
+        case 'jobStatus': {
+          const jobId = String(msg.params?.jobId ?? '');
+          if (!jobId) throw new Error('job id is required');
+          result = await this.ctx.lifecycle.api.jobStatus(jobId);
+          break;
+        }
+        case 'attach': {
+          const jobId = String(msg.params?.jobId ?? '');
+          const taskId = String(msg.params?.taskId ?? '');
+          if (!jobId || !taskId) {
+            throw new Error('job id and task id are required');
+          }
+          if (this.streaming) throw new Error('chat already streaming');
+          const resolved = await resolveChatRun(this.ctx.lifecycle.api, jobId, null);
+          void this.followTask({ job_id: jobId, task_id: taskId }, resolved.daemon_id);
+          result = { accepted: true };
           break;
         }
         case 'send': {
@@ -402,11 +432,14 @@ export class ChatPanel {
           let actualSessionId = sessionId;
           if (jobId) {
             const resolved = await resolveChatRun(this.ctx.lifecycle.api, jobId, null);
-            actualSessionId = resolved.session_id;
+            actualSessionId = resolved.session_id ?? '';
             provider = resolved.provider;
           }
-          if (!actualSessionId || !provider || !daemonId) {
-            throw new Error('session id, provider, and daemon id are required');
+          if (!actualSessionId) {
+            throw new Error('chat run has no provider session yet');
+          }
+          if (!provider || !daemonId) {
+            throw new Error('provider and daemon id are required');
           }
           const deleted = await this.ctx.lifecycle.api.deleteSession(actualSessionId, {
             provider,
@@ -446,14 +479,11 @@ export class ChatPanel {
     message?: ChatInputMessage | null;
   }): Promise<void> {
     const generation = ++this.turnGeneration;
-    const streamAbort = new AbortController();
-    this.streaming = true;
-    this.streamAbort = streamAbort;
-    const api = this.ctx.lifecycle.api;
     const emitIfCurrent = async (payload: Record<string, unknown>): Promise<void> => {
       if (generation !== this.turnGeneration) return;
       await this.emitChat(payload);
     };
+    const api = this.ctx.lifecycle.api;
     try {
       const job = input.currentJobId
         ? await api.appendChatInput(input.currentJobId, input.prompt, input.message)
@@ -469,7 +499,27 @@ export class ChatPanel {
             message: input.message,
           });
       await emitIfCurrent({ kind: 'started', ...job });
+      await this.followTask(job, input.daemonId);
+    } catch (err) {
+      await emitIfCurrent({ kind: 'error', message: cleanError(err) });
+    }
+  }
 
+  /** Stream an already-created turn (mid-run page recovery / re-attach). */
+  private async followTask(
+    job: { job_id: string; task_id: string },
+    daemonId: string | null,
+  ): Promise<void> {
+    const generation = ++this.turnGeneration;
+    const streamAbort = new AbortController();
+    this.streaming = true;
+    this.streamAbort = streamAbort;
+    const api = this.ctx.lifecycle.api;
+    const emitIfCurrent = async (payload: Record<string, unknown>): Promise<void> => {
+      if (generation !== this.turnGeneration) return;
+      await this.emitChat(payload);
+    };
+    try {
       let finalEvent: TaskStreamEvent | undefined;
       try {
         for await (const event of api.streamTask(job.task_id, streamAbort.signal)) {
@@ -506,7 +556,12 @@ export class ChatPanel {
 
       const [jobStatus, sessions] = await Promise.all([
         api.jobStatus(job.job_id).catch((err: unknown) => err),
-        chatSessions(api, input.daemonId).catch((err: unknown) => err),
+        (daemonId
+          ? chatSessions(api, daemonId)
+          : api
+            .listRuns({ mode: 'chat', cwd: activeWorkspaceRoot() || null })
+            .then((list) => list.runs.map(toChatSessionInfo))
+        ).catch((err: unknown) => err),
       ]);
       await emitIfCurrent({
         kind: 'settled',
