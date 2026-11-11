@@ -217,6 +217,7 @@
     }
   },
   "scripts": {
+    "vscode:prepublish": "npm run build",
     "build": "node esbuild.js --production",
     "build:console": "node esbuild.js --production --console",
     "build:all": "npm run build && npm run build:console",
