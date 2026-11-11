@@ -139,8 +139,10 @@ class TestChat:
 
     def test_chat_without_identity_ok_local(self) -> None:
         # No identity, no --daemon → local chat is fine (starts loop,
-        # EOF exits). Must not hit the identity error.
-        result = _invoke(["chat", "--provider", "claude"])
+        # EOF exits). Must not hit the identity error. Patch provider
+        # discovery because CI runners do not have agent CLIs installed.
+        with patch("agt.cli.main._pick_provider", return_value="claude"):
+            result = _invoke(["chat", "--provider", "claude"])
         assert result.exit_code != 2
         assert "requires --daemon" not in result.output
 
