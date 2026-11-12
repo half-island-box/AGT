@@ -520,11 +520,10 @@ function applyChatSelection(selection: ChatSelection): void {
 
 function normalizeInitialSelection(): void {
   if (!boot) return;
-  if (boot.selection) {
-    selectedDaemonId = boot.selection.daemonId;
-    selectedProvider = boot.selection.provider ?? null;
-    selectedIdentityDid = '';
-  }
+  // Do not reset an already-selected target here. This function is also called
+  // after manual sidebar changes and refreshes; boot.selection is only the
+  // initial target supplied by the host (for example, a tree-view jump).
+  // Resetting it here made every daemon/agent click snap back to that target.
   // A project that pins a remote working directory defaults to that daemon,
   // so the pinned directory is the working directory from the first turn.
   const pinnedDaemonId = boot.project?.remote_daemon_id;
@@ -1985,6 +1984,8 @@ async function main(): Promise<void> {
   boot = await bridge.call<ChatBoot>('boot');
   lang = boot.language;
   loadingBoot = false;
+  selectedDaemonId = boot.selection?.daemonId ?? null;
+  selectedProvider = boot.selection?.provider ?? null;
   normalizeInitialSelection();
   render();
   void loadSessions();
