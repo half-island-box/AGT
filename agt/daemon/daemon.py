@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 
+from ..agent_history import load_session_title
 from ..probe.scanner import AgentProbe
 from ..runtime.models import AgentEntry, Runtime
 from ..task.executor import TaskExecutor
@@ -202,6 +203,16 @@ class Daemon:
             task, interactive=interactive, progress_cb=progress_cb,
             event_cb=event_cb,
         )
+        if result.session_id is not None and not result.resume_rejected:
+            # Provider title stores are best-effort metadata caches. Read
+            # after subprocess exit so a late AI-title write is visible;
+            # failures leave the title unset and never fail execution.
+            try:
+                result.session_title = load_session_title(
+                    provider, result.session_id
+                )
+            except Exception:
+                result.session_title = None
 
         # Update the session store based on the outcome (only when caller
         # opted into session continuity by passing a task_id AND we
@@ -220,6 +231,7 @@ class Daemon:
                 resume_session_id=resume_session_id,
                 result=result,
                 identity_did=identity_did,
+                title=result.session_title,
             )
 
         return result
@@ -269,6 +281,7 @@ class Daemon:
         resume_session_id: str | None,
         result: TaskResult,
         identity_did: str | None = None,
+        title: str | None = None,
     ) -> None:
         """Persist the run outcome to the cwd store."""
         if result.resume_rejected:
@@ -284,6 +297,7 @@ class Daemon:
                 first_prompt=first_prompt or prompt,
                 turn_count=turn_index,
                 identity_did=identity_did,
+                title=title,
             )
 
     # ── Internal helpers ────────────────────────────────────────

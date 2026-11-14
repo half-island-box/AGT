@@ -1478,7 +1478,7 @@ def _print_chat_session_list(
             e.provider,
             _humanize_age(age_s),
             str(e.turn_count),
-            _truncate(e.first_prompt, 60),
+            _truncate(e.title or e.first_prompt, 60),
         ))
     widths = [
         max(len(r[0]) for r in rows),
@@ -1490,7 +1490,7 @@ def _print_chat_session_list(
     widths[4] = max(len(r[4]) for r in rows)
     header = (
         f"  {'SESSION':<{widths[0]}}  {'PROVIDER':<{widths[1]}}  "
-        f"{'LAST USED':<{widths[2]}}  {'TURNS':<{widths[3]}}  FIRST PROMPT"
+        f"{'LAST USED':<{widths[2]}}  {'TURNS':<{widths[3]}}  TITLE"
     )
     click.echo(header)
     click.echo("  " + "─" * (sum(widths) + 10))

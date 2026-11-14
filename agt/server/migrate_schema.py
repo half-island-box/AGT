@@ -295,6 +295,12 @@ def ensure_schema(conn: Connection) -> None:
         log.info("Migrated jobs table: added first_prompt column")
 
     jobs_columns = _column_names(conn, "jobs") if _table_exists(conn, "jobs") else set()
+    if _table_exists(conn, "jobs") and "title" not in _column_names(conn, "jobs"):
+        conn.exec_driver_sql(
+            "ALTER TABLE jobs ADD COLUMN title TEXT"
+        )
+        log.info("Migrated jobs table: added title column")
+
     tasks_columns = _column_names(conn, "tasks") if _table_exists(conn, "tasks") else set()
     if (
         {"job_id", "job_type", "first_prompt"} <= jobs_columns

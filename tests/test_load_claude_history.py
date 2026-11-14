@@ -15,8 +15,10 @@ from agt.agent_history import (
     Message,
     _extract_message,
     _flatten_content,
+    _group_assistant_history,
     _parse_jsonl,
     load_claude_history,
+    load_session_title,
     load_history,
 )
 
@@ -38,7 +40,28 @@ def test_flatten_content_text_blocks() -> None:
         {"type": "text", "text": "first"},
         {"type": "text", "text": "second"},
     ]
-    assert _flatten_content(blocks) == "first\nsecond"
+    # Claude's live sink appends text deltas directly; history replay must
+    # not invent a line/paragraph boundary between persisted text blocks.
+    assert _flatten_content(blocks) == "firstsecond"
+
+
+def test_history_groups_consecutive_claude_assistant_records() -> None:
+    messages = _group_assistant_history(
+        [
+            Message(role="user", content="q"),
+            Message(role="assistant", content="first\n"),
+            Message(role="assistant", content="second\nline"),
+            Message(role="user", content="next"),
+            Message(role="assistant", content="answer"),
+        ],
+        "claude",
+    )
+    assert [(m.role, m.content) for m in messages] == [
+        ("user", "q"),
+        ("assistant", "first\nsecond\nline"),
+        ("user", "next"),
+        ("assistant", "answer"),
+    ]
 
 
 def test_flatten_content_ignores_non_text_blocks() -> None:
@@ -142,6 +165,25 @@ def test_load_claude_history_finds_by_stem(monkeypatch, tmp_path: Path) -> None:
     msgs = load_claude_history("sess-123")
     assert len(msgs) == 1
     assert msgs[0].content == "hello"
+
+
+def test_load_claude_session_title_uses_latest_ai_title(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    transcript = home / ".claude" / "projects" / "hash" / "sess-title.jsonl"
+    _write_transcript(
+        transcript,
+        [
+            {"type": "user", "message": {"role": "user", "content": "long prompt"}},
+            {"type": "ai-title", "aiTitle": "First title"},
+            {"type": "ai-title", "aiTitle": "  Final title  "},
+        ],
+    )
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+
+    assert load_session_title("claude", "sess-title") == "Final title"
 
 
 def test_load_claude_history_missing_session(monkeypatch, tmp_path: Path) -> None:

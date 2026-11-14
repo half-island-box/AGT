@@ -149,6 +149,21 @@ def test_successive_assistant_messages_are_separated() -> None:
     assert printed == "one\n\ntwo"
 
 
+def test_provider_paragraph_boundary_is_not_doubled() -> None:
+    sink = PiStreamSink()
+    printed = _consume(
+        sink,
+        _session(),
+        _assistant_start(),
+        _text_delta(0, "one\n\n"),
+        _assistant_end([{"type": "text", "text": "one\n\n"}]),
+        _assistant_start(),
+        _text_delta(0, "two"),
+        _assistant_end([{"type": "text", "text": "two"}]),
+    )
+    assert printed == "one\n\ntwo"
+
+
 def test_thinking_emits_one_block_and_is_not_rendered_as_text() -> None:
     sink = PiStreamSink()
     printed = _consume(

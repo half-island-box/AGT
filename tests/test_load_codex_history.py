@@ -9,14 +9,18 @@ scan (monkeypatched home), plus the provider dispatcher.
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
+from agt.agent_history import Message
 from agt.agent_history import (
     _extract_codex_message,
     _flatten_codex_content,
+    _group_assistant_history,
     _parse_codex_jsonl,
     _parse_timestamp,
     load_codex_history,
+    load_session_title,
     load_history,
 )
 
@@ -51,7 +55,22 @@ def test_flatten_codex_content_blocks() -> None:
         {"type": "input_text", "text": "hello"},
         {"type": "input_text", "text": "world"},
     ]
-    assert _flatten_codex_content(blocks) == "hello\nworld"
+    assert _flatten_codex_content(blocks) == "hello\n\nworld"
+
+
+def test_history_groups_consecutive_codex_assistant_records() -> None:
+    messages = _group_assistant_history(
+        [
+            Message(role="user", content="q"),
+            Message(role="assistant", content="first"),
+            Message(role="assistant", content="\nsecond"),
+        ],
+        "codex",
+    )
+    assert [(m.role, m.content) for m in messages] == [
+        ("user", "q"),
+        ("assistant", "first\n\nsecond"),
+    ]
 
 
 def test_flatten_codex_content_string_and_none() -> None:
@@ -112,6 +131,27 @@ def test_parse_timestamp_iso_and_numeric() -> None:
     assert _parse_timestamp(1724000000.0) == 1724000000.0
     assert _parse_timestamp("not-a-time") is None
     assert _parse_timestamp(None) is None
+
+
+def test_load_codex_session_title_from_state_db(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    db = home / ".codex" / "state_5.sqlite"
+    db.parent.mkdir(parents=True)
+    connection = sqlite3.connect(db)
+    connection.execute(
+        "CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT NOT NULL)"
+    )
+    connection.execute(
+        "INSERT INTO threads VALUES (?, ?)", (SESSION_ID, "Codex native title")
+    )
+    connection.commit()
+    connection.close()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+
+    assert load_session_title("codex", SESSION_ID) == "Codex native title"
 
 
 def test_load_codex_history_missing_dir(monkeypatch, tmp_path: Path) -> None:

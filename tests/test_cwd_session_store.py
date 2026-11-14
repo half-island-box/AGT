@@ -201,3 +201,19 @@ def test_entry_as_dict_round_trip() -> None:
     d = e.as_dict()
     assert d["session_id"] == "s1"
     assert d["first_prompt"] == "hi"
+
+
+def test_provider_title_is_persisted_and_refreshed(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.record(
+        session_id="s1", task_id="t1", first_prompt="long first prompt",
+        turn_count=1,
+    )
+    store.record(
+        session_id="s1", task_id="t2", first_prompt="long first prompt",
+        turn_count=2, title="Native title",
+    )
+
+    reloaded = CwdSessionStore.load(tmp_path / "proj")
+    assert reloaded.get("s1").title == "Native title"
+    assert reloaded.get("s1").first_prompt == "long first prompt"

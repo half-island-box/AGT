@@ -94,6 +94,41 @@ def load_claude_history(session_id: str) -> list[Message]:
     return []
 
 
+def _claude_ai_title(path: Path) -> str | None:
+    """Return the last AI-generated title in a Claude Code transcript."""
+    title: str | None = None
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for raw_line in handle:
+                try:
+                    obj = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(obj, dict) or obj.get("type") != "ai-title":
+                    continue
+                candidate = obj.get("aiTitle")
+                if isinstance(candidate, str) and candidate.strip():
+                    title = candidate.strip()
+    except OSError:
+        return None
+    return title
+
+
+def load_claude_session_title(session_id: str) -> str | None:
+    """Read Claude Code's AI-generated title for ``session_id``."""
+    _validate_session_id(session_id)
+    projects_root = Path.home() / ".claude" / "projects"
+    if not projects_root.is_dir():
+        return None
+    for project_dir in projects_root.iterdir():
+        if not project_dir.is_dir():
+            continue
+        candidate = project_dir / f"{session_id}.jsonl"
+        if candidate.is_file():
+            return _claude_ai_title(candidate)
+    return None
+
+
 def _parse_jsonl(path: Path) -> list[Message]:
     """Parse a Claude Code ``.jsonl`` transcript into ``Message`` objects.
 
@@ -184,9 +219,78 @@ def _flatten_content(content: object | None) -> str | None:
                 text = block.get("text")
                 if isinstance(text, str):
                     chunks.append(text)
-        joined = "\n".join(chunks)
+        joined = _join_visible_chunks(chunks, paragraph_boundaries=False)
         return joined or None
     return None
+
+
+def _newline_prefix_length(value: str) -> int:
+    """Return the number of leading newlines in ``value``."""
+    count = 0
+    for char in value:
+        if char != "\n":
+            break
+        count += 1
+    return count
+
+
+def _newline_suffix_length(value: str) -> int:
+    """Return the number of trailing newlines in ``value``."""
+    return _newline_prefix_length(value[::-1])
+
+
+def _join_visible_chunks(chunks: list[str], *, paragraph_boundaries: bool) -> str:
+    """Join user-visible text chunks the way the streaming sinks emitted them.
+
+    Some providers persist each logical text block as a separate item while
+    their live stream simply concatenates those chunks. Others use a block as
+    a message boundary and the sinks normalize that boundary to one Markdown
+    paragraph. Reproducing that distinction here keeps reloaded history as
+    close as possible to the text the user saw while the turn was streaming.
+    """
+    result = ""
+    for chunk in chunks:
+        if not result:
+            result = chunk
+            continue
+        if not paragraph_boundaries:
+            result += chunk
+            continue
+        trailing = _newline_suffix_length(result)
+        leading = _newline_prefix_length(chunk)
+        missing = max(0, 2 - trailing - leading)
+        result += "\n" * missing + chunk
+    return result
+
+
+def _group_assistant_history(messages: list[Message], provider: str) -> list[Message]:
+    """Merge consecutive assistant records into the turn shown while streaming.
+
+    Provider transcripts often contain several assistant records for one user
+    turn (especially Claude Code, which emits one JSONL record per content
+    block). The live chat renders their text as one assistant response; the
+    history API must preserve that grouping instead of returning each record
+    as a separate visual reply.
+    """
+    grouped: list[Message] = []
+    for message in messages:
+        previous = grouped[-1] if grouped else None
+        if (
+            message.role == "assistant"
+            and previous is not None
+            and previous.role == "assistant"
+        ):
+            if provider == "claude":
+                previous.content += message.content
+            else:
+                previous.content = _join_visible_chunks(
+                    [previous.content, message.content],
+                    paragraph_boundaries=True,
+                )
+            previous.timestamp = previous.timestamp or message.timestamp
+            continue
+        grouped.append(message)
+    return grouped
 
 
 def load_codex_history(session_id: str) -> list[Message]:
@@ -290,7 +394,8 @@ def _flatten_codex_content(content: object | None) -> str | None:
                 text = block.get("text")
                 if isinstance(text, str):
                     chunks.append(text)
-        return "\n".join(chunks) or None
+        joined = _join_visible_chunks(chunks, paragraph_boundaries=True)
+        return joined or None
     return None
 
 
@@ -426,7 +531,7 @@ def _flatten_opencode_content(content: object) -> str | None:
         text = block.get("text")
         if isinstance(text, str):
             chunks.append(text)
-    joined = "\n".join(chunks)
+    joined = _join_visible_chunks(chunks, paragraph_boundaries=True)
     return joined or None
 
 
@@ -713,7 +818,7 @@ def _flatten_pi_content(content: object | None) -> str | None:
         text = block.get("text")
         if isinstance(text, str):
             chunks.append(text)
-    joined = "\n".join(chunks)
+    joined = _join_visible_chunks(chunks, paragraph_boundaries=False)
     return joined or None
 
 
@@ -724,19 +829,93 @@ def _pi_message_timestamp(value: object) -> float | None:
     return float(value) / 1000.0
 
 
-def load_history(provider: str, session_id: str) -> list[Message]:
-    """Provider-dispatched history loader."""
-    if provider == "claude":
-        return load_claude_history(session_id)
-    if provider == "codex":
-        return load_codex_history(session_id)
-    if provider == "opencode":
-        return load_opencode_history(session_id)
-    if provider == "pi":
-        return load_pi_history(session_id)
-    raise NotImplementedError(
-        f"history reader for provider '{provider}' is not yet implemented"
+def load_codex_session_title(session_id: str) -> str | None:
+    """Read Codex's display title for ``session_id`` from local state."""
+    _validate_session_id(session_id)
+    root = Path.home() / ".codex"
+    if not root.is_dir():
+        return None
+    databases = sorted(
+        root.glob("state_*.sqlite"),
+        key=_mtime,
+        reverse=True,
     )
+    for db_path in databases:
+        try:
+            uri = f"{db_path.resolve(strict=False).as_uri()}?mode=ro"
+            connection = sqlite3.connect(
+                uri,
+                uri=True,
+                timeout=_OPENCODE_DB_TIMEOUT_SECONDS,
+            )
+            try:
+                row = connection.execute(
+                    "SELECT title FROM threads WHERE id = ? LIMIT 1",
+                    (session_id,),
+                ).fetchone()
+            finally:
+                connection.close()
+        except (OSError, sqlite3.Error):
+            continue
+        if row is not None and isinstance(row[0], str) and row[0].strip():
+            return row[0].strip()
+    return None
+
+
+def load_opencode_session_title(session_id: str) -> str | None:
+    """Read OpenCode's generated session title, if one exists yet."""
+    _validate_session_id(session_id)
+    db_path = _opencode_db_path()
+    if not db_path.is_file():
+        return None
+    try:
+        connection = _open_opencode_readonly(db_path)
+        try:
+            row = connection.execute(
+                "SELECT title FROM session_v2 WHERE id = ? LIMIT 1",
+                (session_id,),
+            ).fetchone()
+        finally:
+            connection.close()
+    except (OSError, sqlite3.Error):
+        return None
+    if row is not None and isinstance(row[0], str) and row[0].strip():
+        return row[0].strip()
+    return None
+
+
+def load_session_title(provider: str, session_id: str) -> str | None:
+    """Return a provider-native conversation title when available.
+
+    Title stores are best-effort metadata caches. A missing store, table,
+    row, or title is always ``None``; it never invalidates the session or
+    affects execution. Pi currently has no stable title field, so it also
+    returns ``None``.
+    """
+    if provider == "claude":
+        return load_claude_session_title(session_id)
+    if provider == "codex":
+        return load_codex_session_title(session_id)
+    if provider == "opencode":
+        return load_opencode_session_title(session_id)
+    return None
+
+
+def load_history(provider: str, session_id: str) -> list[Message]:
+    """Load and normalize provider history for chat replay."""
+    if provider == "claude":
+        messages = load_claude_history(session_id)
+    elif provider == "codex":
+        messages = load_codex_history(session_id)
+    elif provider == "opencode":
+        messages = load_opencode_history(session_id)
+    elif provider == "pi":
+        messages = load_pi_history(session_id)
+    else:
+        raise NotImplementedError(
+            f"history reader for provider '{provider}' is not yet implemented"
+        )
+    return _group_assistant_history(messages, provider)
 
 
 def find_claude_session_files(session_id: str) -> list[Path]:
@@ -825,9 +1004,13 @@ def delete_provider_session(provider: str, session_id: str) -> ProviderSessionDe
 __all__ = [
     "Message",
     "load_history",
+    "load_session_title",
     "load_claude_history",
+    "load_claude_session_title",
     "load_codex_history",
+    "load_codex_session_title",
     "load_opencode_history",
+    "load_opencode_session_title",
     "load_pi_history",
     "ProviderSessionDeleteResult",
     "find_provider_session_files",

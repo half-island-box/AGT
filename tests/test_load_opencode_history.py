@@ -20,6 +20,7 @@ from agt.agent_history import (
     _opencode_timestamp,
     load_history,
     load_opencode_history,
+    load_session_title,
 )
 
 SESSION_ID = "ses_e69fde1e8ffe76XWze9fJXAuJ7"
@@ -82,6 +83,27 @@ def _text(text: str) -> dict:
     return {"type": "text", "text": text}
 
 
+def test_load_opencode_session_title(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = tmp_path / "opencode.db"
+    connection = sqlite3.connect(db)
+    connection.execute(
+        "CREATE TABLE session_v2 (id TEXT PRIMARY KEY, title TEXT)"
+    )
+    connection.execute(
+        "INSERT INTO session_v2 VALUES (?, ?)",
+        (SESSION_ID, "OpenCode native title"),
+    )
+    connection.commit()
+    connection.close()
+    monkeypatch.setenv("AGT_OPENCODE_DB", str(db))
+
+    assert load_session_title("opencode", SESSION_ID) == "OpenCode native title"
+    assert load_session_title("pi", SESSION_ID) is None
+
+
 def test_loads_user_and_assistant_in_seq_order(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -130,7 +152,7 @@ def test_assistant_keeps_only_text_blocks(
 
     history = load_opencode_history(SESSION_ID)
 
-    assert [m.content for m in history] == ["first\nsecond"]
+    assert [m.content for m in history] == ["first\n\nsecond"]
 
 
 def test_assistant_without_text_is_skipped(

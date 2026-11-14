@@ -41,6 +41,17 @@ def test_text_parts_print_live_with_paragraph_separator() -> None:
     assert sink.finalize().text == "Hello\n\nWorld"
 
 
+def test_existing_paragraph_boundary_is_not_doubled() -> None:
+    sink = OpenCodeStreamSink()
+    printed = _consume(
+        sink,
+        _text("p1", "Hello\n\n"),
+        _text("p2", "World"),
+    )
+    assert printed == "Hello\n\nWorld"
+    assert sink.finalize().text == "Hello\n\nWorld"
+
+
 def test_replayed_text_part_is_not_duplicated() -> None:
     """Reconcile may re-emit a full part; only the unseen suffix is new."""
     sink = OpenCodeStreamSink()

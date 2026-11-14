@@ -144,7 +144,7 @@ def test_sop_validate_endpoint_remains_browser_safe(tmp_path) -> None:
         asyncio.run(engine.dispose())
 
 
-def test_chat_runs_use_immutable_first_prompt_as_title(tmp_path) -> None:
+def test_chat_runs_prefer_provider_title_over_first_prompt(tmp_path) -> None:
     app, engine, workspace = _app(tmp_path)
     factory = make_session_factory(engine)
     first_prompt = "first question\nwith additional detail"
@@ -161,6 +161,13 @@ def test_chat_runs_use_immutable_first_prompt_as_title(tmp_path) -> None:
             assert created.status_code == 201, created.text
             job_id = created.json()["job_id"]
 
+            initial_list = client.get(
+                "/api/runs",
+                params={"mode": "chat", "cwd": str(workspace.resolve())},
+            )
+            assert initial_list.status_code == 200, initial_list.text
+            assert initial_list.json()["runs"][0]["title"] == first_prompt
+
             async def _seed_second_turn_and_session() -> None:
                 from agt.server.models import JobModel, SessionModel
                 from agt.server.services.job_service import append_step
@@ -169,7 +176,7 @@ def test_chat_runs_use_immutable_first_prompt_as_title(tmp_path) -> None:
                     job = await session.get(JobModel, job_id)
                     assert job is not None
                     assert job.first_prompt == first_prompt
-
+                    job.title = "Provider native title"
                     job.status = "waiting_input"
                     await append_step(session, job_id, "second question")
                     session.add(
@@ -194,6 +201,6 @@ def test_chat_runs_use_immutable_first_prompt_as_title(tmp_path) -> None:
             assert listed.status_code == 200, listed.text
             runs = listed.json()["runs"]
             assert len(runs) == 1
-            assert runs[0]["title"] == first_prompt
+            assert runs[0]["title"] == "Provider native title"
     finally:
         asyncio.run(engine.dispose())

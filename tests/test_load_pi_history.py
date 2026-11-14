@@ -20,6 +20,7 @@ from agt.agent_history import (
     find_provider_session_files,
     load_history,
     load_pi_history,
+    _flatten_pi_content,
     pi_sessions_root,
 )
 
@@ -236,3 +237,8 @@ def test_session_root_env_precedence(
 
     monkeypatch.delenv("PI_CODING_AGENT_DIR")
     assert pi_sessions_root() == Path.home() / ".pi" / "agent" / "sessions"
+
+
+def test_flatten_pi_content_joins_like_live_stream() -> None:
+    blocks = [{"type": "text", "text": "first"}, {"type": "text", "text": "second"}]
+    assert _flatten_pi_content(blocks) == "firstsecond"

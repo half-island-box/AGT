@@ -604,3 +604,18 @@ def test_codex_sink_separates_successive_agent_messages():
     sink.consume({"method": "item/agentMessage/delta", "params": {"itemId": "m2", "delta": "B"}})
     result = sink.finalize()
     assert result.text == "A\n\nB"
+
+
+def test_codex_sink_does_not_stack_paragraph_breaks():
+    """A provider-provided paragraph boundary is not doubled."""
+    sink, _ = _start_codex_sink()
+    sink.consume(
+        {"method": "item/agentMessage/delta", "params": {"itemId": "m1", "delta": "A"}}
+    )
+    sink.consume(
+        {"method": "item/agentMessage/delta", "params": {"itemId": "m1", "delta": "\n\n"}}
+    )
+    sink.consume(
+        {"method": "item/agentMessage/delta", "params": {"itemId": "m2", "delta": "B"}}
+    )
+    assert sink.finalize().text == "A\n\nB"

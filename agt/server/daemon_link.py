@@ -785,6 +785,7 @@ class DaemonLink:
                     status=str(body["status"]),
                     session_id=body.get("session_id"),
                     resume_rejected=bool(body.get("resume_rejected", False)),
+                    session_title=body.get("session_title"),
                     outcome=body.get("outcome"),
 
                     artifacts=_parse_artifact_items(body.get("artifacts")),

@@ -67,6 +67,8 @@ class SessionEntry:
     task_id: str
     turn_count: int
     first_prompt: str = ""
+    # Optional provider-native title; ``first_prompt`` remains the fallback.
+    title: str | None = None
     provider: str = "claude"
     # The identity DID (if any) this session was started with. ``None`` =
     # no identity (legacy / identity-less chat). Stamped at first record;
@@ -127,6 +129,7 @@ class CwdSessionStore:
         first_prompt: str,
         turn_count: int,
         identity_did: str | None = None,
+        title: str | None = None,
     ) -> None:
         """Add a new entry or update an existing one matched by
         ``session_id``. Bumps ``last_seen_at`` and ``turn_count``;
@@ -146,6 +149,8 @@ class CwdSessionStore:
             existing.turn_count = turn_count
             # task_id can change across resumes — track the latest
             existing.task_id = task_id
+            if title:
+                existing.title = title
         else:
             self.sessions.append(
                 SessionEntry(
@@ -155,6 +160,7 @@ class CwdSessionStore:
                     task_id=task_id,
                     turn_count=turn_count,
                     first_prompt=first_prompt,
+                    title=title,
                     provider=self.provider,
                     identity_did=identity_did,
                     cwd=str(self.cwd),
@@ -343,6 +349,7 @@ def _entry_from_dict(d: dict, *, default_provider: str = "claude") -> SessionEnt
         task_id=str(d.get("task_id", "")),
         turn_count=int(d.get("turn_count", 0) or 0),
         first_prompt=str(d.get("first_prompt", "") or ""),
+        title=d.get("title"),
         identity_did=d.get("identity_did"),
         cwd=str(d.get("cwd") or ""),
     )

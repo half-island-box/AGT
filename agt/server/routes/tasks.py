@@ -304,6 +304,7 @@ async def report_task(
             status=payload.status,
             session_id=payload.session_id,
             resume_rejected=payload.resume_rejected,
+            session_title=payload.session_title,
             outcome=payload.outcome,
             # Phase 2: declared deliverables ride the report payload.
             artifacts=payload.artifacts,

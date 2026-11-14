@@ -239,6 +239,41 @@ class StreamingSink(ABC):
         self._text_len += len(text)
         print(text, end="", flush=True)
 
+    def _newline_runs(self, text: str, *, reverse: bool) -> int:
+        """Count the leading (or trailing) newline run in ``text``."""
+        count = 0
+        iterable = reversed(text) if reverse else text
+        for char in iterable:
+            if char != "\n":
+                break
+            count += 1
+        return count
+
+    def _emit_text_delta_separated(self, text: str) -> None:
+        """Emit text after normalizing the boundary to one paragraph.
+
+        Provider streams often delimit logical messages or parts, while the
+        text itself can already contain Markdown paragraph breaks. Add only
+        the newlines needed to reach one blank line at the boundary rather
+        than blindly appending ``"\\n\\n"``.
+        """
+        if self.accumulated_text and text:
+            trailing = 0
+            still_in_run = True
+            for piece in reversed(self.accumulated_text):
+                if not still_in_run:
+                    break
+                for char in reversed(piece):
+                    if char != "\n":
+                        still_in_run = False
+                        break
+                    trailing += 1
+            leading = self._newline_runs(text, reverse=False)
+            missing = max(0, 2 - trailing - leading)
+            if missing:
+                self.on_text_delta("\n" * missing)
+        self.on_text_delta(text)
+
     @abstractmethod
     def finalize(self) -> SinkResult: ...
 
@@ -1034,9 +1069,13 @@ class CodexAppServerSink(StreamingSink):
         elif item_type == "agentMessage":
             text = item.get("text")
             if isinstance(text, str) and text and item_id not in self._text_items:
+                was_emitted = self._emitted_text
                 self._text_items.add(item_id)
                 self._begin_message_text()
-                self.on_text_delta(text)
+                if was_emitted:
+                    self._emit_text_delta_separated(text)
+                else:
+                    self.on_text_delta(text)
 
     def _complete_reasoning(self, item: dict[str, Any]) -> None:
         item_id = item["id"]
@@ -1082,15 +1121,22 @@ class CodexAppServerSink(StreamingSink):
         if not isinstance(delta, str) or not delta:
             return
         item_id = params.get("itemId")
-        if isinstance(item_id, str) and item_id not in self._text_items:
-            self._text_items.add(item_id)
+        new_item_id = (
+            item_id
+            if isinstance(item_id, str) and item_id not in self._text_items
+            else None
+        )
+        was_emitted = self._emitted_text
+        if new_item_id is not None:
+            self._text_items.add(new_item_id)
             self._begin_message_text()
-        self.on_text_delta(delta)
+        if new_item_id is not None and was_emitted:
+            self._emit_text_delta_separated(delta)
+        else:
+            self.on_text_delta(delta)
 
     def _begin_message_text(self) -> None:
-        """Insert a paragraph break between successive agent messages."""
-        if self._emitted_text:
-            self.on_text_delta("\n\n")
+        """Mark that this stream has emitted user-visible agent text."""
         self._emitted_text = True
 
     def _on_reasoning_delta(self, params: dict[str, Any], channel: str) -> None:
@@ -1391,9 +1437,10 @@ class OpenCodeStreamSink(StreamingSink):
             return
         self._text_parts[part_id] = previous + text
         if not previous and self._emitted_text:
-            # Separate distinct message parts; never split a suffixed part.
-            self.on_text_delta("\n\n")
-        self.on_text_delta(text)
+            # Normalize the boundary between distinct message parts.
+            self._emit_text_delta_separated(text)
+        else:
+            self.on_text_delta(text)
         self._emitted_text = True
 
     def _consume_reasoning(self, part: dict[str, Any]) -> None:
@@ -1726,13 +1773,15 @@ class PiStreamSink(StreamingSink):
     # ── Text ────────────────────────────────────────────────────
 
     def _append_text(self, key: str, text: str) -> None:
-        if not self._text_started_this_message:
-            if self._emitted_text:
-                self.on_text_delta("\n\n")
-            self._text_started_this_message = True
+        is_new_message_text = not self._text_started_this_message
+        was_emitted = self._emitted_text
+        self._text_started_this_message = True
         self._emitted_text = True
         self._text_blocks[key] = self._text_blocks.get(key, "") + text
-        self.on_text_delta(text)
+        if is_new_message_text and was_emitted:
+            self._emit_text_delta_separated(text)
+        else:
+            self.on_text_delta(text)
 
     def _reconcile_text(self, key: str, content: str) -> None:
         emitted = self._text_blocks.get(key, "")

@@ -255,6 +255,7 @@ async def record_step_result_for_daemon(
     status: str,
     session_id: str | None,
     resume_rejected: bool,
+    session_title: str | None = None,
     outcome: str | None = None,
     artifacts: list | None = None,
     outcome_payload: dict | None = None,
@@ -282,6 +283,12 @@ async def record_step_result_for_daemon(
         if status == "cancelled" and step.job_id is not None:
             now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
             parent_job = await db.get(JobModel, step.job_id)
+            if (
+                session_title
+                and parent_job is not None
+                and parent_job.job_type == "chat"
+            ):
+                parent_job.title = session_title
             existing = (
                 await db.execute(
                     select(SessionModel).where(
@@ -390,6 +397,13 @@ async def record_step_result_for_daemon(
 
     ctx = step.identity_did or ""
     job_id = step.job_id
+    title_job = await db.get(JobModel, job_id) if job_id is not None else None
+    if (
+        session_title
+        and title_job is not None
+        and title_job.job_type == "chat"
+    ):
+        title_job.title = session_title
 
     if resume_rejected:
         if job_id is not None:

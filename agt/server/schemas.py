@@ -194,6 +194,9 @@ class ReportRequest(BaseModel):
     duration: float
     status: str  # "completed" | "failed" | "timeout" | "cancelled"
     session_id: str | None = None
+    # Optional provider-native conversation title read by the daemon after
+    # the CLI exits. Absent on legacy daemons and providers without titles.
+    session_title: str | None = None
     resume_rejected: bool = False
     # Phase 1: structured outcome reported by the daemon. Server derives
     # from exit_code when omitted for backward compatibility.

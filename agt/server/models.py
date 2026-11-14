@@ -97,6 +97,10 @@ class JobModel(Base):
     # conversation. NULL on non-chat Jobs and legacy rows whose original
     # prompt could not be recovered.
     first_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Optional provider-native AI title. ``first_prompt`` remains immutable
+    # as the pre-session fallback and audit copy; this field is refreshed
+    # whenever a daemon reports a newer provider title.
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Denormalized from the first Step for convenient querying.
     provider: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     identity_did: Mapped[str | None] = mapped_column(

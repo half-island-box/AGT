@@ -139,6 +139,7 @@ async def report_task_ws_first(
     status: str,
     session_id: str | None,
     resume_rejected: bool,
+    session_title: str | None = None,
     artifacts: list | None = None,
     outcome: str | None = None,
     outcome_payload: dict | None = None,
@@ -177,6 +178,8 @@ async def report_task_ws_first(
         "session_id": session_id,
         "resume_rejected": resume_rejected,
     }
+    if session_title:
+        body["session_title"] = session_title
     if artifacts:
         # Phase 2: declared deliverables ride the report body. Omitted
         # entirely for legacy scans with no artifacts (older servers

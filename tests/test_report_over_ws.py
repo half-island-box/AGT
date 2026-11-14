@@ -85,12 +85,20 @@ def _fresh_db():
     return engine, cfg
 
 
-async def _seed_task(factory, task_id: str, daemon_id: str | None) -> None:
+async def _seed_task(
+    factory,
+    task_id: str,
+    daemon_id: str | None,
+    *,
+    job_type: str = "task",
+    first_prompt: str | None = None,
+) -> None:
     now = _utcnow()
     async with session_scope(factory) as db:
         db.add(JobModel(
-            job_id=task_id, status="running", job_type="task",
-            provider="claude", created_at=now, updated_at=now,
+            job_id=task_id, status="running", job_type=job_type,
+            provider="claude", first_prompt=first_prompt,
+            created_at=now, updated_at=now,
         ))
         db.add(StepModel(
             step_id=task_id, job_id=task_id, provider="claude", prompt="hi",
@@ -126,6 +134,42 @@ def test_service_writes_result_to_task() -> None:
         assert row.duration == 1.23
         assert row.session_id == "sess-1"
         assert row.updated_at != _utcnow() or True  # touched; value sanity check skipped
+
+    asyncio.run(_run())
+    asyncio.run(engine.dispose())
+
+
+def test_service_updates_chat_job_provider_title() -> None:
+    engine, _ = _fresh_db()
+    factory = make_session_factory(engine)
+
+    async def _run() -> None:
+        await _seed_task(
+            factory,
+            "chat-title",
+            "d-title",
+            job_type="chat",
+            first_prompt="long first prompt",
+        )
+        async with session_scope(factory) as db:
+            await record_step_result_for_daemon(
+                db,
+                daemon_id="d-title",
+                step_id="chat-title",
+                exit_code=0,
+                stdout="ok",
+                stderr="",
+                duration=1.0,
+                status="completed",
+                session_id="sess-title",
+                resume_rejected=False,
+                session_title="Provider native title",
+            )
+        async with session_scope(factory) as db:
+            job = await db.get(JobModel, "chat-title")
+            assert job is not None
+            assert job.first_prompt == "long first prompt"
+            assert job.title == "Provider native title"
 
     asyncio.run(_run())
     asyncio.run(engine.dispose())
@@ -467,10 +511,12 @@ class _FakeWsRpcLink:
     ) -> None:
         self._result = result or {"recorded": True}
         self._raise = raise_exc
+        self.calls: list[dict] = []
         self.supports_rpc_v1 = supports_rpc_v1
 
     async def call(self, method: str, body: dict, timeout_ms: int) -> dict:
         assert method == "tasks.report"
+        self.calls.append(body)
         assert timeout_ms == 5000
         if self._raise is not None:
             raise self._raise
@@ -506,6 +552,26 @@ def test_report_ws_first_happy_path_skips_http() -> None:
             resume_rejected=False,
         )
         assert ok is True
+        assert http.calls == []
+
+    asyncio.run(_run())
+
+
+def test_report_ws_first_forwards_provider_title() -> None:
+    from agt.daemon.ws_claim import ClaimStateMachine, report_task_ws_first
+
+    async def _run() -> None:
+        wsrpc = _FakeWsRpcLink()
+        http = _FakeHttpClient()
+        ok = await report_task_ws_first(
+            wsrpc=wsrpc, http_client=http, state=ClaimStateMachine(),
+            task_id="t1", exit_code=0, stdout="x", stderr="",
+            duration=0.1, status="completed", session_id="s",
+            resume_rejected=False, session_title="Native title",
+        )
+
+        assert ok is True
+        assert wsrpc.calls[0]["session_title"] == "Native title"
         assert http.calls == []
 
     asyncio.run(_run())

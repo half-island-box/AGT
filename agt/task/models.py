@@ -74,6 +74,9 @@ class TaskResult:
     # ── Session-related fields ─────────────────────────────────
     session_id: str | None = None  # Session id produced/used by this run
     resume_rejected: bool = False  # True if resume was attempted but refused
+    # Provider-native conversation title, when the daemon can read one
+    # after the CLI exits. Pure display metadata; None is normal.
+    session_title: str | None = None
     # Phase 2: declared deliverables scanned from ``.agt/outputs/``
     # post-exit. Empty for legacy behavior (no scan / no outputs dir
     # content). Registration is a server-side concern; local runs simply

@@ -306,6 +306,7 @@ class ServerClient:
         duration: float,
         status: str,
         session_id: str | None = None,
+        session_title: str | None = None,
         resume_rejected: bool = False,
         outcome: str | None = None,
         artifacts: list[dict[str, Any]] | None = None,
@@ -326,6 +327,8 @@ class ServerClient:
             "resume_rejected": resume_rejected,
             "outcome": outcome,
         }
+        if session_title:
+            payload["session_title"] = session_title
         if artifacts:
             # Phase 2: declared deliverables. Omitted (not []) when
             # empty so legacy payloads stay byte-identical.
